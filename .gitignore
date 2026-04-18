@@ -1,0 +1,12 @@
+Logs/
+__pycache__/
+*.pyc
+.venv/
+.env
+*.json
+!titan_config.json
+!titan_config_*.json
+!titan_whales_*.json
+!titan_state_*.json
+*.txt
+!requirements.txt

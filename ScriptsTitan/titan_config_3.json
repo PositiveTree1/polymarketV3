@@ -1,0 +1,352 @@
+{
+    "_readme": "TITAN CONFIG \u2014 edit values here, click RELOAD CONFIG in UI. Changes take effect next cycle.",
+    "bankroll_and_sizing": {
+        "_group": "\ud83d\udcb0 Bankroll & Bet Sizing",
+        "BANKROLL_START": {
+            "value": 20.0,
+            "_description": "Starting paper bankroll in USD."
+        },
+        "MIN_BET": {
+            "value": 1.0,
+            "_description": "Minimum bet size in USD. Raised from $0.50 \u2014 sub-$1 bets lose to friction."
+        },
+        "MAX_BET_ABS": {
+            "value": 5.0,
+            "_description": "Hard cap on any single bet in USD."
+        },
+        "MAX_BET_PCT": {
+            "value": 0.05,
+            "_description": "Max bet as fraction of current bankroll."
+        },
+        "KELLY_FRACTION": {
+            "value": 0.02,
+            "_description": "Fraction of full Kelly (0.08 = 1/12th Kelly, very conservative)."
+        }
+    },
+    "fees": {
+        "_group": "\ud83c\udfe6 Fees",
+        "TAKER_FEE_RATE": {
+            "value": 0.0,
+            "_description": "Polymarket removed taker fees. Set to 0."
+        }
+    },
+    "trade_sourcing": {
+        "_group": "\ud83d\udce1 Trade Sourcing & Polling",
+        "MIN_TRADE_CASH": {
+            "value": 100,
+            "_description": "Min USD for public feed trades. Raised from $50 to filter noise."
+        },
+        "MAX_TRADES_FETCH": {
+            "value": 500,
+            "_description": "Max public feed trades per cycle."
+        },
+        "HOT_HOURS": {
+            "value": 2,
+            "_description": "Trades within this many hours are HOT."
+        },
+        "WARM_HOURS": {
+            "value": 6,
+            "_description": "Trades older than HOT but newer than this are WARM."
+        },
+        "CYCLE_SECONDS": {
+            "value": 15,
+            "_description": "Seconds between analysis cycles."
+        }
+    },
+    "hft_polling": {
+        "_group": "\u26a1 HFT Mirror Polling",
+        "HFT_POLL_LIMIT": {
+            "value": 50,
+            "_description": "Trades to fetch per HFT wallet per cycle."
+        },
+        "HFT_MIN_TRADES_PER_HOUR": {
+            "value": 100,
+            "_description": "A wallet must average this many trades/hour to be classified HFT. Raised from 20 to 100 to avoid mis-classifying sports bots like swisstony (454 TPH but $483 avg bet = not micro-HFT)."
+        },
+        "HFT_MIRROR_DELAY_MAX_SECONDS": {
+            "value": 30,
+            "_description": "Only mirror HFT trades placed within this many seconds. Tightened from 90 \u2014 stale HFT signals are worthless."
+        },
+        "HFT_MIN_CASH_PER_TRADE": {
+            "value": 10,
+            "_description": "Min USD per trade for HFT wallets. Raised from $3 to $10 to filter genuine micro-HFT bot noise."
+        }
+    },
+    "elite_polling": {
+        "_group": "\ud83d\udc33 Elite Whale Polling",
+        "ELITE_POLL_LIMIT": {
+            "value": 50,
+            "_description": "Trades to fetch per elite wallet per cycle."
+        },
+        "ELITE_POLL_MIN_CASH": {
+            "value": 25,
+            "_description": "Min USD per trade when polling elite wallets."
+        },
+        "ELITE_TRADE_MIN_FRACTION": {
+            "value": 0.05,
+            "_description": "Elite trade must be >= this fraction of their avg_bet. 0.05 = 5% (catches HF bots)."
+        }
+    },
+    "signal_quality": {
+        "_group": "\ud83c\udfaf Signal Scoring",
+        "MAX_SIGNAL_AGE_H": {
+            "value": 0.5,
+            "_description": "Max age in hours for a signal to be tradeable. Tightened from 2h \u2014 stale signals lose edge."
+        },
+        "MIN_SCORE": {
+            "value": 50,
+            "_description": "Min score to appear. Raised from 40 to 50 to cut noise."
+        },
+        "STRONG_SCORE": {
+            "value": 55,
+            "_description": "Score threshold for STRONG tier. Was same as MIN_SCORE (meaningless). Now properly tiered."
+        },
+        "ALERT_SCORE": {
+            "value": 65,
+            "_description": "Score threshold for ALERT tier (auto-traded). Raised from 55."
+        },
+        "MIN_CONFLUENCE": {
+            "value": 1,
+            "_description": "Min verified whales buying same side."
+        }
+    },
+    "drift_gates": {
+        "_group": "\ud83d\udcd0 Price Drift Gates",
+        "MAX_DRIFT": {
+            "value": 0.1,
+            "_description": "Skip if current price > whale avg entry by this much. Tightened from 20% to 10% \u2014 large drift means edge is gone."
+        },
+        "MIN_DRIFT": {
+            "value": -0.15,
+            "_description": "Skip if current price < whale avg entry by this much. Tightened from -25% to -15% \u2014 large dip means whale was wrong."
+        },
+        "MAX_ENTRY_SLIPPAGE": {
+            "value": 0.06,
+            "_description": "Max slippage above elite entry. Tightened from 12% to 6% \u2014 if price moved 6%+ since whale bought, edge is eaten."
+        },
+        "STALE_LOSER_AGE_H": {
+            "value": 1.5,
+            "_description": "If signal this old AND losing, skip."
+        },
+        "STALE_LOSER_DRIFT": {
+            "value": -0.12,
+            "_description": "Drift threshold for stale loser check."
+        }
+    },
+    "market_quality": {
+        "_group": "\ud83d\udcca Market Quality",
+        "MIN_LIQUIDITY": {
+            "value": 5000,
+            "_description": "Min USD liquidity. Raised from $200 \u2014 low liquidity means our bet moves the price."
+        },
+        "MIN_VOLUME": {
+            "value": 5000,
+            "_description": "Min USD volume. Raised from $300 \u2014 low volume means illiquid market."
+        },
+        "MIN_HOURS_LEFT": {
+            "value": 0.5,
+            "_description": "Skip markets closing in fewer hours than this."
+        }
+    },
+    "wallet_quality": {
+        "_group": "\ud83d\udc64 Wallet Quality",
+        "MIN_WIN_RATE_WATCH": {
+            "value": 0.52,
+            "_description": "Min win rate to be watchable."
+        },
+        "MIN_WIN_RATE_VER": {
+            "value": 0.55,
+            "_description": "Min win rate to be verified."
+        },
+        "MIN_RESOLVED_BETS": {
+            "value": 5,
+            "_description": "Min resolved bets to be scored."
+        },
+        "MIN_PNL": {
+            "value": 0,
+            "_description": "Min lifetime PnL to be watchable."
+        },
+        "WILSON_MIN_WATCH": {
+            "value": 0.44,
+            "_description": "Wilson lower bound min to be watchable."
+        },
+        "WILSON_MIN_VER": {
+            "value": 0.48,
+            "_description": "Wilson lower bound min to be verified."
+        },
+        "MIN_AVG_PROFIT_PER_TRADE": {
+            "value": 1.0,
+            "_description": "Min avg profit per trade USD."
+        },
+        "MIN_AVG_BET_SIZE": {
+            "value": 5.0,
+            "_description": "Min avg bet size USD. Low to include HFT bots."
+        }
+    },
+    "elite_thresholds": {
+        "_group": "\ud83d\udd25 Elite Thresholds",
+        "ELITE_MIN_PNL": {
+            "value": 40000,
+            "_description": "Elite requires lifetime PnL >= this USD."
+        },
+        "ELITE_MIN_PORT": {
+            "value": 90000,
+            "_description": "Elite requires portfolio proxy >= this USD."
+        },
+        "ELITE_MIN_SCORE": {
+            "value": 0.7,
+            "_description": "Elite requires composite score >= this."
+        },
+        "ELITE_MIN_RESOLVED": {
+            "value": 20,
+            "_description": "Elite requires at least this many resolved bets."
+        }
+    },
+    "conviction": {
+        "_group": "\ud83d\udc8e Conviction",
+        "LARGE_TRADE": {
+            "value": 1000,
+            "_description": "Single trade >= this USD is large. Raised from $300 \u2014 $300 is routine for many whales."
+        },
+        "MASSIVE_TRADE": {
+            "value": 5000,
+            "_description": "Single trade >= this USD is 'massive'. Raised from $3000."
+        }
+    },
+    "position_management": {
+        "_group": "\ud83d\udccb Position Management",
+        "MAX_OPEN_POSITIONS": {
+            "value": 6,
+            "_description": "Max simultaneous open positions. Reduced to 6 \u2014 with CONVICTION-only trading, fewer higher-quality bets."
+        },
+        "MAX_POSITIONS_PER_EVENT": {
+            "value": 2,
+            "_description": "Max positions sharing the same eventSlug."
+        },
+        "MAX_POSITIONS_PER_WHALE": {
+            "value": 2,
+            "_description": "Max open positions triggered by the same single elite whale. Prevents one wallet (e.g. elkmonkey) flooding all slots."
+        },
+        "MAX_WATCHLIST_SIZE": {
+            "value": 400,
+            "_description": "Watchlist max size."
+        },
+        "PROFIT_TARGET_PCT": {
+            "value": 0.3,
+            "_description": "Auto-sell when position is up this fraction."
+        },
+        "WHALE_EXIT_SELL": {
+            "value": true,
+            "_description": "Exit when original triggering whale sells."
+        },
+        "STOP_LOSS_ENABLED": {
+            "value": true,
+            "_description": "Enable stop-loss."
+        },
+        "STOP_LOSS_PCT": {
+            "value": -0.2,
+            "_description": "Stop-loss at -20%. Tightened from -40% \u2014 cut losses faster to preserve capital."
+        }
+    },
+    "timing": {
+        "_group": "\u23f1 Timing",
+        "MIN_HOLD_MINUTES": {
+            "value": 5,
+            "_description": "Min hold time before exit."
+        },
+        "EXIT_COOLDOWN_SECONDS": {
+            "value": 1800,
+            "_description": "Cooldown after closing a position before re-entering same market."
+        }
+    },
+    "sizing": {
+        "_group": "\u2696 Sizing",
+        "USE_PROPORTIONAL_SIZING": {
+            "value": true,
+            "_description": "Blend Kelly with whale-proportional sizing."
+        },
+        "PROPORTIONAL_WEIGHT": {
+            "value": 0.4,
+            "_description": "Weight of proportional component."
+        }
+    },
+    "discovery": {
+        "_group": "\ud83d\udd0d Whale Discovery",
+        "DISCOVERY_INTERVAL_CYCLES": {
+            "value": 15,
+            "_description": "Run whale discovery every N cycles."
+        }
+    },
+    "cache": {
+        "_group": "\ud83d\uddc4 Cache",
+        "WALLET_TTL": {
+            "value": 600,
+            "_description": "Wallet cache TTL in seconds (10 min)."
+        },
+        "MARKET_TTL": {
+            "value": 30,
+            "_description": "Market data cache TTL in seconds."
+        },
+        "ACTIVITY_LIMIT": {
+            "value": 500,
+            "_description": "Max activity records for win rate."
+        }
+    },
+    "vip_wallets": {
+        "_group": "\u2b50 VIP Wallets",
+        "_description": "Polled every single cycle regardless of elite status. v9: Removed hedge/market-maker bots.",
+        "wallets": [
+            {
+                "address": "0x6d9fc316c3b8377060a44b852ba664adbfd59790",
+                "note": "MEPP $299k \u2014 alpha trader"
+            },
+            {
+                "address": "0x63ce342161250d705dc0b16df89036c8e5f9ba9a",
+                "note": "0x8dxd $2.21M"
+            },
+            {
+                "address": "0x1cc16713196d456f86fa9c7387dd326a7f73b8df",
+                "note": "Wickier"
+            },
+            {
+                "address": "0x614dc8d3542c12103d2c6a3553fd761e391d1546",
+                "note": "mr.ozi \u2014 alpha trader"
+            },
+            {
+                "address": "0x7f9e2d1df78614564a70becc7fa14aa9a6623a0e",
+                "note": "nojnn \u2014 alpha trader"
+            },
+            {
+                "address": "0xdf17f4a8dd01a4cfa6fc3da323a2baee5f8697d1",
+                "note": "Clear-Corridor \u2014 alpha trader"
+            }
+        ]
+    },
+    "priority_wallets": {
+        "_group": "\ud83d\udccc Priority Wallets",
+        "_description": "Extra wallets polled every cycle.",
+        "wallets": []
+    },
+    "seed_watchlist": {
+        "_group": "\ud83c\udf31 Seed Watchlist",
+        "_description": "Wallets added to watchlist on first boot. v9: Removed known hedge bots.",
+        "wallets": [
+            "0x5a218c7ad04135830a45c41aaed7294df7809318",
+            "0xead152b855effa6b5b5837f53b24c0756830c76a",
+            "0xe8dd7741ccb12350957ec71e9ee332e0d1e6ec86",
+            "0x162f6fff88a52864e8e831d5ee0c30ee0d9c71ea",
+            "0xbacd00c9080a82de9b0edca958adb3a1abd12b3c",
+            "0xdf17f4a8dd01a4cf3049b34e0bf91cbbac2a09e9",
+            "0xe83cc0c82d009a1c34188563c83c206b320e57dd",
+            "0x63ce342161250d705dc0b16df89036c8e5f9ba9a",
+            "0x6d9fc316c3b8377060a44b852ba664adbfd59790",
+            "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294",
+            "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee",
+            "0x000d257d2b2dc3437890e2e7e99cee4abf5d26b4",
+            "0x1cc16713196d456f86fa9c7387dd326a7f73b8df",
+            "0x614dc8d3542c12103d2c6a3553fd761e391d1546",
+            "0x7f9e2d1df78614564a70becc7fa14aa9a6623a0e",
+            "0xdf17f4a8dd01a4cfa6fc3da323a2baee5f8697d1"
+        ]
+    }
+}

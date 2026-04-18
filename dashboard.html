@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Titan V11 · Polymarket Whale Intelligence</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', 'Roboto', sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 20px;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #30363d;
+            padding-bottom: 15px;
+        }
+
+        h1 {
+            font-weight: 400;
+            font-size: 24px;
+            color: #58a6ff;
+        }
+
+        .status {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+        }
+
+        .led {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #3fb950;
+            box-shadow: 0 0 8px #3fb950;
+        }
+
+        .led.off {
+            background: #f85149;
+            box-shadow: none;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 20px;
+        }
+
+        .card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 16px;
+        }
+
+        .card h2 {
+            font-size: 18px;
+            font-weight: 500;
+            margin-bottom: 15px;
+            color: #8b949e;
+            border-bottom: 1px solid #30363d;
+            padding-bottom: 8px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+
+        th {
+            text-align: left;
+            padding: 8px 4px;
+            color: #8b949e;
+            font-weight: 400;
+            border-bottom: 1px solid #30363d;
+        }
+
+        td {
+            padding: 8px 4px;
+            border-bottom: 1px solid #21262d;
+        }
+
+        .positive {
+            color: #3fb950;
+        }
+
+        .negative {
+            color: #f85149;
+        }
+
+        .value {
+            text-align: right;
+        }
+
+        .mono {
+            font-family: 'Consolas', monospace;
+            font-size: 13px;
+        }
+
+        .footer {
+            margin-top: 20px;
+            text-align: right;
+            color: #6e7681;
+            font-size: 12px;
+        }
+
+        .signal-row:hover {
+            background: #1f242b;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="header">
+        <h1>🐋 TITAN V11 · WHALE INTELLIGENCE</h1>
+        <div class="status">
+            <span id="connStatus">Connected</span>
+            <span id="connLed" class="led"></span>
+            <span>Last update: <span id="lastUpdate">--:--:--</span></span>
+        </div>
+    </div>
+    <div class="grid">
+        <div class="card">
+            <h2>TOP WHALES</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Trader</th>
+                        <th class="value">PnL</th>
+                        <th class="value">Volume</th>
+                        <th class="value">Score</th>
+                    </tr>
+                </thead>
+                <tbody id="whalesBody">
+                    <tr>
+                        <td colspan="4" style="text-align:center">Waiting...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="card">
+            <h2>LIVE SIGNALS</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Market / Outcome</th>
+                        <th class="value">Price</th>
+                        <th class="value">Est. Prob</th>
+                        <th class="value">EV</th>
+                        <th class="value">Whales</th>
+                    </tr>
+                </thead>
+                <tbody id="signalsBody">
+                    <tr>
+                        <td colspan="5" style="text-align:center">No signals yet</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <div class="footer">Real-time data · For informational purposes only</div>
+    <script>
+        const socket = new WebSocket('ws://localhost:8765');
+        const led = document.getElementById('connLed');
+        const statusTxt = document.getElementById('connStatus');
+        const lastUpdateSpan = document.getElementById('lastUpdate');
+        const whalesBody = document.getElementById('whalesBody');
+        const signalsBody = document.getElementById('signalsBody');
+
+        function fmtUSD(v) { return v ? '$' + v.toLocaleString(undefined, { minimumFractionDigits: 0 }) : '$0'; }
+        function fmtVol(v) { return v >= 1e6 ? '$' + (v / 1e6).toFixed(1) + 'M' : v >= 1e3 ? '$' + (v / 1e3).toFixed(0) + 'k' : '$' + v; }
+
+        socket.onopen = () => { led.className = 'led'; statusTxt.textContent = 'Connected'; };
+        socket.onclose = () => { led.className = 'led off'; statusTxt.textContent = 'Disconnected'; };
+        socket.onerror = () => { led.className = 'led off'; statusTxt.textContent = 'Error'; };
+
+        socket.onmessage = (e) => {
+            const data = JSON.parse(e.data);
+            if (data.last_update) {
+                lastUpdateSpan.textContent = new Date(data.last_update).toLocaleTimeString();
+            }
+            if (data.whales) {
+                let html = '';
+                data.whales.forEach(w => {
+                    html += `<tr><td><span title="${w.wallet}">${w.name}</span><br><span class="mono" style="color:#8b949e">${w.wallet?.slice(0, 6)}...${w.wallet?.slice(-4)}</span></td>
+                        <td class="value">${fmtUSD(w.pnl)}</td><td class="value">${fmtVol(w.volume)}</td><td class="value">${w.score.toFixed(1)}</td></tr>`;
+                });
+                whalesBody.innerHTML = html || '<tr><td colspan="4" style="text-align:center">No whales</td></tr>';
+            }
+            if (data.signals) {
+                let html = '';
+                data.signals.forEach(s => {
+                    const evClass = s.ev_edge >= 0 ? 'positive' : 'negative';
+                    html += `<tr class="signal-row"><td><div>${s.question || s.market_slug}</div><div class="mono" style="color:#8b949e">${s.outcome} | ${s.confluence_whales.join(', ')}</div><div>Bet: $${s.suggested_bet?.toFixed(2)}</div></td>
+                        <td class="value">${s.current_price?.toFixed(3)}</td><td class="value">${s.estimated_prob?.toFixed(3)}</td><td class="value ${evClass}">${s.ev_edge?.toFixed(3)}</td><td class="value">${s.confluence_count}</td></tr>`;
+                });
+                signalsBody.innerHTML = html || '<tr><td colspan="5" style="text-align:center">No signals</td></tr>';
+            }
+        };
+    </script>
+</body>
+
+</html>
