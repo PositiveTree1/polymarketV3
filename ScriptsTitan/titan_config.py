@@ -1,124 +1,58 @@
 """
-TITAN — Configuration loader.
+TITAN — Configuration loader. Single-wallet edition.
 All settings live in titan_config.json.
-Edit titan_config.json and click RELOAD CONFIG in the UI.
 """
 
-import json
-import os
+import json, os
 
-_CONFIG_DIR = os.path.dirname(__file__)
+_CONFIG_DIR  = os.path.dirname(__file__)
+_CONFIG_FILE = os.path.join(_CONFIG_DIR, "titan_config.json")
 
 def get_config_file():
-    import titan_state as S
-    idx = getattr(S, "active_idx", 0)
-    return os.path.join(_CONFIG_DIR, f"titan_config_{idx}.json")
+    return _CONFIG_FILE
 
-# Fallback for legacy scripts
-_CONFIG_FILE = os.path.join(_CONFIG_DIR, "titan_config_0.json")
-
-# ── Explicit Declarations (for IDE/Linter) ────────────────────────────────────
-# These are overwritten at runtime by reload()
-BANKROLL_START: float = 0
-MIN_BET: float = 0
-MAX_BET_ABS: float = 0
-MAX_BET_PCT: float = 0
-KELLY_FRACTION: float = 0
-TAKER_FEE_RATE: float = 0
-ROUND_TRIP_FEE: float = 0
-
-MIN_TRADE_CASH: float = 0
-MAX_TRADES_FETCH: int = 0
-HOT_HOURS: float = 0
-WARM_HOURS: float = 0
-CYCLE_SECONDS: int = 0
-
-HFT_POLL_LIMIT: int = 0
-HFT_MIN_TRADES_PER_HOUR: int = 0
-HFT_MIRROR_DELAY_MAX_SECONDS: int = 0
-HFT_MIN_CASH_PER_TRADE: float = 0
-
-ELITE_POLL_LIMIT: int = 0
-ELITE_POLL_MIN_CASH: float = 0
+# ── Explicit declarations (overwritten at runtime by reload()) ────────────────
+BANKROLL_START: float = 0;  MIN_BET: float = 0;  MAX_BET_ABS: float = 0
+MAX_BET_PCT: float = 0;     KELLY_FRACTION: float = 0
+TAKER_FEE_RATE: float = 0;  ROUND_TRIP_FEE: float = 0
+MIN_TRADE_CASH: float = 0;  MAX_TRADES_FETCH: int = 0
+HOT_HOURS: float = 0;       WARM_HOURS: float = 0;  CYCLE_SECONDS: int = 0
+HFT_POLL_LIMIT: int = 0;    HFT_MIN_TRADES_PER_HOUR: int = 0
+HFT_MIRROR_DELAY_MAX_SECONDS: int = 0;  HFT_MIN_CASH_PER_TRADE: float = 0
+ELITE_POLL_LIMIT: int = 0;  ELITE_POLL_MIN_CASH: float = 0
 ELITE_TRADE_MIN_FRACTION: float = 0
-
-MAX_SIGNAL_AGE_H: float = 0
-MIN_SCORE: float = 0
-STRONG_SCORE: float = 0
-ALERT_SCORE: float = 0
-MIN_CONFLUENCE: int = 0
-
-MAX_DRIFT: float = 0
-MIN_DRIFT: float = 0
-MAX_ENTRY_SLIPPAGE: float = 0
-STALE_LOSER_AGE_H: float = 0
-STALE_LOSER_DRIFT: float = 0
-
-MIN_LIQUIDITY: float = 0
-MIN_VOLUME: float = 0
-MIN_HOURS_LEFT: float = 0
-
-MIN_WIN_RATE_WATCH: float = 0
-MIN_WIN_RATE_VER: float = 0
-MIN_RESOLVED_BETS: int = 0
-MIN_PNL: float = 0
-WILSON_MIN_WATCH: float = 0
-WILSON_MIN_VER: float = 0
-MIN_AVG_PROFIT_PER_TRADE: float = 0
-MIN_AVG_BET_SIZE: float = 0
-
-ELITE_MIN_PNL: float = 0
-ELITE_MIN_PORT: float = 0
-ELITE_MIN_SCORE: float = 0
-ELITE_MIN_RESOLVED: int = 0
-
-LARGE_TRADE: float = 0
-MASSIVE_TRADE: float = 0
-
-MAX_OPEN_POSITIONS: int = 0
-MAX_POSITIONS_PER_EVENT: int = 0
-MAX_POSITIONS_PER_WHALE: int = 0
-MAX_WATCHLIST_SIZE: int = 0
-PROFIT_TARGET_PCT: float = 0
-WHALE_EXIT_SELL: bool = True
-STOP_LOSS_ENABLED: bool = True
-STOP_LOSS_PCT: float = 0
-
-MIN_HOLD_MINUTES: float = 0
-EXIT_COOLDOWN_SECONDS: int = 0
-
-USE_PROPORTIONAL_SIZING: bool = True
-PROPORTIONAL_WEIGHT: float = 0
-
+MAX_SIGNAL_AGE_H: float = 0;  MIN_SCORE: float = 0;  STRONG_SCORE: float = 0
+ALERT_SCORE: float = 0;  MIN_CONFLUENCE: int = 0
+MAX_DRIFT: float = 0;  MIN_DRIFT: float = 0;  MAX_ENTRY_SLIPPAGE: float = 0
+STALE_LOSER_AGE_H: float = 0;  STALE_LOSER_DRIFT: float = 0
+MIN_LIQUIDITY: float = 0;  MIN_VOLUME: float = 0;  MIN_HOURS_LEFT: float = 0
+MIN_WIN_RATE_WATCH: float = 0;  MIN_WIN_RATE_VER: float = 0
+MIN_RESOLVED_BETS: int = 0;  MIN_PNL: float = 0
+WILSON_MIN_WATCH: float = 0;  WILSON_MIN_VER: float = 0
+MIN_AVG_PROFIT_PER_TRADE: float = 0;  MIN_AVG_BET_SIZE: float = 0
+ELITE_MIN_PNL: float = 0;  ELITE_MIN_PORT: float = 0
+ELITE_MIN_SCORE: float = 0;  ELITE_MIN_RESOLVED: int = 0
+LARGE_TRADE: float = 0;  MASSIVE_TRADE: float = 0
+MAX_OPEN_POSITIONS: int = 0;  MAX_POSITIONS_PER_EVENT: int = 0
+MAX_POSITIONS_PER_WHALE: int = 0;  MAX_WATCHLIST_SIZE: int = 0
+PROFIT_TARGET_PCT: float = 0;  WHALE_EXIT_SELL: bool = True
+STOP_LOSS_ENABLED: bool = False;  STOP_LOSS_PCT: float = 0
+MIN_HOLD_MINUTES: float = 0;  EXIT_COOLDOWN_SECONDS: int = 0
+USE_PROPORTIONAL_SIZING: bool = True;  PROPORTIONAL_WEIGHT: float = 0
 DISCOVERY_INTERVAL_CYCLES: int = 0
-
-WALLET_TTL: int = 0
-MARKET_TTL: int = 0
-ACTIVITY_LIMIT: int = 0
-
-VIP_WALLETS: list[str] = []
-PRIORITY_WALLETS: list[str] = []
-SEED_WATCHLIST: list[str] = []
-
-DATA_API: str = ""
-GAMMA_API: str = ""
-HEADERS: dict = {}
-STATE_FILE: str = ""
-WHALE_FILE: str = ""
-# ─────────────────────────────────────────────────────────────────────────────
-
+WALLET_TTL: int = 0;  MARKET_TTL: int = 0;  ACTIVITY_LIMIT: int = 0
+STRATEGY_MODE: str = "base";  TRADEABLE_TIERS_LIST: list = ["CONVICTION", "ALERT", "HFT"]
+ALLOWED_MARKET_TYPES: list = ["POLITICS", "CRYPTO", "EVENT", "SPORTS"]
+MIN_ELITE_CONFLUENCE: int = 1;  BLOCK_SPORTS: bool = False
+VIP_WALLETS: list = [];  PRIORITY_WALLETS: list = [];  SEED_WATCHLIST: list = []
+DATA_API: str = "";  GAMMA_API: str = "";  HEADERS: dict = {}
+STATE_FILE: str = "";  WHALE_FILE: str = ""
 
 
 def _load_json():
-    import shutil
-    fpath = get_config_file()
-    if not os.path.exists(fpath):
-        legacy = os.path.join(_CONFIG_DIR, "titan_config.json")
-        if os.path.exists(legacy):
-            shutil.copy2(legacy, fpath)
-        else:
-            return {} # Fallback
-    with open(fpath, "r", encoding="utf-8") as f:
+    if not os.path.exists(_CONFIG_FILE):
+        return {}
+    with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -137,6 +71,8 @@ def _extract(cfg):
                 continue
             if isinstance(entry, dict) and "value" in entry:
                 flat[key] = entry["value"]
+            elif not isinstance(entry, dict):
+                flat[key] = entry
     return flat
 
 
@@ -144,6 +80,12 @@ def reload():
     raw  = _load_json()
     flat = _extract(raw)
     g    = globals()
+
+    g["STRATEGY_MODE"]        = flat.get("STRATEGY_MODE", "base")
+    g["TRADEABLE_TIERS_LIST"] = flat.get("TRADEABLE_TIERS_LIST", ["CONVICTION", "ALERT", "HFT"])
+    g["ALLOWED_MARKET_TYPES"] = flat.get("ALLOWED_MARKET_TYPES", ["POLITICS","CRYPTO","EVENT","SPORTS"])
+    g["MIN_ELITE_CONFLUENCE"] = int(flat.get("MIN_ELITE_CONFLUENCE", 1))
+    g["BLOCK_SPORTS"]         = bool(flat.get("BLOCK_SPORTS", False))
 
     for key, val in flat.items():
         if key not in ("vip_wallets", "priority_wallets", "seed_watchlist"):
@@ -170,7 +112,6 @@ def reload():
         [a.lower() for a in (_addrs(seed_raw) + g["VIP_WALLETS"] + g["PRIORITY_WALLETS"])]
     ))
 
-    # ── API endpoints (not in JSON) ───────────────────────────────────────────
     g["DATA_API"]  = "https://data-api.polymarket.com"
     g["GAMMA_API"] = "https://gamma-api.polymarket.com"
     g["HEADERS"]   = {

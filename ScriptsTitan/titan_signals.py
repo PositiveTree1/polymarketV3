@@ -77,25 +77,25 @@ def estimate_expected_value(cur_price: float, avg_entry: float, liq: float,
     else:
         spread_pct = 0.03    # 3% for illiquid
 
-    # Impact cost: how much our bet moves the price
+    # Impact cost: how much our bet moves the price.
+    # FIX: was * 2.0 which wildly overstated impact for small bets (e.g. $2 in $50k pool).
+    # Paper trading bets are tiny — real market impact is negligible.
+    # Use 0.3x multiplier for bets under $10, linear above.
     if liq > 0:
-        impact_pct = min(0.05, (bet_size / liq) * 2.0)
+        scale = 0.3 if bet_size < 10 else (0.5 if bet_size < 50 else 1.0)
+        impact_pct = min(0.03, (bet_size / liq) * scale)
     else:
-        impact_pct = 0.05
+        impact_pct = 0.02
 
     # Total friction = spread + impact + round-trip fee
     total_friction = spread_pct + impact_pct + ROUND_TRIP_FEE
 
-    # Expected edge from whale signal
-    # If whale bought at avg_entry and price is now cur_price:
-    # Our edge = (1/cur_price - 1) - friction  (for binary market paying $1 on win)
-    # But we need to estimate probability of winning
-    # Use avg_entry as fair value proxy (whale's implied probability)
+    # FIX (Bug 1): Whale's implied probability = their entry price.
+    # They paid avg_entry cents for a $1 payout — that IS their probability estimate.
+    # Binary EV: we buy at cur_price. If outcome hits, we gain (1 - cur_price).
+    # If it misses, we lose cur_price. Edge is valid when fair_prob > cur_price.
     fair_prob = max(0.05, min(0.95, avg_entry))
-    payout_if_win = (1.0 / max(cur_price, 0.01)) - 1.0  # profit per dollar if we win
-    payout_if_lose = -1.0  # lose entire bet
-
-    ev_per_dollar = fair_prob * payout_if_win + (1 - fair_prob) * payout_if_lose
+    ev_per_dollar = fair_prob * (1.0 - cur_price) - (1.0 - fair_prob) * cur_price
     ev_after_friction = ev_per_dollar - total_friction
     ev_dollar = ev_after_friction * bet_size
 
@@ -114,6 +114,16 @@ def estimate_expected_value(cur_price: float, avg_entry: float, liq: float,
 #  HEDGE BOT TRACKING (persistent across cycles)
 # ─────────────────────────────────────────────────────────────────────────────
 _KNOWN_HEDGE_WALLETS: set = set()  # wallets caught buying both sides
+
+
+def get_known_hedge_wallets() -> set:
+    """Return the hedge wallet set for persistence."""
+    return _KNOWN_HEDGE_WALLETS
+
+
+def restore_known_hedge_wallets(wallets_iter):
+    """Restore hedge wallets from saved state."""
+    _KNOWN_HEDGE_WALLETS.update(str(w).lower() for w in wallets_iter)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -369,8 +379,11 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
             if w not in by_w or t["ts"] > by_w[w]["ts"]:
                 by_w[w] = t
 
+        # Use the most recent trade's title — all Polymarket titles contain "?"
+        # so the previous "?" filter was meaningless (always matched first item)
         title = next(
-            (t["title"] for t in by_w.values() if t.get("title") and "?" in str(t.get("title", ""))),
+            (t["title"] for t in sorted(by_w.values(), key=lambda x: x["ts"], reverse=True)
+             if t.get("title")),
             next(iter(by_w.values()))["title"]
         )
 
@@ -471,10 +484,36 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
                 has_large_trade = True
                 break
 
-            # Legacy fallback: 20x avg_bet AND absolute floor
+            # Legacy fallback: 20x avg_bet AND absolute floor (non-HFT)
             if avg_b > 0 and cash >= avg_b * 20.0 and cash >= _CONVICTION_ABS_FLOOR:
                 w_name = S.env().wallet_cache.get(w, {}).get("name", w[:10])
                 conviction_detail = f"{w_name} ${cash:,.0f} = {cash/avg_b:.0f}x avg_bet"
+                has_large_trade = True
+                break
+
+            # HFT-specific path: no $1000 floor. A bot with avg_bet $5 putting
+            # $400 (80x their average) IS conviction — that IS the alpha signal.
+            # FIX: lowered from 50x to 30x. fetch_hft_spike_trades already
+            # pre-filters at 20x (low-freq) or 40x (high-freq >200 TPH).
+            # By the time a trade reaches build_signals it has ALREADY cleared
+            # that bar — the 50x gate here was double-filtering and blocking
+            # legitimate spikes (e.g. 59x avg was passing 40x in market.py
+            # but then failing 50x here). 30x is the correct signal threshold.
+            is_w_hft = (
+                prof.get("hft") or
+                prof.get("trades_per_hour", 0) >= HFT_MIN_TRADES_PER_HOUR or
+                (avg_b > 0 and avg_b < 50 and prof.get("n_resolved", 0) > 100)
+            )
+            # Also treat trades pre-tagged by fetch_hft_spike_trades as large
+            if t.get("is_large_trade") or t.get("hft_spike_ratio", 0) >= 20:
+                w_name = S.env().wallet_cache.get(w, {}).get("name", w[:10])
+                spike_ratio = t.get("hft_spike_ratio", cash / max(avg_b, 0.01))
+                conviction_detail = f"{w_name} ${cash:,.0f} = {spike_ratio:.0f}x HFT spike (pre-tagged)"
+                has_large_trade = True
+                break
+            if is_w_hft and avg_b > 0 and cash >= avg_b * 30.0:
+                w_name = S.env().wallet_cache.get(w, {}).get("name", w[:10])
+                conviction_detail = f"{w_name} ${cash:,.0f} = {cash/avg_b:.0f}x HFT avg_bet (no floor)"
                 has_large_trade = True
                 break
 
@@ -587,7 +626,10 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
             event_slug_sig = mkt.get("event_slug", "")
 
         elite_only_mode = len(verified_wallets) == 0
-        n_confluence    = len(verified_wallets)
+        # FIX: n_confluence counts ALL verified wallets (elite + non-elite).
+        # Previously only counted non-elite verified, so signals with 3 elite whales
+        # got n_confluence=0, killing both the scoring and the MIN_ELITE_CONFLUENCE gate.
+        n_confluence    = len(all_ver)
 
         sig = {
             "slug":           cid,
@@ -640,10 +682,16 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
             continue
 
         # ── Tier ─────────────────────────────────────────────────────────────
-        if is_hft_signal and not has_large_trade:
+        if is_hft_signal and has_large_trade:
+            # HFT spike with large trade = CONVICTION regardless of score.
+            # Score threshold is irrelevant for momentum signals — the 40-200x
+            # spike IS the signal. Forcing through CONVICTION tier so W8's
+            # TRADEABLE_TIERS_LIST = ["CONVICTION", "HFT"] always catches it.
+            tier = "CONVICTION"
+        elif is_hft_signal and not has_large_trade:
             tier = "HFT"
         elif has_large_trade and total >= ALERT_SCORE:
-            tier = "CONVICTION"   # v8: new tier for large trades
+            tier = "CONVICTION"
         elif total >= ALERT_SCORE:
             tier = "ALERT"
         elif total >= STRONG_SCORE:
@@ -655,7 +703,11 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
 
         if exits_on_this and tier in ("ALERT", "CONVICTION"):
             tier = "STRONG"
-        if age_h > MAX_SIGNAL_AGE_H:
+        # FIX: HFT spike signals already gate age via HFT_MIRROR_DELAY_MAX_SECONDS
+        # (checked above in is_hft_signal). Don't also apply the MAX_SIGNAL_AGE_H
+        # STALE override to CONVICTION-tier spikes — we'd double-gate and then kill
+        # signals that passed the tighter 45s window check.
+        if age_h > MAX_SIGNAL_AGE_H and tier != "CONVICTION":
             tier = "STALE"
 
         bet = kelly_bet(sig, wallets, score=total)

@@ -51,7 +51,7 @@ class TelegramNotifier:
             print(f"Telegram connection error: {e}")
             return False
 
-    def notify_buy(self, pos: dict, w_idx: int = 0, s_name: str = ""):
+    def notify_buy(self, pos: dict, s_name: str = "Whale Mode"):
         """Send formatted buy alert."""
         title   = self._escape(pos.get('title', 'Unknown Market')[:80])
         side    = self._escape(pos.get('outcome', '?'))
@@ -59,12 +59,11 @@ class TelegramNotifier:
         bet     = self._escape(f"{pos.get('bet', 0):.2f}")
         tier    = self._escape(pos.get('tier', 'SINGLE'))
         score   = self._escape(f"{pos.get('score', 0):.0f}")
-        w_idx_e = self._escape(str(w_idx))
         s_name_e = self._escape(s_name)
         
         # Use raw f-strings to allow backslashes for Telegram MarkdownV2 escaping
         msg = (
-            fr"🚀 *TITAN BUY ALERT \— Wallet {w_idx_e}*" + "\n"
+            fr"🚀 *TITAN BUY ALERT*" + "\n"
             fr"_{s_name_e}_" + "\n"
             f"━━━━━━━━━━━━━━━\n"
             f"📍 *Market:* {title}\n"
@@ -75,7 +74,7 @@ class TelegramNotifier:
         )
         return self._send(msg)
 
-    def notify_sell(self, pos: dict, pnl_usdc: float, pnl_pct: float, w_idx: int = 0, s_name: str = ""):
+    def notify_sell(self, pos: dict, pnl_usdc: float, pnl_pct: float, s_name: str = "Whale Mode"):
         """Send formatted sell/exit alert."""
         title   = self._escape(pos.get('title', 'Unknown Market')[:80])
         side    = self._escape(pos.get('outcome', '?'))
@@ -84,11 +83,10 @@ class TelegramNotifier:
         reason  = self._escape(pos.get('reason', 'Target reached'))
         pnl_s   = self._escape(f"{pnl_usdc:+.4f}")
         pct_s   = self._escape(f"{pnl_pct*100:+.1f}")
-        w_idx_e = self._escape(str(w_idx))
         s_name_e = self._escape(s_name)
 
         msg = (
-            fr"{emoji} *TITAN EXIT \— Wallet {w_idx_e}*" + "\n"
+            fr"{emoji} *TITAN EXIT*" + "\n"
             fr"_{s_name_e}_" + "\n"
             f"━━━━━━━━━━━━━━━\n"
             f"📍 *Market:* {title}\n"

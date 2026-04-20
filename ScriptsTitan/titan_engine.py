@@ -1,0 +1,314 @@
+"""
+TITAN — Main orchestration engine. Single-wallet edition.
+
+Two loops run in parallel:
+  • run_loop()      — main 12s cycle: public feed + elite poll + signals + trade
+  • _hft_fast_loop()— 3s cycle: polls only HFT wallets, looks for outsized spikes
+
+EXIT PHILOSOPHY:
+  Follow the whale. If the whale who triggered our buy has NOT sold, we do NOT
+  sell regardless of stop-loss or profit target — unless the market is resolving.
+  WHALE_EXIT_SELL controls this. STOP_LOSS_ENABLED=false means stops are disabled
+  unless the whale exits.
+"""
+
+import time
+import threading
+
+from titan_config import *
+import titan_config as C
+import titan_state as S
+from titan_state import _log, safe_get
+
+from titan_persistence import load_state, save_state, save_whale_roster, save_whale_roster_async
+from titan_wallet  import fetch_wallet, get_elite_wallets, discover_new_whales, scan_top_market_holders, get_whale_performance_summary
+from titan_market  import get_market, fetch_trades, fetch_hft_spike_trades
+from titan_signals import build_signals, check_whale_exits, _adaptive_bet_caps
+from titan_trader  import auto_trade
+
+_HFT_FAST_CYCLE = 3  # seconds between HFT polls
+
+
+def _rescore_watchlist():
+    now_t = time.time()
+    must  = set(w.lower() for w in VIP_WALLETS) | set(w.lower() for w in PRIORITY_WALLETS)
+    stale = [
+        w for w in list(S.env().watchlist)
+        if w not in must
+        and (now_t - S.env().wallet_cache.get(w, {}).get("ts", 0)) >= WALLET_TTL
+    ]
+    to_score = list(must) + stale
+    if not to_score:
+        return
+    _log(f"♻ Re-scoring {len(to_score)} wallets…", "DATA")
+    for w in to_score:
+        try:
+            fetch_wallet(w)
+            time.sleep(0.15)
+        except Exception:
+            pass
+    new_elite = sum(1 for w in S.env().wallet_cache if S.env().wallet_cache[w].get("elite"))
+    _log(f"♻ Re-score done | {new_elite} elite total", "DATA")
+    save_whale_roster_async()
+
+
+def analyse(trades):
+    S.env().cycle_count += 1
+
+    if S.env().cycle_count % DISCOVERY_INTERVAL_CYCLES == 0:
+        threading.Thread(target=discover_new_whales, daemon=True).start()
+    if S.env().cycle_count % 5 == 0:
+        threading.Thread(target=scan_top_market_holders, daemon=True).start()
+    if S.env().cycle_count % 20 == 2:
+        threading.Thread(target=_rescore_watchlist, daemon=True).start()
+
+    # Score wallets seen in the feed
+    feed_wallets = {t["wallet"] for t in trades}
+    wallets      = {}
+    ver_count    = 0
+    elite_count  = 0
+
+    def _is_auto(n):
+        parts = n.split("-")
+        if len(parts) != 2: return False
+        a, b = parts
+        return a and b and a[0].isupper() and b[0].isupper() and a.isalpha() and b.isalpha()
+
+    for w in feed_wallets:
+        p = fetch_wallet(w)
+        trade_name = next(
+            (t["name"] for t in trades
+             if t["wallet"].lower() == w and t["name"] and not t["name"].endswith("…")),
+            None
+        )
+        if trade_name:
+            current = p.get("name", "")
+            current_real = current and not current.endswith("…") and not _is_auto(current)
+            if not _is_auto(trade_name) or not current_real:
+                p["name"] = trade_name
+                S.env().wallet_cache[w] = p
+
+        cached = S.env().wallet_cache.get(w, {})
+        for flag in ("elite","verified","watchable","hft","score","win_rate","total_pnl",
+                     "avg_bet","n_resolved","trades_per_hour","total_value","name"):
+            if not p.get(flag) and cached.get(flag):
+                p[flag] = cached[flag]
+
+        wallets[w] = p
+        if p["verified"]:  ver_count  += 1
+        if p["elite"]:     elite_count += 1
+        time.sleep(0.04)
+
+    if S.env().cycle_count % 10 == 0:
+        elite_ws = get_elite_wallets()
+        if elite_ws:
+            hft_count = sum(1 for w in elite_ws if S.env().wallet_cache.get(w, {}).get("hft"))
+            names = [S.env().wallet_cache.get(w, {}).get("name", w[:10]+"…") for w in elite_ws[:8]]
+            _log(f"🔥 Elite ({len(elite_ws)}, ⚡{hft_count} HFT): {', '.join(names)}", "INFO")
+
+    # Whale exit monitoring
+    cid_to_wallet_sets = {cid: set(ws) for cid, ws in S.env().position_whale_map.items()}
+    entry_times = {
+        pos.get("cid", key[0]): pos.get("entry_ts", 0)
+        for key, pos in S.env().open_positions.items()
+    }
+    whale_exits = {}
+    if cid_to_wallet_sets:
+        whale_exits = check_whale_exits(cid_to_wallet_sets, entry_times)
+
+    signals, rejects = build_signals(trades, wallets, whale_exits)
+    _log(
+        f"🎯 {len(signals)} signals | {len(rejects)} rejects | "
+        f"{ver_count} verified ({elite_count} elite) wallets",
+        "INFO"
+    )
+
+    trade_events = auto_trade(signals, whale_exits)
+    for ev_type, msg, _color in trade_events:
+        level = "TRADE" if ev_type in ("OPEN", "CLOSE") else "WARN"
+        _log(msg, level)
+
+    # Sample portfolio equity every cycle
+    open_value = sum(
+        pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0)
+        for pos in S.env().open_positions.values()
+    )
+    S.env().equity_history.append((time.time(), S.env().paper_bankroll + open_value))
+    if len(S.env().equity_history) > 5000:
+        del S.env().equity_history[:500]
+
+    # Whale report card every 50 cycles
+    if S.env().cycle_count % 50 == 0 and S.env().cycle_count > 0:
+        perf = get_whale_performance_summary()
+        if perf:
+            _log("📊 WHALE PERFORMANCE:", "INFO")
+            for rec in perf[:10]:
+                emoji = "✅" if rec["total_pnl"] >= 0 else "❌"
+                _log(
+                    f"  {emoji} {rec['name']:<18} {rec['wins']}W/{rec['losses']}L "
+                    f"WR:{rec['win_rate']*100:.0f}% PnL:${rec['total_pnl']:+.4f}",
+                    "INFO"
+                )
+
+    # Session stats every 100 cycles
+    if S.env().cycle_count % 100 == 0 and S.env().cycle_count > 0:
+        sells_all = [t for t in S.env().trade_history if t.get("type") == "SELL"]
+        wins_all  = [t for t in sells_all if (t.get("pnl_usdc") or 0) >= 0]
+        _log(
+            f"📊 SESSION [{S.env().cycle_count} cycles]: {len(sells_all)} closed | "
+            f"{len(wins_all)}W/{len(sells_all)-len(wins_all)}L | "
+            f"WR:{len(wins_all)/max(len(sells_all),1)*100:.0f}%",
+            "INFO"
+        )
+
+    if S.env().cycle_count % 4 == 0:
+        save_whale_roster_async()
+
+    if S.on_cycle_complete:
+        S.on_cycle_complete(signals, wallets, rejects, trades)
+
+
+def run_loop():
+    while True:
+        try:
+            trades = fetch_trades()
+            if not trades:
+                _log("⚠ No trades fetched", "WARN")
+                trades = []
+            C.reload()
+            analyse(trades)
+        except Exception as e:
+            import traceback
+            _log(f"Cycle error: {e}\n{traceback.format_exc()[:400]}", "ERR")
+        time.sleep(CYCLE_SECONDS)
+
+
+# ── HFT Fast Loop ─────────────────────────────────────────────────────────────
+def _hft_fast_loop():
+    """
+    Runs every 3 seconds. Polls only HFT wallets looking for outsized spike trades.
+    When a spike is found, it is immediately passed to analyse() — the same pipeline
+    that handles whale exits, signals, and auto-trade. This means:
+      - BUY happens instantly when the HFT whale makes their spike trade
+      - EXIT happens automatically when that same whale sells (WHALE_EXIT_SELL=true)
+      - No stop-loss, no profit target fires until the whale moves
+    """
+    _log("⚡ HFT fast loop started (3s cycle)", "INFO")
+    _log("⚡ HFT fast loop waiting 45s for wallet_cache to populate…", "INFO")
+    time.sleep(45)
+    _log("⚡ HFT fast loop active", "INFO")
+
+    _no_hft_warned = False
+    while True:
+        try:
+            hft_count = sum(
+                1 for addr, prof in S.env().wallet_cache.items()
+                if prof.get("hft") or prof.get("trades_per_hour", 0) >= HFT_MIN_TRADES_PER_HOUR
+            )
+            if hft_count == 0:
+                if not _no_hft_warned:
+                    _log("⚡ HFT fast loop: no HFT wallets yet — waiting for discovery", "WARN")
+                    _no_hft_warned = True
+                time.sleep(_HFT_FAST_CYCLE)
+                continue
+            _no_hft_warned = False
+
+            spike_trades = fetch_hft_spike_trades()
+            if spike_trades:
+                _log(f"⚡ HFT fast loop: processing {len(spike_trades)} spike(s)…", "DIAG")
+                C.reload()
+                analyse(spike_trades)
+        except Exception as e:
+            import traceback
+            _log(f"HFT fast loop error: {e}\n{traceback.format_exc()[:300]}", "ERR")
+        time.sleep(_HFT_FAST_CYCLE)
+
+
+def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycle_cb=None):
+    S.on_log            = log_callback
+    S.on_position_open  = position_open_cb
+    S.on_position_close = position_close_cb
+    S.on_cycle_complete = cycle_cb
+
+    load_state()
+    C.reload()
+
+    _log("🚀 TITAN — Single-Wallet Whale Mirror Engine", "INFO")
+    _log("   Two signals: BIG TRADE conviction + HFT spike momentum", "INFO")
+    _log("   Exit rule: follow the whale — sell when THEY sell", "INFO")
+    max_abs, max_pct = _adaptive_bet_caps()
+    _log(
+        f"   Bankroll: ${S.env().paper_bankroll:.2f}  MaxBet: {max_pct*100:.0f}% / ${max_abs:.2f}  "
+        f"MaxPos: {MAX_OPEN_POSITIONS}",
+        "INFO"
+    )
+    _log(
+        f"   Elite gate: PnL≥${ELITE_MIN_PNL:,.0f}  Port≥${ELITE_MIN_PORT:,.0f}  "
+        f"Score≥{ELITE_MIN_SCORE}  Res≥{ELITE_MIN_RESOLVED}",
+        "INFO"
+    )
+    _log(
+        f"   Liq≥${MIN_LIQUIDITY:,.0f}  Vol≥${MIN_VOLUME:,.0f}  "
+        f"MaxAge≤{MAX_SIGNAL_AGE_H}h  Slippage≤{MAX_ENTRY_SLIPPAGE*100:.0f}%",
+        "INFO"
+    )
+    _log(
+        f"   StopLoss: {'ON' if STOP_LOSS_ENABLED else 'OFF (whale-exit only)'}  "
+        f"ProfitTarget: {PROFIT_TARGET_PCT*100:.0f}%  WhaleExitSell: {WHALE_EXIT_SELL}",
+        "INFO"
+    )
+    _log("─" * 60, "DATA")
+
+    t_main = threading.Thread(target=run_loop, daemon=True)
+    t_hft  = threading.Thread(target=_hft_fast_loop, daemon=True)
+    t_main.start()
+    t_hft.start()
+    return t_main
+
+
+def get_system_snapshot() -> str:
+    from datetime import datetime as _dt
+    now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+    sells     = [t for t in S.env().trade_history if t.get("type") == "SELL"]
+    wins      = [t for t in sells if (t.get("pnl_usdc") or 0) >= 0]
+    total_pnl = S.env().paper_bankroll - BANKROLL_START
+    win_rate  = (len(wins) / len(sells) * 100) if sells else 0
+    lines = [
+        "═" * 70,
+        f"  TITAN SNAPSHOT — {now}",
+        "═" * 70, "",
+        f"Bankroll  : ${S.env().paper_bankroll:.2f}  (start ${BANKROLL_START:.2f})",
+        f"Total PnL : ${total_pnl:+.4f}",
+        f"Win Rate  : {win_rate:.1f}%  ({len(wins)}W/{len(sells)-len(wins)}L)",
+        f"Open      : {len(S.env().open_positions)}  Cycle: {S.env().cycle_count}",
+        "", "[OPEN POSITIONS]",
+    ]
+    for key, pos in S.env().open_positions.items():
+        entry = pos.get("entry_price", 0)
+        cur   = pos.get("cur_price", entry)
+        pnl   = (cur - entry) / max(entry, 0.001) * 100
+        held  = (time.time() - pos.get("entry_ts", time.time())) / 60
+        hft   = "⚡" if pos.get("is_hft") else ""
+        conv  = "💎" if pos.get("is_conviction") else ""
+        lines.append(
+            f"  {conv}{hft}[{pos.get('tier','?')}] {pos.get('title','?')[:46]} / {key[1] if isinstance(key,tuple) else '?'}"
+            f"  P&L:{pnl:+.1f}%  Held:{held:.0f}min  ${pos.get('bet',0):.2f}"
+        )
+    lines += ["", "[ELITE ROSTER]"]
+    elites = sorted(
+        [(w, p) for w, p in S.env().wallet_cache.items() if p.get("elite")],
+        key=lambda x: x[1].get("total_pnl", 0), reverse=True
+    )
+    for w, p in elites[:15]:
+        hft = "⚡" if p.get("hft") else ""
+        lines.append(
+            f"  {hft}{p.get('name', w[:10]+'…'):<22} "
+            f"Score:{p.get('score',0):.2f}  WR:{p.get('win_rate',0)*100:.0f}%  "
+            f"PnL:${p.get('total_pnl',0):+,.0f}  TPH:{p.get('trades_per_hour',0):.1f}"
+        )
+    lines += ["", "[LAST 15 LOGS]"]
+    meaningful = [l for l in S.env().SYSTEM_LOGS[-40:]
+                  if "dedup" not in l.lower() and "polling" not in l.lower()][-15:]
+    lines.extend(f"  {l}" for l in meaningful)
+    lines.append("═" * 70)
+    return "\n".join(lines)

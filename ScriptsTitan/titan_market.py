@@ -722,3 +722,78 @@ def fetch_trades() -> list:
                 best[key] = trade
 
     return list(best.values())
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  HFT SPIKE FAST POLL — W8 dedicated, runs every 3-5s on its own thread
+# ─────────────────────────────────────────────────────────────────────────────
+def fetch_hft_spike_trades() -> list:
+    """
+    Dedicated fast poll for W8 (HFT Spike Detector).
+
+    Only polls wallets classified as HFT. Filters immediately to trades that
+    are >= HFT_SPIKE_MULTIPLIER x the wallet's avg_bet with NO absolute dollar
+    floor. The spike ratio is what matters, not the dollar amount.
+
+    Called every HFT_FAST_CYCLE_SECONDS (3s) from a dedicated thread in the
+    engine — completely independent of the main 15s loop so W8 never misses
+    a short-lived HFT spike because the main cycle was busy.
+    """
+    spike_cutoff = time.time() - 90  # only care about last 90 seconds
+    hot_cutoff   = spike_cutoff
+    warm_cutoff  = spike_cutoff
+
+    # Gather all known HFT wallets from the shared cache
+    hft_wallets = {}
+    for e in S.wallets:
+        for addr, prof in e.wallet_cache.items():
+            if is_hft_wallet(prof) and addr not in hft_wallets:
+                hft_wallets[addr] = prof
+
+    if not hft_wallets:
+        return []
+
+    results = []
+    for wallet, prof in hft_wallets.items():
+        avg_bet = prof.get("avg_bet", 0)
+        if avg_bet <= 0:
+            continue  # no baseline, can't compute spike ratio
+
+        raw = S.safe_get(f"{DATA_API}/trades", {
+            "user":         wallet,
+            "limit":        15,
+            "side":         "BUY",
+            "filterType":   "CASH",
+            "filterAmount": max(1.0, avg_bet * 0.5),
+        })
+        if not raw or not isinstance(raw, list):
+            time.sleep(0.05)
+            continue
+
+        for t in raw:
+            trade = _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, "hft_spike_poll")
+            if trade is None:
+                continue
+            cash = trade["cash"]
+
+            # Core gate: spike ratio based on trades/hour
+            # Higher-frequency bots need a bigger spike to be meaningful
+            tph = prof.get("trades_per_hour", 0)
+            required_mult = 40.0 if tph > 200 else 20.0
+            if cash < avg_bet * required_mult:
+                continue  # routine noise
+
+            trade["is_large_trade"]   = True
+            trade["hft_spike_ratio"]  = round(cash / avg_bet, 1)
+            trade["source"]           = "hft_spike_poll"
+            results.append(trade)
+
+            name = prof.get("name", wallet[:10] + "…")
+            S._log(
+                f"⚡ HFT SPIKE: {name} ${cash:,.0f} = {cash/avg_bet:.0f}x avg "
+                f"[{trade.get('title','?')[:35]}]",
+                "INFO"
+            )
+
+        time.sleep(0.05)
+
+    return results
