@@ -143,6 +143,26 @@ class TelegramNotifier:
             print(f"Telegram sendPhoto exception: {e}")
             return False
 
+    def send_dashboard_button(self, url: str):
+        """Send a message with a WebApp button."""
+        payload = {
+            "chat_id": self._chat_id,
+            "text": "📊 Live Titan Dashboard\n\nClick the button below to open the dashboard inside Telegram.",
+            "reply_markup": {
+                "inline_keyboard": [
+                    [{"text": "📱 Open Dashboard", "web_app": {"url": url}}]
+                ]
+            }
+        }
+        try:
+            resp = requests.post(self._api, json=payload, timeout=10)
+            if resp.status_code != 200:
+                print(f"Telegram web_app Error ({resp.status_code}): {resp.text}")
+            return resp.status_code == 200
+        except Exception as e:
+            print(f"Telegram web_app exception: {e}")
+            return False
+
     def start_polling(self, on_message_callback):
         """Start polling for messages in a background thread."""
         def poll():
@@ -150,7 +170,7 @@ class TelegramNotifier:
             api_url = f"https://api.telegram.org/bot{self._token}/getUpdates"
             while True:
                 try:
-                    resp = requests.get(api_url, params={"offset": offset, "timeout": 30}, timeout=35)
+                    resp = requests.get(api_url, params={"offset": offset, "timeout": 30}, timeout=15)
                     if resp.status_code == 200:
                         data = resp.json()
                         for result in data.get("result", []):

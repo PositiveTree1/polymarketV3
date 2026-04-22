@@ -140,27 +140,17 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
                     hft_names = [S.env().wallet_cache.get(w, {}).get("name", w[:10]) for w in matched_elite[:2]]
                     S._log(f"  ⚡ HFT/market-maker exit ignored: {hft_names} on {pos['title'][:30]}", "DIAG")
 
-        # (c) Profit target — fires even if whale is still holding
-        # (protects against whale bagholding)
-        elif pnl_pct >= C.PROFIT_TARGET_PCT:
-            reason = f"PROFIT_TARGET +{pnl_pct*100:.1f}%"
+        # (c) Profit target — disabled. Let whale decide when to exit.
+        # When the market resolves YES, price hits 0.98+ and MARKET_RESOLVING fires.
+        # elif pnl_pct >= C.PROFIT_TARGET_PCT:  # DISABLED
 
-        # (d) Trailing stop — activates only after significant profit
-        elif pnl_pct > 0:
-            peak = pos.get("peak_pnl_pct", 0.0)
-            if pnl_pct > peak:
-                pos["peak_pnl_pct"] = pnl_pct
-                peak = pnl_pct
-            _TRAIL_ACTIVATE = 0.15
-            _TRAIL_DISTANCE = 0.10
-            if peak >= _TRAIL_ACTIVATE:
-                trail_floor = peak - _TRAIL_DISTANCE
-                if pnl_pct <= trail_floor:
-                    reason = f"TRAILING_STOP peak={peak*100:.1f}% now={pnl_pct*100:.1f}%"
+        # (d) Trailing stop — disabled. Trust the whale.
+        # If they're still in, there's still upside. Price volatility is not an exit signal.
 
-        # (e) Stop loss — ONLY if explicitly enabled in config
-        # Default: disabled. We let the whale-exit rule do the work.
-        if not reason and C.STOP_LOSS_ENABLED and cur >= 0.05 and pnl_pct <= C.STOP_LOSS_PCT:
+        # (e) Stop loss — disabled. The whale exit IS the stop loss.
+        # If the whale is still holding through a drawdown, they know something.
+        # STOP_LOSS_ENABLED in config must be False (default).
+        if not reason and C.STOP_LOSS_ENABLED and pnl_pct <= C.STOP_LOSS_PCT:
             reason = f"STOP_LOSS {pnl_pct*100:.1f}%"
 
         # (f) Expiring soon
@@ -369,6 +359,13 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
         mkt_obj       = sig.get("mkt", {})
         resolved_slug = mkt_obj.get("slug") or sig.get("slug", "")
 
+        # Build per-whale buy cash map for exit detection — maps wallet → their buy cash on this market
+        elite_ver = sig.get("elite_ver", {})
+        whale_buy_cash = {
+            w.lower(): t.get("cash", 0)
+            for w, t in elite_ver.items()
+        }
+
         pos = {
             "title":             title,
             "slug":              resolved_slug,
@@ -387,6 +384,7 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             "whale_wallets":     all_whale_addrs,
             "elite_wallets":     elite_wallet_addrs,
             "elite_names":       elite_names,
+            "whale_buy_cash":    whale_buy_cash,   # per-whale buy cash for exit detection
             "n_elite":           sig.get("n_elite", 0),
             "n_confluence":      sig.get("n_confluence", 0),
             "is_hft":            sig.get("is_hft", False),

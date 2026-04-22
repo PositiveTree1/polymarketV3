@@ -40,7 +40,7 @@ from titan_wallet import fetch_wallet, get_elite_wallets, is_hft_wallet
 _gamma_fail_count   = 0
 _gamma_open_until   = 0.0   # timestamp after which circuit is "closed" (normal)
 _CIRCUIT_THRESHOLD  = 3     # consecutive 422s before tripping (was 5)
-_CIRCUIT_COOLDOWN   = 120   # seconds to pause after tripping (was 30)
+_CIRCUIT_COOLDOWN   = 45    # seconds to pause (was 120 — too long, kills HFT spike windows)
 _gamma_cid_fails: dict = {} # conditionId → fail_count (per-CID blacklist)
 _CID_BLACKLIST_THRESHOLD = 3
 _CID_BLACKLIST_DURATION  = 600  # 10 minutes
@@ -188,6 +188,14 @@ def get_market(cid: str, trade_title: str = None, asset: str = "", slug: str = "
     if cached and (now_t - cached["ts"]) < MARKET_TTL:
         if trade_title and "?" in str(trade_title) and len(trade_title) > len(cached.get("title", "")):
             cached["title"] = trade_title
+        return cached, None
+
+    # During circuit-open period, return stale cache if available rather than
+    # failing completely. A slightly stale price/liquidity is better than
+    # dropping a valid HFT spike entirely.
+    import titan_market as _self_mod
+    if now_t < _self_mod._gamma_open_until and cached:
+        S._log(f"⚡ Gamma circuit open — using stale cache for {cid[:20]}…", "DIAG")
         return cached, None
 
     # v9: Check per-CID blacklist — skip API call for known-broken conditionIds

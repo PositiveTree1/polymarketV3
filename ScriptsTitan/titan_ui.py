@@ -52,6 +52,8 @@ TITAN_ASCII = [
     "",
 ]
 
+_ngrok_url = None  # Global for the dashboard tunnel
+
 BOOT_STEPS = [
     ("Initialising auto paper trading engine",  0.18),
     ("Loading verified whale roster",           0.22),
@@ -1620,31 +1622,121 @@ def on_boot_complete():
 
     if HAS_TELEGRAM:
         def handle_tg_message(text: str):
-            if text.strip().lower() in ("pl", "pnl", "p&l"):
+            cmd = text.strip().lower()
+            if cmd in ("pl", "pnl", "p&l"):
                 def _take_screenshot():
                     try:
                         from PIL import ImageGrab
                         import io
+                        if root.state() == 'iconic':
+                            root.deiconify()
+                        root.attributes('-topmost', True)
                         nb.select(tab_pnl)
-                        root.update_idletasks()
-                        x = graph_canvas.winfo_rootx()
-                        y = graph_canvas.winfo_rooty()
-                        w = graph_canvas.winfo_width()
-                        h = graph_canvas.winfo_height()
-                        # Capture bbox
-                        bbox = (x-2, y-2, x+w+2, y+h+2)
-                        img = ImageGrab.grab(bbox)
-                        buf = io.BytesIO()
-                        img.save(buf, format='PNG')
-                        buf.seek(0)
-                        threading.Thread(target=telegram_notifier.send_photo, args=(buf, "Titan P&L Graph"), daemon=True).start()
+                        root.update()
+                        
+                        def _do_grab():
+                            x = root.winfo_rootx()
+                            y = root.winfo_rooty()
+                            w = root.winfo_width()
+                            h = root.winfo_height()
+                            bbox = (x, y, x+w, y+h)
+                            img = ImageGrab.grab(bbox)
+                            buf = io.BytesIO()
+                            img.save(buf, format='PNG')
+                            buf.seek(0)
+                            root.attributes('-topmost', False)
+                            threading.Thread(target=telegram_notifier.send_photo, args=(buf, "Titan P&L Graph"), daemon=True).start()
+                            
+                        root.after(200, _do_grab)
                     except ImportError:
-                        threading.Thread(target=telegram_notifier.notify_error, args=("PIL not installed. PIP install Pillow to enable graph capture.",), daemon=True).start()
+                        threading.Thread(target=telegram_notifier.notify_error, args=("PIL not installed.",), daemon=True).start()
                     except Exception as e:
                         print(f"Failed to capture PnL screenshot: {e}")
-                root.after(100, _take_screenshot)
+                root.after(10, _take_screenshot)
+
+            elif cmd in ("dash", "dashboard", "app"):
+                def _start_app_and_send():
+                    global _ngrok_url
+                    if not _ngrok_url:
+                        try:
+                            from pycloudflared import try_cloudflare
+                            print("☁️ Starting Cloudflare tunnel...")
+                            tunnel = try_cloudflare(port=8080)
+                            # Try multiple possible attribute names (pycloudflared uses .tunnel)
+                            _ngrok_url = getattr(tunnel, 'tunnel', getattr(tunnel, 'url', getattr(tunnel, 'tunnel_url', None)))
+                            if not _ngrok_url:
+                                _ngrok_url = str(tunnel)
+                            print(f"🔗 Tunnel established: {_ngrok_url}")
+                        except ImportError:
+                            telegram_notifier.notify_error("pycloudflared not installed. Please 'pip install pycloudflared' to enable the dashboard Web App.")
+                            return
+                        except Exception as e:
+                            telegram_notifier.notify_error(f"Failed to start Cloudflare tunnel: {e}")
+                            return
+                    telegram_notifier.send_dashboard_button(_ngrok_url)
+                threading.Thread(target=_start_app_and_send, daemon=True).start()
+
         telegram_notifier.start_polling(handle_tg_message)
 
+        # Background server for dashboard
+        import http.server
+        import json
+        class DashboardHandler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+            def do_GET(self):
+                if self.path == '/api/data':
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    
+                    whales = sorted(_w().wallet_cache.values(), key=lambda x: x.get("score", 0), reverse=True)[:10]
+                    signals = _last_signals[:15] if _last_signals else []
+                    
+                    # Calculate equity
+                    open_value = sum(pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0) for pos in _w().open_positions.values())
+                    total_equity = _w().paper_bankroll + open_value
+                    
+                    data = {
+                        "last_update": int(time.time() * 1000),
+                        "stats": {
+                            "equity": total_equity,
+                            "bankroll": _w().paper_bankroll,
+                            "session_pnl": _w().session_pnl,
+                            "open_pos_count": len(_w().open_positions),
+                            "total_trades": len(_w().trade_history)
+                        },
+                        "pnl_history": _w().pnl_history[-100:] if hasattr(_w(), "pnl_history") else [],
+                        "whales": [
+                            {"wallet": w.get("wallet", ""), "name": w.get("name", "Unknown"), "pnl": w.get("total_pnl", 0), "volume": w.get("volume", 0), "score": w.get("score", 0)} for w in whales
+                        ],
+                        "signals": [
+                            {"question": s.get("title", s.get("market_slug", "")), "outcome": s.get("side", ""), "confluence_whales": [w.get("name", "") for w in s.get("whales", [])], "suggested_bet": s.get("bet_usdc", 0), "current_price": s.get("entry_price", 0), "estimated_prob": s.get("estimated_prob", 0), "ev_edge": s.get("ev_edge", 0), "confluence_count": len(s.get("whales", []))} for s in signals
+                        ],
+                        "open_positions": [
+                            {"title": p.get("title", ""), "outcome": p.get("outcome", ""), "entry": p.get("entry_price", 0), "cur": p.get("cur_price", 0), "shares": p.get("shares", 0), "pnl": (p.get("cur_price",0) - p.get("entry_price",0)) * p.get("shares",0)} 
+                            for p in sorted(_w().open_positions.values(), key=lambda x: x.get("entry_ts", 0), reverse=True)
+                        ],
+                        "history": [
+                            {"title": p.get("title", ""), "outcome": p.get("outcome", ""), "pnl": p.get("pnl_usdc", 0), "pct": p.get("pnl_pct", 0)}
+                            for p in _w().trade_history[::-1][:10] if p.get("type") == "SELL"
+                        ]
+                    }
+                    self.wfile.write(json.dumps(data).encode('utf-8'))
+                elif self.path == '/' or self.path.endswith('.html'):
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/html')
+                    self.end_headers()
+                    try:
+                        with open("dashboard.html", "rb") as f:
+                            self.wfile.write(f.read())
+                    except Exception:
+                        self.wfile.write(b"Dashboard HTML missing")
+                else:
+                    self.send_error(404)
+
+        threading.Thread(target=lambda: http.server.HTTPServer(('127.0.0.1', 8080), DashboardHandler).serve_forever(), daemon=True).start()
 
 show_loading_screen(root, on_boot_complete)
 root.mainloop()

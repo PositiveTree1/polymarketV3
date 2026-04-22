@@ -99,6 +99,17 @@ def analyse(trades):
         if p["elite"]:     elite_count += 1
         time.sleep(0.04)
 
+    # CRITICAL FIX: Inject all known elite/verified wallets from cache into the
+    # wallets dict. Without this, HFT fast loop cycles only see 1-3 wallets
+    # (just those in the spike batch), so build_signals always gets "0 elite"
+    # even when the spiking wallet IS elite and well-known.
+    # We don't re-fetch them (too slow) — just pass the cached profile.
+    for w, cached_profile in S.env().wallet_cache.items():
+        if w not in wallets and (cached_profile.get("elite") or cached_profile.get("verified")):
+            wallets[w] = cached_profile
+            if cached_profile.get("verified"): ver_count  += 1
+            if cached_profile.get("elite"):    elite_count += 1
+
     if S.env().cycle_count % 10 == 0:
         elite_ws = get_elite_wallets()
         if elite_ws:

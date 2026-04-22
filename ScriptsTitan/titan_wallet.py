@@ -394,12 +394,21 @@ def fetch_wallet(wallet: str) -> dict:
         fail_reasons.append(f"VER_WR {wr*100:.0f}%<{MIN_WIN_RATE_VER*100:.0f}%")
 
     portfolio_proxy = max(cur, pnl)
+
+    # Calculate alpha_per_trade BEFORE using it in the elite gate
+    apt = alpha_per_trade({"total_pnl": pnl, "n_resolved": n_res})
+
+    # Alpha gate: only block wallets with ZERO or negative alpha per trade.
+    # A lenient $1 threshold catches true market makers (tiny per-trade alpha)
+    # without accidentally demoting legitimate elites whose pnl data is incomplete.
+    _alpha_threshold = 1.0  # $1 minimum alpha per resolved trade
     elite = (
         verified and
         pnl             >= ELITE_MIN_PNL      and
         portfolio_proxy >= ELITE_MIN_PORT     and
         score           >= ELITE_MIN_SCORE    and
-        n_res           >= ELITE_MIN_RESOLVED
+        n_res           >= ELITE_MIN_RESOLVED and
+        apt             >= _alpha_threshold
     )
 
     if verified and not elite:
@@ -420,14 +429,12 @@ def fetch_wallet(wallet: str) -> dict:
     est_tag = "~" if avg_profit_estimated else ""
     hft_tag = "⚡HFT" if hft_detected else ""
 
-    # v9: Sports bot detection and per-trade alpha
+    # v9: Sports bot detection
     sports_bot_detected = is_sports_bot({
         "name": final_name, "trades_per_hour": tph,
         "avg_bet": avg_bet, "sports_bot": False,
     })
-    apt = alpha_per_trade({
-        "total_pnl": pnl, "n_resolved": n_res,
-    })
+    # apt already calculated above before elite gate
     sports_tag = "🏈SPORTS" if sports_bot_detected else ""
 
     result = {

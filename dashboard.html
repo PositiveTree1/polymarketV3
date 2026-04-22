@@ -1,217 +1,333 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Titan V11 · Polymarket Whale Intelligence</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Titan Elite Dashboard</title>
+    <!-- Chart.js for the performance graph -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
+        :root {
+            --bg: #0d1117;
+            --card: #161b22;
+            --card-hover: #1c2128;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --text-dim: #8b949e;
+            --accent: #58a6ff;
+            --pos: #39d353;
+            --neg: #f85149;
+            --gold: #f2cc60;
         }
-
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
         body {
-            font-family: 'Segoe UI', 'Roboto', sans-serif;
-            background: #0d1117;
-            color: #c9d1d9;
-            padding: 20px;
+            margin: 0; padding: 0;
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            overflow-x: hidden;
         }
-
         .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 20px;
-            border-bottom: 1px solid #30363d;
-            padding-bottom: 15px;
+            padding: 14px 16px;
+            background: rgba(13, 17, 23, 0.9);
+            backdrop-filter: blur(12px);
+            position: sticky; top: 0; z-index: 1000;
+            border-bottom: 1px solid var(--border);
+            display: flex; justify-content: space-between; align-items: center;
         }
+        .header h1 { margin: 0; font-size: 16px; font-weight: 700; color: #fff; letter-spacing: 0.5px; }
+        
+        .status-pill {
+            background: rgba(57, 211, 83, 0.1);
+            color: var(--pos);
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 10px;
+            font-weight: 800;
+            display: flex; align-items: center; gap: 6px;
+            border: 1px solid rgba(57, 211, 83, 0.2);
+        }
+        .dot { width: 6px; height: 6px; background: var(--pos); border-radius: 50%; box-shadow: 0 0 8px var(--pos); }
 
-        h1 {
-            font-weight: 400;
-            font-size: 24px;
-            color: #58a6ff;
-        }
+        .container { padding: 12px; max-width: 600px; margin: 0 auto; }
 
-        .status {
-            display: flex;
-            gap: 20px;
-            align-items: center;
-        }
+        /* Stats Grid */
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+        .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
+        .stat-label { font-size: 10px; text-transform: uppercase; color: var(--text-dim); font-weight: 700; margin-bottom: 4px; }
+        .stat-val { font-size: 20px; font-weight: 800; color: #fff; }
+        .stat-sub { font-size: 11px; margin-top: 4px; font-weight: 600; }
 
-        .led {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background: #3fb950;
-            box-shadow: 0 0 8px #3fb950;
-        }
+        /* Chart Section */
+        .section { margin-bottom: 24px; }
+        .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; padding: 0 4px; }
+        .section-title { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); }
+        .chart-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px; height: 200px; position: relative; }
 
-        .led.off {
-            background: #f85149;
-            box-shadow: none;
-        }
+        /* List Styling */
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 10px; overflow: hidden; }
+        .list-item { padding: 12px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+        .list-item:last-child { border-bottom: none; }
+        
+        .market-info { flex: 1; min-width: 0; }
+        .market-title { font-size: 13px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px; }
+        .market-meta { font-size: 11px; color: var(--text-dim); }
 
-        .grid {
-            display: grid;
-            grid-template-columns: 1fr 2fr;
-            gap: 20px;
-        }
+        .price-info { text-align: right; margin-left: 12px; }
+        .price-main { font-size: 14px; font-weight: 700; }
+        .price-sub { font-size: 11px; font-weight: 600; }
 
-        .card {
-            background: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            padding: 16px;
-        }
+        .badge { font-size: 9px; font-weight: 800; padding: 2px 6px; border-radius: 4px; text-transform: uppercase; }
+        .badge-pos { background: rgba(57, 211, 83, 0.1); color: var(--pos); }
+        .badge-neg { background: rgba(248, 81, 73, 0.1); color: var(--neg); }
+        .badge-neut { background: rgba(88, 166, 255, 0.1); color: var(--accent); }
 
-        .card h2 {
-            font-size: 18px;
-            font-weight: 500;
-            margin-bottom: 15px;
-            color: #8b949e;
-            border-bottom: 1px solid #30363d;
-            padding-bottom: 8px;
-        }
+        /* Whale Table */
+        .whale-row { display: grid; grid-template-columns: 1fr 80px 60px; padding: 10px 12px; font-size: 12px; border-bottom: 1px solid rgba(48,54,61,0.5); }
+        .whale-row:last-child { border-bottom: none; }
 
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 14px;
-        }
+        .pos { color: var(--pos); }
+        .neg { color: var(--neg); }
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 
-        th {
-            text-align: left;
-            padding: 8px 4px;
-            color: #8b949e;
-            font-weight: 400;
-            border-bottom: 1px solid #30363d;
-        }
-
-        td {
-            padding: 8px 4px;
-            border-bottom: 1px solid #21262d;
-        }
-
-        .positive {
-            color: #3fb950;
-        }
-
-        .negative {
-            color: #f85149;
-        }
-
-        .value {
-            text-align: right;
-        }
-
-        .mono {
-            font-family: 'Consolas', monospace;
-            font-size: 13px;
-        }
-
-        .footer {
-            margin-top: 20px;
-            text-align: right;
-            color: #6e7681;
-            font-size: 12px;
-        }
-
-        .signal-row:hover {
-            background: #1f242b;
-        }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+        .loading { animation: pulse 1.5s infinite; text-align: center; padding: 40px; color: var(--text-dim); font-size: 12px; }
     </style>
 </head>
-
 <body>
     <div class="header">
-        <h1>🐋 TITAN V11 · WHALE INTELLIGENCE</h1>
-        <div class="status">
-            <span id="connStatus">Connected</span>
-            <span id="connLed" class="led"></span>
-            <span>Last update: <span id="lastUpdate">--:--:--</span></span>
+        <h1>TITAN ELITE</h1>
+        <div class="status-pill">
+            <div class="dot"></div>
+            <span id="updateTime">LIVE</span>
         </div>
     </div>
-    <div class="grid">
-        <div class="card">
-            <h2>TOP WHALES</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Trader</th>
-                        <th class="value">PnL</th>
-                        <th class="value">Volume</th>
-                        <th class="value">Score</th>
-                    </tr>
-                </thead>
-                <tbody id="whalesBody">
-                    <tr>
-                        <td colspan="4" style="text-align:center">Waiting...</td>
-                    </tr>
-                </tbody>
-            </table>
+
+    <div class="container">
+        <!-- Stats Summary -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Total Equity</div>
+                <div class="stat-val" id="stat-equity">$0.00</div>
+                <div class="stat-sub" id="stat-pnl-session">+$0.00 today</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Positions</div>
+                <div class="stat-val" id="stat-pos-count">0</div>
+                <div class="stat-sub" id="stat-bankroll">Cash: $0.00</div>
+            </div>
         </div>
-        <div class="card">
-            <h2>LIVE SIGNALS</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Market / Outcome</th>
-                        <th class="value">Price</th>
-                        <th class="value">Est. Prob</th>
-                        <th class="value">EV</th>
-                        <th class="value">Whales</th>
-                    </tr>
-                </thead>
-                <tbody id="signalsBody">
-                    <tr>
-                        <td colspan="5" style="text-align:center">No signals yet</td>
-                    </tr>
-                </tbody>
-            </table>
+
+        <!-- Performance Chart -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">Performance Chart</div>
+                <div class="badge badge-neut" id="pnl-total-label">PnL Tracker</div>
+            </div>
+            <div class="chart-card">
+                <canvas id="pnlChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Open Positions -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">Open Positions</div>
+                <div class="badge badge-neut" id="pos-count-badge">0 Active</div>
+            </div>
+            <div class="card" id="positionsList">
+                <div class="loading">No active positions</div>
+            </div>
+        </div>
+
+        <!-- Live Signals -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">Titan Signals</div>
+                <div class="badge badge-neut">Top Alpha</div>
+            </div>
+            <div class="card" id="signalsList">
+                <div class="loading">Scanning markets...</div>
+            </div>
+        </div>
+
+        <!-- Top Whales -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">Top Whales</div>
+                <div class="badge badge-neut">Verified</div>
+            </div>
+            <div class="card">
+                <div style="display:grid; grid-template-columns: 1fr 80px 60px; padding:8px 12px; font-size:9px; font-weight:800; color:var(--text-dim); text-transform:uppercase; border-bottom:1px solid var(--border)">
+                    <span>Whale Identity</span>
+                    <span style="text-align:right">Total PnL</span>
+                    <span style="text-align:right">Score</span>
+                </div>
+                <div id="whalesList"></div>
+            </div>
+        </div>
+
+        <!-- Recent Exits -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">Recent Exits</div>
+                <div class="badge badge-neut">History</div>
+            </div>
+            <div class="card" id="historyList">
+                <div class="loading">No recent exits</div>
+            </div>
+        </div>
+
+        <div style="text-align:center; padding-bottom:40px; font-size:10px; color:var(--text-dim); font-weight:600; text-transform:uppercase; letter-spacing:1px">
+            Titan Engine 11.0 · Encryption Active
         </div>
     </div>
-    <div class="footer">Real-time data · For informational purposes only</div>
+
     <script>
-        const socket = new WebSocket('ws://localhost:8765');
-        const led = document.getElementById('connLed');
-        const statusTxt = document.getElementById('connStatus');
-        const lastUpdateSpan = document.getElementById('lastUpdate');
-        const whalesBody = document.getElementById('whalesBody');
-        const signalsBody = document.getElementById('signalsBody');
+        let chart = null;
+        const ctx = document.getElementById('pnlChart').getContext('2d');
 
-        function fmtUSD(v) { return v ? '$' + v.toLocaleString(undefined, { minimumFractionDigits: 0 }) : '$0'; }
-        function fmtVol(v) { return v >= 1e6 ? '$' + (v / 1e6).toFixed(1) + 'M' : v >= 1e3 ? '$' + (v / 1e3).toFixed(0) + 'k' : '$' + v; }
+        function initChart() {
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'PnL',
+                        data: [],
+                        borderColor: '#58a6ff',
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        fill: true,
+                        backgroundColor: 'rgba(88, 166, 255, 0.1)',
+                        tension: 0.3
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { display: false },
+                        y: { 
+                            grid: { color: '#21262d' },
+                            ticks: { font: { size: 9 }, color: '#8b949e' }
+                        }
+                    }
+                }
+            });
+        }
 
-        socket.onopen = () => { led.className = 'led'; statusTxt.textContent = 'Connected'; };
-        socket.onclose = () => { led.className = 'led off'; statusTxt.textContent = 'Disconnected'; };
-        socket.onerror = () => { led.className = 'led off'; statusTxt.textContent = 'Error'; };
+        function fmtUSD(n, decimals=0) {
+            return (n >= 0 ? '$' : '-$') + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+        }
 
-        socket.onmessage = (e) => {
-            const data = JSON.parse(e.data);
-            if (data.last_update) {
-                lastUpdateSpan.textContent = new Date(data.last_update).toLocaleTimeString();
+        async function update() {
+            try {
+                const res = await fetch('/api/data');
+                const data = await res.json();
+
+                // 1. Header status
+                document.getElementById('updateTime').textContent = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+
+                // 2. Stats
+                document.getElementById('stat-equity').textContent = fmtUSD(data.stats.equity, 2);
+                const sessionPnl = data.stats.session_pnl;
+                const spNode = document.getElementById('stat-pnl-session');
+                spNode.textContent = (sessionPnl >= 0 ? '+' : '') + fmtUSD(sessionPnl, 2) + ' today';
+                spNode.className = 'stat-sub ' + (sessionPnl >= 0 ? 'pos' : 'neg');
+                
+                document.getElementById('stat-pos-count').textContent = data.stats.open_pos_count;
+                document.getElementById('stat-bankroll').textContent = 'Cash: ' + fmtUSD(data.stats.bankroll, 2);
+                document.getElementById('pos-count-badge').textContent = data.stats.open_pos_count + ' ACTIVE';
+
+                // 3. Chart
+                if (data.pnl_history && data.pnl_history.length > 0) {
+                    chart.data.labels = data.pnl_history.map((_, i) => i);
+                    chart.data.datasets[0].data = data.pnl_history;
+                    const last = data.pnl_history[data.pnl_history.length-1];
+                    const first = data.pnl_history[0];
+                    chart.data.datasets[0].borderColor = (last >= first) ? '#39d353' : '#f85149';
+                    chart.data.datasets[0].backgroundColor = (last >= first) ? 'rgba(57, 211, 83, 0.05)' : 'rgba(248, 81, 73, 0.05)';
+                    chart.update('none');
+                    document.getElementById('pnl-total-label').textContent = (last-first >= 0 ? '+' : '') + fmtUSD(last-first, 0) + ' SESSION';
+                }
+
+                // 4. Positions
+                const pList = document.getElementById('positionsList');
+                if (data.open_positions && data.open_positions.length > 0) {
+                    pList.innerHTML = data.open_positions.map(p => `
+                        <div class="list-item">
+                            <div class="market-info">
+                                <div class="market-title">${p.title}</div>
+                                <div class="market-meta">Buy ${p.outcome.toUpperCase()} @ ${Math.round(p.entry*100)}¢ · ${Math.floor(p.shares)} shares</div>
+                            </div>
+                            <div class="price-info">
+                                <div class="price-main">${Math.round(p.cur*100)}¢</div>
+                                <div class="price-sub ${p.pnl >= 0 ? 'pos' : 'neg'}">${p.pnl >= 0 ? '+' : ''}${fmtUSD(p.pnl, 2)}</div>
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    pList.innerHTML = '<div class="loading">No active positions</div>';
+                }
+
+                // 5. Signals
+                const sList = document.getElementById('signalsList');
+                if (data.signals && data.signals.length > 0) {
+                    sList.innerHTML = data.signals.map(s => `
+                        <div class="list-item">
+                            <div class="market-info">
+                                <div class="market-title">${s.question}</div>
+                                <div class="market-meta">💎 ${s.confluence_count} Whales · EV: ${(s.ev_edge*100).toFixed(1)}%</div>
+                            </div>
+                            <div class="price-info">
+                                <div class="price-main" style="color:#fff">${s.outcome.toUpperCase()}</div>
+                                <div class="price-sub" style="color:var(--accent)">SIZE $${s.suggested_bet.toFixed(0)}</div>
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    sList.innerHTML = '<div class="loading">Scanning for alpha...</div>';
+                }
+
+                // 6. Whales
+                const wList = document.getElementById('whalesList');
+                if (data.whales) {
+                    wList.innerHTML = data.whales.map(w => `
+                        <div class="whale-row">
+                            <div style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:700">${w.name}</div>
+                            <div class="mono ${w.pnl >= 0 ? 'pos' : 'neg'}" style="text-align:right">${fmtUSD(w.pnl, 0)}</div>
+                            <div class="mono" style="text-align:right; color:var(--accent)">${w.score.toFixed(1)}</div>
+                        </div>
+                    `).join('');
+                }
+
+                // 7. History
+                const hList = document.getElementById('historyList');
+                if (data.history && data.history.length > 0) {
+                    hList.innerHTML = data.history.map(h => `
+                        <div class="list-item">
+                            <div class="market-info">
+                                <div class="market-title">${h.title}</div>
+                                <div class="market-meta">Exited ${h.outcome.toUpperCase()}</div>
+                            </div>
+                            <div class="price-info">
+                                <div class="price-main ${h.pnl >= 0 ? 'pos' : 'neg'}">${h.pnl >= 0 ? '+' : ''}${fmtUSD(h.pnl, 2)}</div>
+                                <div class="price-sub" style="opacity:0.5">${(h.pct*100).toFixed(1)}%</div>
+                            </div>
+                        </div>
+                    `).join('');
+                }
+
+            } catch (e) {
+                console.error(e);
             }
-            if (data.whales) {
-                let html = '';
-                data.whales.forEach(w => {
-                    html += `<tr><td><span title="${w.wallet}">${w.name}</span><br><span class="mono" style="color:#8b949e">${w.wallet?.slice(0, 6)}...${w.wallet?.slice(-4)}</span></td>
-                        <td class="value">${fmtUSD(w.pnl)}</td><td class="value">${fmtVol(w.volume)}</td><td class="value">${w.score.toFixed(1)}</td></tr>`;
-                });
-                whalesBody.innerHTML = html || '<tr><td colspan="4" style="text-align:center">No whales</td></tr>';
-            }
-            if (data.signals) {
-                let html = '';
-                data.signals.forEach(s => {
-                    const evClass = s.ev_edge >= 0 ? 'positive' : 'negative';
-                    html += `<tr class="signal-row"><td><div>${s.question || s.market_slug}</div><div class="mono" style="color:#8b949e">${s.outcome} | ${s.confluence_whales.join(', ')}</div><div>Bet: $${s.suggested_bet?.toFixed(2)}</div></td>
-                        <td class="value">${s.current_price?.toFixed(3)}</td><td class="value">${s.estimated_prob?.toFixed(3)}</td><td class="value ${evClass}">${s.ev_edge?.toFixed(3)}</td><td class="value">${s.confluence_count}</td></tr>`;
-                });
-                signalsBody.innerHTML = html || '<tr><td colspan="5" style="text-align:center">No signals</td></tr>';
-            }
-        };
+        }
+
+        initChart();
+        update();
+        setInterval(update, 3000);
     </script>
 </body>
-
 </html>

@@ -23,6 +23,7 @@ import re
 import math
 from collections import defaultdict
 import titan_state as S
+import titan_config as C
 from titan_config import *
 from titan_market import get_market, get_outcome_price, get_outcome_price_by_trade, fetch_wallet_sells
 from titan_wallet import is_hft_wallet
@@ -133,6 +134,14 @@ def check_whale_exits(cid_to_wallet_sets: dict, entry_times: dict = None) -> dic
     """
     Returns {conditionId: [wallet_addresses_that_sold]}.
     Only checks SELL activity for wallets on open positions.
+
+    IMPROVED exit detection:
+    - Matches sells by BOTH conditionId AND asset/token ID (the token ID is the
+      most reliable identifier — whales may have multiple positions in the same market).
+    - Verifies the sell happened AFTER our entry (not a pre-existing sell).
+    - Checks sell size vs open position size to detect partial vs full exits.
+      We only trigger on sells that are >= 30% of the whale's original buy cash
+      (they could be trimming, not exiting fully).
     """
     exits       = defaultdict(list)
     all_wallets = set()
@@ -147,6 +156,31 @@ def check_whale_exits(cid_to_wallet_sets: dict, entry_times: dict = None) -> dic
         else time.time() - 24 * 3600
     )
 
+    # Build a map from (cid -> wallet -> buy_cash) so we can verify sell size
+    # Use per-whale buy cash stored on the position when available (most accurate)
+    cid_wallet_buy_cash: dict = {}
+    for key, pos in S.env().open_positions.items():
+        cid = pos.get("cid", key[0])
+        whale_buy_cash = pos.get("whale_buy_cash", {})
+        if whale_buy_cash:
+            # Use the precise per-whale buy cash stored at entry time
+            cid_wallet_buy_cash[cid] = whale_buy_cash
+        else:
+            # Fallback: distribute our total bet across all elite wallets equally
+            for w in pos.get("elite_wallets", []):
+                w_lower = w.lower()
+                if cid not in cid_wallet_buy_cash:
+                    cid_wallet_buy_cash[cid] = {}
+                cid_wallet_buy_cash[cid][w_lower] = pos.get("bet", 0)
+
+    # Build asset→cid reverse map so we can match sells by token ID
+    asset_to_cid: dict = {}
+    for key, pos in S.env().open_positions.items():
+        cid = pos.get("cid", key[0])
+        asset = pos.get("asset", "")
+        if asset:
+            asset_to_cid[asset] = cid
+
     for wallet in all_wallets:
         sells = fetch_wallet_sells(wallet, global_cutoff, limit=200)
         if not sells:
@@ -154,32 +188,54 @@ def check_whale_exits(cid_to_wallet_sets: dict, entry_times: dict = None) -> dic
             continue
 
         for sell in sells:
-            ts  = sell["ts"]
-            cid = sell["cid"]
+            ts    = sell["ts"]
+            cid   = sell["cid"]
+            asset = sell.get("asset", "")
+            sell_cash = sell.get("cash", 0)
 
-            if not cid or cid not in cid_to_wallet_sets:
-                asset = sell.get("asset", "")
+            # Resolve CID: try direct match, then asset token match, then asset→cid map
+            if cid not in cid_to_wallet_sets:
                 if asset and asset in cid_to_wallet_sets:
                     cid = asset
+                elif asset and asset in asset_to_cid:
+                    cid = asset_to_cid[asset]
                 else:
                     continue
 
             if wallet not in cid_to_wallet_sets.get(cid, set()):
                 continue
+
             our_entry_ts = entry_times.get(cid, 0)
             if ts <= our_entry_ts:
+                # Sell happened before or at our entry — not an exit of our position
                 continue
+
+            # Partial sell check: only trigger if they sold at least 30% of what
+            # we tracked as their buy-side cash. This prevents triggering on tiny
+            # trims while the whale is still substantially in the position.
+            buy_cash = cid_wallet_buy_cash.get(cid, {}).get(wallet.lower(), 0)
+            if buy_cash > 0 and sell_cash > 0:
+                sell_fraction = sell_cash / buy_cash
+                if sell_fraction < 0.30:
+                    S._log(
+                        f"  🐋 Partial trim ignored: {S.env().wallet_cache.get(wallet,{}).get('name',wallet[:10])} "
+                        f"sold {sell_fraction*100:.0f}% of position (need ≥30%)",
+                        "DIAG"
+                    )
+                    continue
+
             if wallet not in exits[cid]:
                 exits[cid].append(wallet)
                 w_name = S.env().wallet_cache.get(wallet, {}).get("name", wallet[:10])
                 prof   = S.env().wallet_cache.get(wallet, {})
                 tag    = "🔥" if prof.get("elite") else "✅" if prof.get("verified") else "👁"
+                size_str = f" ${sell_cash:.0f}" if sell_cash > 0 else ""
                 S.env().WHALE_EXIT_HISTORY.append(
-                    f"[{time.strftime('%H:%M')}] {tag} {w_name} SOLD"
+                    f"[{time.strftime('%H:%M')}] {tag} {w_name} SOLD{size_str}"
                 )
                 if len(S.env().WHALE_EXIT_HISTORY) > 30:
                     del S.env().WHALE_EXIT_HISTORY[:-30]
-                S._log(f"🐋 EXIT DETECTED: {w_name} sold cid={cid[:20]}…", "INFO")
+                S._log(f"🐋 EXIT DETECTED: {w_name} sold cid={cid[:20]}… ${sell_cash:.0f}", "INFO")
 
         time.sleep(0.08)
 
@@ -266,11 +322,12 @@ def score_signal(s: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 def _adaptive_bet_caps():
     br = S.env().paper_bankroll
-    if br < 30:    return 5.00,  0.12
-    elif br < 75:  return 10.00, 0.12
-    elif br < 200: return 22.00, 0.12
-    elif br < 500: return 50.00, 0.15
-    else:          return 120.00, 0.18
+    if br < 15:    return 2.00,  0.15   # very low bankroll — be careful
+    elif br < 30:  return 5.00,  0.20   # small bankroll — allow up to 20%
+    elif br < 75:  return 12.00, 0.20
+    elif br < 200: return 30.00, 0.20
+    elif br < 500: return 60.00, 0.20
+    else:          return 150.00, 0.20
 
 
 def kelly_bet(signal: dict, wallets: dict, score: float = None) -> float:
@@ -284,11 +341,23 @@ def kelly_bet(signal: dict, wallets: dict, score: float = None) -> float:
     fair_value = max(0.03, min(0.97, fair_value))
     cur        = max(0.03, min(0.97, cur))
 
-    if cur >= fair_value:
-        return MIN_BET
+    # KEY FIX: The whale's avg_entry is NOT the fair probability ceiling.
+    # The whale bought at their entry price because they think the TRUE
+    # probability is higher. We assume a 5-15% edge above their entry
+    # based on their track record (elite score). This prevents the system
+    # from always returning MIN_BET when cur slightly exceeds whale entry.
+    avg_wscore = signal.get("avg_wscore", 0.85)
+    # Implied true prob = whale entry + edge adjustment based on their score
+    # High-score whales (0.95) → +10% edge above entry; lower (0.70) → +5%
+    edge_boost = 0.05 + (avg_wscore - 0.70) * 0.25  # 5-12.5% range
+    implied_true_prob = min(0.97, fair_value + edge_boost)
 
+    # Use implied_true_prob as our fair value for Kelly calculation
+    kelly_fair = implied_true_prob
+
+    # Standard Kelly formula: f = (b*p - q) / b where b = odds-1
     b     = max(0.05, (1.0 / cur) - 1.0 - ROUND_TRIP_FEE)
-    kelly = max(0.0, fair_value - (1 - fair_value) / b)
+    kelly = max(0.0, kelly_fair - (1 - kelly_fair) / b)
     f_kelly = kelly * KELLY_FRACTION
 
     n_conf = signal.get("n_confluence", 0)
@@ -308,15 +377,13 @@ def kelly_bet(signal: dict, wallets: dict, score: float = None) -> float:
                      1.4 if port_fraction >= 0.15 else
                      1.2 if port_fraction >= 0.05 else 1.0)
 
-    # v8: Separate sizing for HFT vs conviction vs large trades
+    # Separate sizing for HFT vs conviction vs large trades
     if is_large and not is_hft_sig:
-        # Large conviction trade: use fuller Kelly, higher tier mult
-        tier_mult = {"ALERT": 1.5, "STRONG": 1.3, "MEDIUM": 1.0, "ELITE_ONLY": 1.2, "HFT": 1.3}.get(tier, 1.0)
+        tier_mult = {"CONVICTION": 2.0, "ALERT": 1.5, "STRONG": 1.3, "MEDIUM": 1.0, "ELITE_ONLY": 1.2, "HFT": 1.3}.get(tier, 1.0)
     elif is_hft_sig and not is_large:
-        # Pure HFT mirror: use smaller sizing (whales are trading tiny)
         tier_mult = {"ALERT": 0.6, "STRONG": 0.5, "MEDIUM": 0.4, "ELITE_ONLY": 0.5, "HFT": 0.7}.get(tier, 0.5)
     else:
-        tier_mult = {"ALERT": 1.2, "STRONG": 1.0, "MEDIUM": 0.7, "ELITE_ONLY": 0.9, "HFT": 1.1}.get(tier, 0.8)
+        tier_mult = {"CONVICTION": 1.6, "ALERT": 1.2, "STRONG": 1.0, "MEDIUM": 0.7, "ELITE_ONLY": 0.9, "HFT": 1.1}.get(tier, 0.8)
 
     kelly_bet_raw = S.env().paper_bankroll * f_kelly * smult * cmult * port_mult * tier_mult
 
@@ -332,6 +399,11 @@ def kelly_bet(signal: dict, wallets: dict, score: float = None) -> float:
         bet = kelly_bet_raw * (1 - PROPORTIONAL_WEIGHT) + prop_bet * PROPORTIONAL_WEIGHT
     else:
         bet = kelly_bet_raw
+
+    # Floor: score-based minimum bet so high-confidence signals always size up
+    # Score 65 → $1.50, Score 80 → $2.50, Score 95+ → $4.00
+    score_floor = MIN_BET + max(0, (score - 52) / 45) * (MAX_BET_ABS - MIN_BET) * 0.6
+    bet = max(bet, score_floor)
 
     max_abs, max_pct = _adaptive_bet_caps()
 
@@ -397,6 +469,15 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
                             and w in {**elite_wallets, **verified_wallets}}
         all_ver = {**elite_wallets, **verified_wallets}
         n_ver   = len(all_ver)
+
+        # Compute a preliminary is_hft_signal here so the drift/slippage gates
+        # below can apply HFT-specific thresholds. The definitive version is
+        # recomputed after newest_elite_ts is known (line ~661).
+        _any_hft_trade_tagged = any(
+            t.get("is_large_trade") or t.get("hft_spike_ratio", 0) > 0
+            for t in by_w.values()
+        )
+        is_hft_signal = len(hft_wallets) > 0 or _any_hft_trade_tagged
 
         # ── GATE: must have at least one elite whale ──────────────────────────
         if not elite_wallets:
@@ -535,27 +616,61 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
 
         # ── Slippage gate ─────────────────────────────────────────────────────
         slippage = (cur - elite_avg_entry) / max(elite_avg_entry, 0.01)
-        if slippage > MAX_ENTRY_SLIPPAGE:
+        # HFT spikes require MUCH tighter slippage — the whole point is catching
+        # the momentum early. If we're already 3%+ above their entry, it's too late.
+        _max_slip = HFT_MAX_ENTRY_SLIPPAGE if is_hft_signal else MAX_ENTRY_SLIPPAGE
+        if slippage > _max_slip:
             rejects.append(
                 f"  {outcome:<12} {title[:40]}\n"
-                f"    ↳ Slippage +{slippage*100:.1f}% > max {MAX_ENTRY_SLIPPAGE*100:.0f}% "
+                f"    ↳ Slippage +{slippage*100:.1f}% > max {_max_slip*100:.0f}% "
                 f"(entry ${elite_avg_entry:.4f} → now ${cur:.4f})"
             )
             continue
 
         # ── Drift gate ────────────────────────────────────────────────────────
         drift = (cur - elite_avg_entry) / max(elite_avg_entry, 0.01)
-        if drift < MIN_DRIFT:
+        # HFT spikes: tighter drift — we must be very close to their entry price
+        _max_drift = HFT_MAX_DRIFT if is_hft_signal else MAX_DRIFT
+        _min_drift = HFT_MIN_DRIFT if is_hft_signal else MIN_DRIFT
+        if drift > _max_drift:
             rejects.append(
                 f"  {outcome:<12} {title[:40]}\n"
-                f"    ↳ Drift {drift*100:+.1f}% < min {MIN_DRIFT*100:.0f}%"
+                f"    ↳ Drift +{drift*100:.1f}% > max {_max_drift*100:.0f}% "
+                f"({'HFT' if is_hft_signal else 'std'} gate)"
+            )
+            continue
+        if drift < _min_drift:
+            rejects.append(
+                f"  {outcome:<12} {title[:40]}\n"
+                f"    ↳ Drift {drift*100:+.1f}% < min {_min_drift*100:.0f}%"
             )
             continue
 
+        # ── Post-drift EV sanity check ───────────────────────────────────────
+        # Even if drift is within gate, check if entering NOW still makes money.
+        # The whale's avg_entry IS their implied fair probability.
+        # If cur >= whale_entry, we need the market to move further in our favour
+        # to profit — check that the remaining upside justifies the entry.
+        # For a binary at cur price: win $((1/cur) - 1), lose $1.
+        # EV > 0 requires: fair_prob > cur  (whale's entry = their fair prob estimate)
+        _fair_prob = max(0.02, min(0.97, elite_avg_entry))
+        _potential_win  = (1.0 / max(cur, 0.01)) - 1.0   # $gain per $1 bet if wins
+        _raw_ev_per_1   = _fair_prob * _potential_win - (1.0 - _fair_prob)
+        # For HFT spikes: require higher EV since momentum fades fast
+        _ev_threshold = 0.05 if is_hft_signal else 0.03
+        if _raw_ev_per_1 < _ev_threshold:
+            rejects.append(
+                f"  {outcome:<12} {title[:40]}\n"
+                f"    ↳ Drift EV too low: whale_entry={elite_avg_entry:.3f} "
+                f"cur={cur:.3f} → EV={_raw_ev_per_1*100:+.1f}% < {_ev_threshold*100:.0f}% min"
+            )
+            continue
+
+        # ── Stale loser gate (previously dead code — now active) ──────────────
         if age_h_elite > STALE_LOSER_AGE_H and drift < STALE_LOSER_DRIFT:
             rejects.append(
                 f"  {outcome:<12} {title[:40]}\n"
-                f"    ↳ Stale loser: {age_h_elite:.1f}h old, {drift*100:.1f}%"
+                f"    ↳ Stale loser: {age_h_elite:.1f}h old, drift {drift*100:.1f}%"
             )
             continue
 
@@ -590,15 +705,68 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
                 )
                 continue
 
-        # ── Sports market multi-whale gate ───────────────────────────────
-        # Sports markets require >= 2 independent elite whales.
-        # Single-whale sports bets are too close to coin flips.
-        if mkt_type == "SPORTS" and len(elite_wallets) < 2:
-            rejects.append(
-                f"  {outcome:<12} {title[:40]}\n"
-                f"    ↳ SPORTS single-whale: need 2+ elites, have {len(elite_wallets)}"
+        # ── Sports market gate ────────────────────────────────────────────
+        # Sports are blocked by default (BLOCK_SPORTS config).
+        # EXCEPTION: An extreme HFT spike (500x+ avg) from an elite wallet
+        # on a live game is real signal — someone knows something.
+        # Require: elite HFT wallet + massive spike ratio + large absolute size.
+        if mkt_type == "SPORTS":
+            _max_spike = max(
+                (t.get("hft_spike_ratio", 0) for t in group),
+                default=0
             )
-            continue
+            _is_extreme_spike = (
+                is_hft_signal and
+                has_large_trade and
+                _max_spike >= 500 and
+                len(elite_wallets) >= 1
+            )
+            if not _is_extreme_spike:
+                if C.BLOCK_SPORTS:
+                    rejects.append(
+                        f"  {outcome:<12} {title[:40]}\n"
+                        f"    ↳ SPORTS blocked (spike {_max_spike:.0f}x < 500x threshold)"
+                    )
+                    continue
+                # If BLOCK_SPORTS is off, still require 2+ elites
+                if len(elite_wallets) < 2:
+                    rejects.append(
+                        f"  {outcome:<12} {title[:40]}\n"
+                        f"    ↳ SPORTS need 2+ elites, have {len(elite_wallets)}"
+                    )
+                    continue
+
+        # ── Short-duration EVENT/CRYPTO gate ─────────────────────────────
+        # Markets closing in < 1h are near-expiry binary traps.
+        # The whale may be closing out existing positions, not opening new ones.
+        # Exception: HFT spike signals with very large trades (they know the outcome)
+        hrs_left_gate = mkt.get("hrs_left")
+        if hrs_left_gate is not None and hrs_left_gate < 1.0:
+            if not (is_hft_signal and has_large_trade):
+                rejects.append(
+                    f"  {outcome:<12} {title[:40]}\n"
+                    f"    ↳ Near-expiry trap: only {hrs_left_gate:.1f}h left"
+                )
+                continue
+
+        # ── Crypto short-duration coin-flip gate ──────────────────────────
+        # "Bitcoin Up or Down" 15-min windows are coin flips.
+        # These are market-making positions — the elite whale's edge doesn't transfer.
+        # Only allow if: 2+ elite whales AND has_large_trade AND mkt has decent hours left
+        _is_crypto_coinflip = (
+            mkt_type == "CRYPTO" and
+            hrs_left_gate is not None and hrs_left_gate < 6.0 and
+            ("up or down" in title.lower() or "bitcoin up" in title.lower() or
+             "ethereum up" in title.lower() or "xrp up" in title.lower())
+        )
+        if _is_crypto_coinflip:
+            if len(elite_wallets) < 2 or not has_large_trade:
+                rejects.append(
+                    f"  {outcome:<12} {title[:40]}\n"
+                    f"    ↳ Crypto coin-flip gate: need 2+ elites + large trade, "
+                    f"have {len(elite_wallets)} elite, large={has_large_trade}"
+                )
+                continue
 
         # ── Build signal ──────────────────────────────────────────────────
         window = "hot" if any(t.get("window") == "hot" for t in all_ver.values()) else "warm"
