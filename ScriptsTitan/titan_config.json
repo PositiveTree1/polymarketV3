@@ -11,16 +11,16 @@
             "_description": "Minimum bet size in USD."
         },
         "MAX_BET_ABS": {
-            "value": 5.0,
-            "_description": "Hard cap on any single bet in USD."
+            "value": 3.0,
+            "_description": "Hard cap on any single bet in USD. Lowered from 5.0 \u2014 protect bankroll."
         },
         "MAX_BET_PCT": {
-            "value": 0.2,
-            "_description": "Max bet as fraction of current bankroll."
+            "value": 0.12,
+            "_description": "Max bet as fraction of current bankroll. Lowered from 0.20 to 0.12 to limit ruin risk."
         },
         "KELLY_FRACTION": {
-            "value": 0.25,
-            "_description": "Fraction of full Kelly to use."
+            "value": 0.2,
+            "_description": "Fraction of full Kelly to use. Lowered from 0.25 to be more conservative."
         }
     },
     "fees": {
@@ -45,8 +45,8 @@
             "_description": "Trades within this many hours are HOT."
         },
         "WARM_HOURS": {
-            "value": 6,
-            "_description": "Trades older than HOT but within this are WARM."
+            "value": 4,
+            "_description": "Trades older than HOT but within this are WARM. Reduced from 6 to fix public feed limit hits."
         },
         "CYCLE_SECONDS": {
             "value": 12,
@@ -56,8 +56,8 @@
     "hft_polling": {
         "_group": "\u26a1 HFT Polling",
         "HFT_POLL_LIMIT": {
-            "value": 50,
-            "_description": "Trades to fetch per HFT wallet per cycle."
+            "value": 100,
+            "_description": "Trades to fetch per HFT wallet per cycle. Raised from 50 to match ELITE_POLL_LIMIT \u2014 0x6E1d and similar HFT elites were hitting the 50-trade wall."
         },
         "HFT_MIN_TRADES_PER_HOUR": {
             "value": 100,
@@ -72,50 +72,50 @@
             "_description": "Min USD per HFT trade."
         },
         "HFT_SPIKE_MIN_ABS_CASH": {
-            "value": 700,
-            "_description": "HFT spike must be at least this many USD absolute (regardless of multiplier)."
+            "value": 400,
+            "_description": "HFT spike must be at least this many USD absolute. Reduced from 700 to catch more elite spikes."
         },
         "HFT_SPIKE_MULTIPLIER_LOW": {
-            "value": 30,
-            "_description": "Spike multiplier for wallets with TPH <= 200 (was 20)."
+            "value": 25,
+            "_description": "Spike multiplier for wallets with TPH <= 200. Raised from 20 to be more selective."
         },
         "HFT_SPIKE_MULTIPLIER_HIGH": {
-            "value": 40,
-            "_description": "Spike multiplier for wallets with TPH > 200."
+            "value": 35,
+            "_description": "Spike multiplier for wallets with TPH > 200. Raised from 30."
         }
     },
     "elite_polling": {
         "_group": "\ud83d\udc33 Elite Polling",
         "ELITE_POLL_LIMIT": {
-            "value": 50,
-            "_description": "Trades to fetch per elite wallet per cycle."
+            "value": 100,
+            "_description": "Trades to fetch per elite wallet per cycle. Raised from 50 \u2014 fast traders were hitting limit."
         },
         "ELITE_POLL_MIN_CASH": {
             "value": 25,
             "_description": "Min USD per trade when polling elites."
         },
         "ELITE_TRADE_MIN_FRACTION": {
-            "value": 0.05,
-            "_description": "Elite trade must be >= this fraction of their avg_bet."
+            "value": 0.03,
+            "_description": "Elite trade must be >= this fraction of their avg_bet. Lowered from 0.05 to catch more trades."
         }
     },
     "signal_quality": {
         "_group": "\ud83c\udfaf Signal Scoring",
         "MAX_SIGNAL_AGE_H": {
-            "value": 0.4,
-            "_description": "Max signal age in hours (24min \u2014 balanced between old 30min and over-tight 20min)."
+            "value": 1.0,
+            "_description": "Max signal age in hours. Relaxed to 1.0h to stop blocking valid 35-60 min old whale trades."
         },
         "MIN_SCORE": {
-            "value": 48,
-            "_description": "Min score to appear in signals list (was 45)."
+            "value": 45,
+            "_description": "Min score to appear in signals list. Lowered to 45 to allow borderline valid single-elite signals through."
         },
         "STRONG_SCORE": {
-            "value": 55,
-            "_description": "Score threshold for STRONG tier (was 55)."
+            "value": 58,
+            "_description": "Score threshold for STRONG tier."
         },
         "ALERT_SCORE": {
-            "value": 62,
-            "_description": "Score threshold for ALERT tier / auto-traded (was 62)."
+            "value": 60,
+            "_description": "Score threshold for ALERT tier / auto-traded. Lowered from 65 to 60 to allow more high-quality signals to auto-trade."
         },
         "MIN_CONFLUENCE": {
             "value": 1,
@@ -125,47 +125,47 @@
     "drift_gates": {
         "_group": "\ud83d\udcd0 Price Drift Gates",
         "MAX_DRIFT": {
-            "value": 0.06,
-            "_description": "Skip if price > whale avg entry by this fraction (was 0.10)."
+            "value": 0.07,
+            "_description": "Skip if price > whale avg entry by this fraction. Relaxed from 0.06."
         },
         "MIN_DRIFT": {
             "value": -0.1,
-            "_description": "Skip if price < whale avg entry by this fraction (was -0.15)."
+            "_description": "Skip if price < whale avg entry by this fraction. Relaxed from -0.10."
         },
         "MAX_ENTRY_SLIPPAGE": {
-            "value": 0.04,
-            "_description": "Max slippage above elite entry (was 0.06)."
+            "value": 0.05,
+            "_description": "Max slippage above elite entry. Relaxed from 0.04."
         },
         "HFT_MAX_DRIFT": {
-            "value": 0.04,
-            "_description": "Stricter max drift for HFT spike signals specifically."
+            "value": 0.05,
+            "_description": "Stricter max drift for HFT spike signals."
         },
         "HFT_MIN_DRIFT": {
-            "value": -0.08,
-            "_description": "Stricter min drift for HFT spike signals specifically."
+            "value": -0.1,
+            "_description": "Stricter min drift for HFT spike signals."
         },
         "HFT_MAX_ENTRY_SLIPPAGE": {
-            "value": 0.03,
-            "_description": "Max slippage for HFT spikes \u2014 must be very fresh."
+            "value": 0.04,
+            "_description": "Max slippage for HFT spikes."
         },
         "STALE_LOSER_AGE_H": {
             "value": 1.0,
-            "_description": "If signal this old AND losing, skip (was 1.5h)."
+            "_description": "If signal this old AND losing, skip."
         },
         "STALE_LOSER_DRIFT": {
             "value": -0.1,
-            "_description": "Drift threshold for stale loser check (was -0.12)."
+            "_description": "Drift threshold for stale loser check."
         }
     },
     "market_quality": {
         "_group": "\ud83d\udcca Market Quality",
         "MIN_LIQUIDITY": {
-            "value": 5000,
-            "_description": "Min USD liquidity."
+            "value": 3000,
+            "_description": "Min USD liquidity. Lowered from 5000 to open more markets."
         },
         "MIN_VOLUME": {
-            "value": 5000,
-            "_description": "Min USD volume."
+            "value": 3000,
+            "_description": "Min USD volume. Lowered from 5000."
         },
         "MIN_HOURS_LEFT": {
             "value": 0.5,
@@ -210,11 +210,11 @@
     "elite_thresholds": {
         "_group": "\ud83d\udd25 Elite Thresholds",
         "ELITE_MIN_PNL": {
-            "value": 40000,
+            "value": 15000,
             "_description": "Elite requires lifetime PnL >= this USD."
         },
         "ELITE_MIN_PORT": {
-            "value": 90000,
+            "value": 50000,
             "_description": "Elite requires portfolio proxy >= this USD."
         },
         "ELITE_MIN_SCORE": {
@@ -248,8 +248,8 @@
             "_description": "Max positions sharing the same eventSlug."
         },
         "MAX_POSITIONS_PER_WHALE": {
-            "value": 2,
-            "_description": "Max open positions per single elite whale."
+            "value": 1,
+            "_description": "Max open positions per single elite whale. Set to 1 to prevent double-betting on same whale's signals (e.g. 3x Sinner bets, 2x BTC bets from 0x6E1d)."
         },
         "MAX_WATCHLIST_SIZE": {
             "value": 400,
@@ -257,19 +257,19 @@
         },
         "PROFIT_TARGET_PCT": {
             "value": 0.99,
-            "_description": "Auto-sell when position is up this fraction (was 0.20, tighter guard)."
+            "_description": "Auto-sell when position is up this fraction."
         },
         "WHALE_EXIT_SELL": {
             "value": true,
-            "_description": "Exit when the original triggering whale sells \u2014 even when no stop/target is hit."
+            "_description": "Exit when the original triggering whale sells."
         },
         "STOP_LOSS_ENABLED": {
-            "value": false,
-            "_description": "Enable stop-loss independent of whale moves. FALSE = only stop when whale sells."
+            "value": true,
+            "_description": "Enable stop-loss independent of whale moves."
         },
         "STOP_LOSS_PCT": {
-            "value": -0.99,
-            "_description": "Stop-loss threshold (only used when STOP_LOSS_ENABLED=true)."
+            "value": -0.45,
+            "_description": "Stop-loss threshold for non-sports. Sports use -0.25 hardcoded. Politics: -0.45."
         }
     },
     "timing": {
@@ -343,6 +343,10 @@
             {
                 "address": "0xdf17f4a8dd01a4cfa6fc3da323a2baee5f8697d1",
                 "note": "Clear-Corridor \u2014 alpha trader"
+            },
+            {
+                "address": "0x5b6331e7ff0831a3fe2ed12004747db1a9c911a4",
+                "note": "neutralwave23 \u2014 HFT spike trader, 362-461x avg on Bitcoin ATH markets"
             }
         ]
     },
@@ -384,9 +388,13 @@
         "ALLOWED_MARKET_TYPES": [
             "POLITICS",
             "CRYPTO",
-            "EVENT"
+            "EVENT",
+            "SPORTS"
         ],
         "MIN_ELITE_CONFLUENCE": 1,
-        "BLOCK_SPORTS": true
+        "BLOCK_SPORTS": false,
+        "MIN_SPORTS_CONFLUENCE": 2,
+        "SPORTS_STOP_LOSS_PCT": -0.25,
+        "SPORTS_MAX_BET_PCT": 0.05
     }
 }

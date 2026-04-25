@@ -73,7 +73,7 @@ def is_sports_bot(profile: dict) -> bool:
     # Known sports bot names
     _SPORTS_BOT_NAMES = {
         "gamblingisallyouneed", "swisstony", "rn1", "cannae",
-        "elkmonkey", "billyel", "sportsguy",
+        "elkmonkey", "billyel", "sportsguy", "texaskid",
     }
     for sbn in _SPORTS_BOT_NAMES:
         if sbn in name:
@@ -104,18 +104,24 @@ def alpha_per_trade(profile: dict) -> float:
 #  Tracks which whales' copied trades made or lost us money.
 #  Used to auto-demote underperforming whale sources.
 # ─────────────────────────────────────────────────────────────────────────────
-_whale_performance: dict = {}  # wallet_addr → {"wins": 0, "losses": 0, "total_pnl": 0.0, "n_trades": 0}
+_whale_performance: dict = {}  # wallet_addr → {wins, losses, total_pnl, n_trades, weekly_pnl, weekly_trades, week_start_ts}
 
 
 def record_whale_trade_performance(wallet_addrs: list, pnl_usdc: float, won: bool):
     """
     Record the outcome of a copied trade for the whale(s) that sourced it.
-    Called when a position is closed.
+    Called when a position is closed. Tracks 7-day rolling window for recency.
     """
+    now_t = time.time()
+    week_ago = now_t - 7 * 86400
+
     for w in wallet_addrs:
         w = w.lower()
         if w not in _whale_performance:
-            _whale_performance[w] = {"wins": 0, "losses": 0, "total_pnl": 0.0, "n_trades": 0}
+            _whale_performance[w] = {
+                "wins": 0, "losses": 0, "total_pnl": 0.0, "n_trades": 0,
+                "recent_trades": [],  # list of (ts, pnl) for rolling 7-day window
+            }
         rec = _whale_performance[w]
         rec["n_trades"] += 1
         rec["total_pnl"] += pnl_usdc
@@ -124,10 +130,24 @@ def record_whale_trade_performance(wallet_addrs: list, pnl_usdc: float, won: boo
         else:
             rec["losses"] += 1
 
+        # Add to rolling window and prune old entries
+        rec.setdefault("recent_trades", []).append((now_t, pnl_usdc))
+        rec["recent_trades"] = [(ts, p) for ts, p in rec["recent_trades"] if ts >= week_ago]
+
 
 def get_whale_performance(wallet: str) -> dict:
     """Get copy-trading performance record for a whale."""
     return _whale_performance.get(wallet.lower(), {"wins": 0, "losses": 0, "total_pnl": 0.0, "n_trades": 0})
+
+
+def get_whale_weekly_pnl(wallet: str) -> float:
+    """Return the 7-day rolling PnL for a whale from our copy-trades."""
+    rec = _whale_performance.get(wallet.lower())
+    if not rec:
+        return 0.0
+    week_ago = time.time() - 7 * 86400
+    recent = rec.get("recent_trades", [])
+    return sum(p for ts, p in recent if ts >= week_ago)
 
 
 def get_whale_performance_summary() -> list:
@@ -136,9 +156,13 @@ def get_whale_performance_summary() -> list:
     Sorted by total PnL (worst first for easy identification of bad sources).
     """
     summary = []
+    week_ago = time.time() - 7 * 86400
     for w, rec in _whale_performance.items():
         name = S.env().wallet_cache.get(w, {}).get("name", w[:10] + "…")
         wr = rec["wins"] / rec["n_trades"] if rec["n_trades"] > 0 else 0
+        recent = rec.get("recent_trades", [])
+        weekly_pnl = sum(p for ts, p in recent if ts >= week_ago)
+        weekly_trades = sum(1 for ts, _ in recent if ts >= week_ago)
         summary.append({
             "wallet": w,
             "name": name,
@@ -148,6 +172,8 @@ def get_whale_performance_summary() -> list:
             "win_rate": round(wr, 2),
             "total_pnl": round(rec["total_pnl"], 4),
             "avg_pnl": round(rec["total_pnl"] / max(rec["n_trades"], 1), 4),
+            "weekly_pnl": round(weekly_pnl, 4),
+            "weekly_trades": weekly_trades,
         })
     return sorted(summary, key=lambda x: x["total_pnl"])
 

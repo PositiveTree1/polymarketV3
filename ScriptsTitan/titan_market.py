@@ -39,11 +39,11 @@ from titan_wallet import fetch_wallet, get_elite_wallets, is_hft_wallet
 # ─────────────────────────────────────────────────────────────────────────────
 _gamma_fail_count   = 0
 _gamma_open_until   = 0.0   # timestamp after which circuit is "closed" (normal)
-_CIRCUIT_THRESHOLD  = 3     # consecutive 422s before tripping (was 5)
-_CIRCUIT_COOLDOWN   = 45    # seconds to pause (was 120 — too long, kills HFT spike windows)
+_CIRCUIT_THRESHOLD  = 10    # consecutive 422s before tripping (raised from 3 — trips too fast)
+_CIRCUIT_COOLDOWN   = 20    # seconds to pause (lowered from 45 — shorter recovery window)
 _gamma_cid_fails: dict = {} # conditionId → fail_count (per-CID blacklist)
 _CID_BLACKLIST_THRESHOLD = 3
-_CID_BLACKLIST_DURATION  = 600  # 10 minutes
+_CID_BLACKLIST_DURATION  = 300  # 5 minutes (reduced from 10 — allow retry sooner)
 
 
 def _gamma_get(url: str, params: dict) -> dict | list | None:
@@ -128,7 +128,7 @@ def _fetch_market_raw(cid: str, asset: str = "", slug: str = "") -> dict | None:
     # This lookup never returns the wrong market. Preferred over slug.
     if asset:
         data = _gamma_get(f"{GAMMA_API}/markets", {
-            "clob_token_ids": json.dumps([asset]), "limit": 1
+            "clob_token_ids": f'["{asset}"]', "limit": 1
         })
         m = _pick(data)
         if m and _cid_ok(m):
@@ -422,6 +422,100 @@ def get_outcome_price_by_trade(mkt: dict, trade: dict) -> float:
             return mkt["yes_price"]
 
     return price
+
+
+def fetch_position_price_fast(cid: str, asset: str, outcome: str) -> float | None:
+    """
+    Fast lightweight price fetch for open positions. Bypasses broken Gamma conditionId
+    endpoint entirely.
+
+    Strategy order:
+    1. Data API /positions?asset=TOKEN - direct curPrice for our token.
+    2. Gamma clob_token_ids - confirmed working, returns full price array indexed by token.
+    3. Data API /trades?conditionId - recent trades. CRITICAL FIX: if we find the
+       OPPOSITE outcome's trade price, INVERT it (1 - price) to get our token's price.
+       e.g. we hold 'No' and find 'Yes' at 0.99 -> our 'No' = 1 - 0.99 = 0.01
+
+    Returns float price or None if unavailable.
+    """
+    try:
+        import json as _json
+
+        # Strategy 1: positions endpoint - most direct (our token's current market value)
+        if asset:
+            pos_data = S.safe_get(f"{DATA_API}/positions", {"asset": asset, "limit": 1})
+            if pos_data and isinstance(pos_data, list) and pos_data:
+                cur_p = float(pos_data[0].get("curPrice") or pos_data[0].get("cur_price") or 0)
+                if 0.001 <= cur_p <= 0.999:
+                    return cur_p
+                if cur_p < 0.001 and pos_data[0].get("curPrice") is not None:
+                    return 0.005   # near-zero = effectively resolved loss
+                if cur_p > 0.999 and pos_data[0].get("curPrice") is not None:
+                    return 0.995   # near-one = effectively resolved win
+
+        # Strategy 2: Gamma clob_token_ids - works when conditionId fails
+        if asset:
+            data = S.safe_get(f"{GAMMA_API}/markets", {
+                "clob_token_ids": f'["{asset}"]', "limit": 1
+            })
+            if data and isinstance(data, list) and data:
+                m = data[0]
+                raw_prices = m.get("outcomePrices") or "[]"
+                try:
+                    prices = _json.loads(raw_prices) if isinstance(raw_prices, str) else list(raw_prices)
+                    prices = [float(p) for p in prices]
+                except Exception:
+                    prices = []
+                clob_tokens = m.get("clobTokenIds") or m.get("clob_token_ids") or "[]"
+                try:
+                    if isinstance(clob_tokens, str):
+                        clob_tokens = _json.loads(clob_tokens)
+                except Exception:
+                    clob_tokens = []
+                for i, tok in enumerate(clob_tokens):
+                    if str(tok) == str(asset) and i < len(prices):
+                        p = prices[i]
+                        cached = S.market_cache.get(cid)
+                        if cached:
+                            cached["asset_to_price"][asset] = p
+                            if i == 0:
+                                cached["yes_price"] = p
+                            else:
+                                cached["no_price"] = p
+                            cached["ts"] = time.time()
+                        return p
+
+        # Strategy 3: Data API recent trades (always works, even post-resolution)
+        # KEY FIX: invert price when we find the OPPOSITE outcome's recent trade
+        data = S.safe_get(f"{DATA_API}/trades", {"conditionId": cid, "limit": 10})
+        if data and isinstance(data, list):
+            our_lower = outcome.lower().strip()
+            best_direct = None
+            best_inverted = None
+            for t in data:
+                t_price = float(t.get("price") or 0)
+                t_outcome = (t.get("outcome") or "").lower().strip()
+                t_asset = t.get("asset") or ""
+                if t_price <= 0 or t_price >= 1:
+                    continue
+                # Direct asset match - most reliable
+                if asset and t_asset == asset:
+                    return t_price
+                # Label match
+                if t_outcome and our_lower:
+                    if t_outcome == our_lower and best_direct is None:
+                        best_direct = t_price
+                    elif t_outcome != our_lower and best_inverted is None:
+                        # Opposite outcome found - invert to get our price
+                        best_inverted = 1.0 - t_price
+            if best_direct is not None:
+                return best_direct
+            if best_inverted is not None:
+                return best_inverted
+
+    except Exception as e:
+        S._log(f"  warning fetch_position_price_fast failed: {e}", "DIAG")
+    return None
 
 
 def is_market_resolving(mkt: dict) -> bool:
@@ -786,9 +880,13 @@ def fetch_hft_spike_trades() -> list:
             # Core gate: spike ratio based on trades/hour
             # Higher-frequency bots need a bigger spike to be meaningful
             tph = prof.get("trades_per_hour", 0)
-            required_mult = 40.0 if tph > 200 else 20.0
+            required_mult = HFT_SPIKE_MULTIPLIER_HIGH if tph > 200 else HFT_SPIKE_MULTIPLIER_LOW
             if cash < avg_bet * required_mult:
                 continue  # routine noise
+
+            # Absolute cash floor — skip tiny spikes even if ratio is met
+            if cash < HFT_SPIKE_MIN_ABS_CASH:
+                continue
 
             trade["is_large_trade"]   = True
             trade["hft_spike_ratio"]  = round(cash / avg_bet, 1)

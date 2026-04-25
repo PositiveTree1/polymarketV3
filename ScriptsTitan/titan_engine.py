@@ -126,6 +126,17 @@ def analyse(trades):
     whale_exits = {}
     if cid_to_wallet_sets:
         whale_exits = check_whale_exits(cid_to_wallet_sets, entry_times)
+    elif S.env().open_positions:
+        # FIX: Even with no cid_to_wallet_sets, still check exits for any open positions
+        # that may not have been registered in position_whale_map (e.g. restored from state).
+        rebuilt = {}
+        for key, pos in S.env().open_positions.items():
+            cid = pos.get("cid", key[0])
+            whales = set(pos.get("elite_wallets", []) + pos.get("whale_wallets", []))
+            if whales:
+                rebuilt[cid] = whales
+        if rebuilt:
+            whale_exits = check_whale_exits(rebuilt, entry_times)
 
     signals, rejects = build_signals(trades, wallets, whale_exits)
     _log(
@@ -152,12 +163,13 @@ def analyse(trades):
     if S.env().cycle_count % 50 == 0 and S.env().cycle_count > 0:
         perf = get_whale_performance_summary()
         if perf:
-            _log("📊 WHALE PERFORMANCE:", "INFO")
+            _log("📊 WHALE PERFORMANCE (copy-trade outcomes):", "INFO")
             for rec in perf[:10]:
                 emoji = "✅" if rec["total_pnl"] >= 0 else "❌"
+                week_tag = f"  7d:${rec['weekly_pnl']:+.2f}({rec['weekly_trades']}t)" if rec.get("weekly_trades") else ""
                 _log(
                     f"  {emoji} {rec['name']:<18} {rec['wins']}W/{rec['losses']}L "
-                    f"WR:{rec['win_rate']*100:.0f}% PnL:${rec['total_pnl']:+.4f}",
+                    f"WR:{rec['win_rate']*100:.0f}% PnL:${rec['total_pnl']:+.4f}{week_tag}",
                     "INFO"
                 )
 

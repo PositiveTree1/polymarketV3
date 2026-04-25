@@ -1707,19 +1707,19 @@ def on_boot_complete():
                             "open_pos_count": len(_w().open_positions),
                             "total_trades": len(_w().trade_history)
                         },
-                        "pnl_history": _w().pnl_history[-100:] if hasattr(_w(), "pnl_history") else [],
+                        "pnl_history": [round(v - engine.BANKROLL_START, 4) for _, v in (_w().equity_history[-200:] if _w().equity_history else [])],
                         "whales": [
                             {"wallet": w.get("wallet", ""), "name": w.get("name", "Unknown"), "pnl": w.get("total_pnl", 0), "volume": w.get("volume", 0), "score": w.get("score", 0)} for w in whales
                         ],
                         "signals": [
-                            {"question": s.get("title", s.get("market_slug", "")), "outcome": s.get("side", ""), "confluence_whales": [w.get("name", "") for w in s.get("whales", [])], "suggested_bet": s.get("bet_usdc", 0), "current_price": s.get("entry_price", 0), "estimated_prob": s.get("estimated_prob", 0), "ev_edge": s.get("ev_edge", 0), "confluence_count": len(s.get("whales", []))} for s in signals
+                            {"question": s.get("title", ""), "outcome": s.get("outcome", ""), "suggested_bet": s.get("bet", 0), "current_price": s.get("cur", 0), "ev_edge": (s.get("ev_info") or {}).get("ev_pct", 0) / 100, "confluence_count": s.get("n_confluence", 0)} for s in signals
                         ],
                         "open_positions": [
                             {"title": p.get("title", ""), "outcome": p.get("outcome", ""), "entry": p.get("entry_price", 0), "cur": p.get("cur_price", 0), "shares": p.get("shares", 0), "pnl": (p.get("cur_price",0) - p.get("entry_price",0)) * p.get("shares",0)} 
                             for p in sorted(_w().open_positions.values(), key=lambda x: x.get("entry_ts", 0), reverse=True)
                         ],
                         "history": [
-                            {"title": p.get("title", ""), "outcome": p.get("outcome", ""), "pnl": p.get("pnl_usdc", 0), "pct": p.get("pnl_pct", 0)}
+                            {"title": p.get("title", ""), "outcome": p.get("outcome", ""), "pnl": p.get("pnl_usdc", 0), "pct": (p.get("pnl_pct") or 0) / 100}
                             for p in _w().trade_history[::-1][:10] if p.get("type") == "SELL"
                         ]
                     }

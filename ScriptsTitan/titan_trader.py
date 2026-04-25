@@ -25,15 +25,114 @@ from titan_wallet  import is_hft_wallet, record_whale_trade_performance
 from titan_persistence import save_state, save_whale_roster_async
 
 
+
+
+def _try_fetch_resolution_price(cid: str, asset: str, outcome: str) -> float | None:
+    """
+    FIX: Phantom profit prevention + stale-price resolution detection.
+    When Gamma API is down (422 flood), we use the Data API which continues
+    working even after market resolution, independent of Gamma API.
+
+    Returns the current outcome price (near 0 or 1 if resolved), or None if unknown.
+    """
+    try:
+        # Strategy 1: Asset/token ID lookup via clob_token_ids (most reliable)
+        # The token price goes to 1.0 if that outcome won, 0.0 if it lost.
+        if asset:
+            data = S.safe_get(f"{GAMMA_API}/markets", {
+                "clob_token_ids": f'["{asset}"]', "limit": 1
+            })
+            if data and isinstance(data, list) and data:
+                m = data[0]
+                import json as _json
+                raw_prices = m.get("outcomePrices") or "[]"
+                try:
+                    prices = _json.loads(raw_prices) if isinstance(raw_prices, str) else list(raw_prices)
+                    prices = [float(p) for p in prices]
+                except Exception:
+                    prices = []
+                clob_tokens = m.get("clobTokenIds") or m.get("clob_token_ids") or "[]"
+                try:
+                    if isinstance(clob_tokens, str):
+                        clob_tokens = _json.loads(clob_tokens)
+                except Exception:
+                    clob_tokens = []
+                for i, tok in enumerate(clob_tokens):
+                    if str(tok) == str(asset) and i < len(prices):
+                        p = prices[i]
+                        if p >= 0.97 or p <= 0.03:
+                            S._log(f"  📡 Asset price confirmed: {asset[:20]} = {p:.4f}", "DIAG")
+                            return p
+
+        # Strategy 2: Data API trades for this conditionId — look for near-0/1 prices
+        # which appear when a market resolves (losing tokens trade near 0.01)
+        data = S.safe_get(f"{DATA_API}/trades", {
+            "conditionId": cid,
+            "limit": 10,
+        })
+        if data and isinstance(data, list):
+            for t in data:
+                price = float(t.get("price") or 0)
+                t_outcome = t.get("outcome", "")
+                t_asset = t.get("asset", "")
+                if price >= 0.97:
+                    if (t_outcome.lower() == outcome.lower() or
+                            (asset and t_asset == asset)):
+                        return price  # We hold the winning side
+                    else:
+                        return 0.01  # We hold the losing side
+                elif price <= 0.03:
+                    if (t_outcome.lower() == outcome.lower() or
+                            (asset and t_asset == asset)):
+                        return price  # We hold the losing side
+                    else:
+                        return 0.99  # We hold the winning side
+
+        # Strategy 3: Positions endpoint — check our own position's current value
+        if asset:
+            pos_data = S.safe_get(f"{DATA_API}/positions", {
+                "asset": asset, "limit": 1,
+            })
+            if pos_data and isinstance(pos_data, list) and pos_data:
+                p = pos_data[0]
+                cur_p = float(p.get("curPrice", 0) or 0)
+                if cur_p >= 0.97 or cur_p <= 0.03:
+                    return cur_p
+
+    except Exception as e:
+        S._log(f"  ⚠ Resolution price fetch failed: {e}", "DIAG")
+    return None
+
 def _get_current_price(pos: dict) -> tuple:
+    """
+    Two-stage price fetch for open positions.
+
+    Stage 1 (fast — every cycle): fetch_position_price_fast() using:
+      a) Data API /positions endpoint (direct token value)
+      b) Gamma clob_token_ids (bypasses broken conditionId 422s)
+      c) Data API recent trades WITH price inversion for opposite outcomes
+
+    Stage 2 (slow — when fast path fails): full get_market() Gamma refresh.
+
+    Returns (price, is_resolving).
+    """
+    from titan_market import fetch_position_price_fast
     cid     = pos.get("cid")
     outcome = pos.get("outcome", "")
     asset   = pos.get("asset", "")
     title   = pos.get("title", "")
     stale_price = pos.get("cur_price", pos.get("entry_price", 0.5))
 
+    # Stage 1: Fast path — runs every cycle, lightweight
+    fast_price = fetch_position_price_fast(cid, asset, outcome)
+    if fast_price is not None:
+        resolving = fast_price <= 0.03 or fast_price >= 0.97
+        pos["market_fail_count"] = 0
+        return fast_price, resolving
+
+    # Stage 2: Full Gamma refresh (bust stale cache first)
     cached = S.market_cache.get(cid)
-    if cached and (time.time() - cached.get("ts", 0)) > 20:
+    if cached and (time.time() - cached.get("ts", 0)) > C.MARKET_TTL:
         S.market_cache.pop(cid, None)
 
     mkt, err = get_market(cid, title, asset=asset, slug=pos.get("slug", ""))
@@ -48,17 +147,11 @@ def _get_current_price(pos: dict) -> tuple:
         ap = mkt.get("asset_to_price", {})
         if asset in ap:
             price = ap[asset]
-            if price <= 0.02: return price, True
-            if price >= 0.98: return price, True
+            if price <= 0.03: return price, True
+            if price >= 0.97: return price, True
             return price, resolving
 
-    cur    = get_outcome_price(mkt, outcome, asset=asset)
-    labels = mkt.get("outcome_labels", [])
-    if len(labels) >= 2 and not resolving:
-        lbl1 = str(labels[1])
-        if outcome.lower() == lbl1.lower() or outcome.strip() == lbl1.strip():
-            cur = mkt.get("no_price", 1.0 - mkt["yes_price"])
-
+    cur = get_outcome_price(mkt, outcome, asset=asset)
     return cur, resolving
 
 
@@ -147,10 +240,18 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
         # (d) Trailing stop — disabled. Trust the whale.
         # If they're still in, there's still upside. Price volatility is not an exit signal.
 
-        # (e) Stop loss — disabled. The whale exit IS the stop loss.
-        # If the whale is still holding through a drawdown, they know something.
-        # STOP_LOSS_ENABLED in config must be False (default).
-        if not reason and C.STOP_LOSS_ENABLED and pnl_pct <= C.STOP_LOSS_PCT:
+        # (e) Dynamic stop loss based on market type.
+        # Sports: tight -25% stop (games resolve fast, no recovery possible).
+        # Crypto: -35% stop (volatile but can recover, whale may still be right).
+        # Politics/Event: -50% stop (or rely on whale exit — slow-moving markets).
+        # STOP_LOSS_ENABLED=true enables this regardless of whale status.
+        # CRITICAL: For sports, always apply stop loss — whale can't exit fast enough.
+        mkt_type_pos = pos.get("mkt_type", "POLITICS")
+        if mkt_type_pos == "SPORTS":
+            _sport_stop = -0.25   # -25% for sports — fast stop
+            if not reason and pnl_pct <= _sport_stop:
+                reason = f"SPORTS_STOP_LOSS {pnl_pct*100:.1f}%"
+        elif not reason and C.STOP_LOSS_ENABLED and pnl_pct <= C.STOP_LOSS_PCT:
             reason = f"STOP_LOSS {pnl_pct*100:.1f}%"
 
         # (f) Expiring soon
@@ -164,16 +265,97 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             else:
                 pos["market_fail_count"] = pos.get("market_fail_count", 0) + 1
                 fail_count = pos["market_fail_count"]
+                if fail_count >= 3:
+                    # After just 3 failures, try to get resolution price from Data API
+                    # This is cheap and catches resolved markets quickly
+                    real_p = _try_fetch_resolution_price(
+                        cid, pos.get("asset", ""), pos.get("outcome", "")
+                    )
+                    if real_p is not None:
+                        cur = real_p
+                        pos["cur_price"] = cur
+                        pnl_pct = (cur - entry) / max(entry, 0.001)
+                        if real_p <= 0.03 or real_p >= 0.97:
+                            reason = f"MARKET_RESOLVED_CONFIRMED cur={cur:.3f}"
+                            S._log(
+                                f"  📡 Fast resolution check: {pos.get('title','?')[:35]} @ ${cur:.4f}",
+                                "INFO"
+                            )
                 if fail_count >= 10:
                     stale_p = pos.get("cur_price", 0.5)
                     if stale_p <= 0.05 or stale_p >= 0.95:
                         reason = "MARKET_RESOLVED_OR_GONE"
                     elif fail_count >= 20:
+                        # FIX: MARKET_GONE phantom profit bug.
+                        # Before triggering exit, try to fetch the real final price
+                        # from the Data API trades endpoint (works even after resolution,
+                        # independent of Gamma API). If we get a real price, use it.
+                        # If not, force exit at entry_price (0% PnL) — conservative
+                        # but honest: we know nothing about the real outcome.
+                        # This prevents the Sweeny-style phantom profit where a stale
+                        # pre-resolution high price was used as the exit price.
+                        real_exit_price = _try_fetch_resolution_price(
+                            cid, pos.get("asset", ""), pos.get("outcome", "")
+                        )
+                        if real_exit_price is not None:
+                            cur = real_exit_price
+                            pos["cur_price"] = cur
+                            pnl_pct = (cur - entry) / max(entry, 0.001)
+                            S._log(
+                                f"  📡 Resolution price fetched from Data API: "
+                                f"{pos.get('title','?')[:30]} @ ${cur:.4f}",
+                                "INFO"
+                            )
+                        else:
+                            # No reliable price available — exit at entry (0% PnL)
+                            # This is conservative but prevents phantom profits.
+                            cur = pos.get("entry_price", entry)
+                            pos["cur_price"] = cur
+                            pnl_pct = 0.0
+                            S._log(
+                                f"  ⚠ MARKET_GONE with no real price — exiting at entry "
+                                f"to avoid phantom PnL: {pos.get('title','?')[:30]}",
+                                "WARN"
+                            )
                         reason = "MARKET_GONE"
 
         # (g) Near-zero price = resolved against us
         if not reason and cur <= 0.03 and hold_minutes > 10:
             reason = f"RESOLVED_LOSS cur={cur:.3f}"
+
+        # (g2) CATASTROPHIC LOSS GUARD — exit any position down > 70%.
+        # Covers the 0.03-0.10 range that is resolved-but-not-detected.
+        # Sports: games end, prices go to ~0.03, whale can't exit in time.
+        if not reason and pnl_pct <= -0.70 and hold_minutes > 3:
+            reason = f"CATASTROPHIC_LOSS {pnl_pct*100:.1f}% cur={cur:.3f}"
+            S._log(
+                f"  🛑 Catastrophic loss guard: {pos.get('title','?')[:35]} "
+                f"P&L={pnl_pct*100:+.1f}% cur=${cur:.4f}",
+                "WARN"
+            )
+
+        # (h) Stale-price resolution check: position is deep ITM (entry was low,
+        # stale price is still mid-range) AND Gamma API keeps failing.
+        # Example: "Bitcoin $80k April 20-26 [Yes]" — entered at 0.71, market
+        # resolved YES at ~0.99 but Gamma returns 422 so price never updates.
+        # After 5 API failures, try Data API to confirm resolution.
+        if not reason and pos.get("market_fail_count", 0) >= 5:
+            stale_p = pos.get("cur_price", 0.5)
+            # Only probe if price is in ambiguous mid-range (not already near resolved)
+            if 0.05 < stale_p < 0.95:
+                real_p = _try_fetch_resolution_price(
+                    cid, pos.get("asset", ""), pos.get("outcome", "")
+                )
+                if real_p is not None and (real_p >= 0.97 or real_p <= 0.03):
+                    cur = real_p
+                    pos["cur_price"] = cur
+                    pnl_pct = (cur - entry) / max(entry, 0.001)
+                    reason = f"MARKET_RESOLVED_CONFIRMED cur={cur:.3f}"
+                    S._log(
+                        f"  📡 Stale-price resolution confirmed: "
+                        f"{pos.get('title','?')[:35]} @ ${cur:.4f} (was ${stale_p:.4f})",
+                        "INFO"
+                    )
 
         if reason:
             pos["reason"] = reason
@@ -390,6 +572,7 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             "is_hft":            sig.get("is_hft", False),
             "is_conviction":     is_conviction,
             "mkt_type":          mkt_type,
+            "is_sports":         sig.get("is_sports", False),
             "conviction_detail": sig.get("conviction_detail", ""),
             "ev_info":           ev_info,
             "avg_entry":         sig.get("avg_entry", cur),

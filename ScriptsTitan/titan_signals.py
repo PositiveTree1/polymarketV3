@@ -26,7 +26,7 @@ import titan_state as S
 import titan_config as C
 from titan_config import *
 from titan_market import get_market, get_outcome_price, get_outcome_price_by_trade, fetch_wallet_sells
-from titan_wallet import is_hft_wallet
+from titan_wallet import is_hft_wallet, get_whale_weekly_pnl
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -107,7 +107,7 @@ def estimate_expected_value(cur_price: float, avg_entry: float, liq: float,
         "impact_cost": round(impact_pct * 100, 2),
         "total_friction": round(total_friction * 100, 2),
         "fair_prob": round(fair_prob * 100, 1),
-        "tradeable": ev_after_friction > 0.005,  # require > 0.5% EV
+        "tradeable": ev_after_friction > 0.0,  # require positive EV (signal-level gate already checks 1-2%)
     }
 
 
@@ -313,7 +313,20 @@ def score_signal(s: dict) -> dict:
 
     bd["exit_penalty"] = -(len(s.get("exits_same_side", [])) * 8)
 
-    bd["total"] = round(min(100, max(0, sum(bd.values()))), 1)
+    # Weekly performance penalty: if our copy-trades from these elite whales
+    # have been net-negative in the last 7 days, apply a score penalty.
+    # This prevents us from blindly following whales who are currently cold.
+    weekly_pnl_total = sum(
+        get_whale_weekly_pnl(w)
+        for w in s.get("elite_ver", {}).keys()
+    )
+    if weekly_pnl_total < -1.0:
+        # Every $1 of weekly loss = -1 score point, capped at -10
+        bd["weekly_penalty"] = max(-10, round(weekly_pnl_total, 0))
+    else:
+        bd["weekly_penalty"] = 0
+
+    bd["total"] = round(min(100, max(0, sum(v for k, v in bd.items() if k != "total"))), 1)
     return bd
 
 
@@ -415,6 +428,25 @@ def kelly_bet(signal: dict, wallets: dict, score: float = None) -> float:
     if is_hft_sig and not is_large:
         max_abs = min(max_abs * 0.5, 2.0)
 
+    # SPORTS PENALTY: sports are random events — no betting edge, use tiny size
+    mkt_type = signal.get("mkt_type", "POLITICS")
+    if mkt_type == "SPORTS":
+        bet = bet * 0.4   # 40% of calculated size for sports
+        max_abs = min(max_abs, S.env().paper_bankroll * 0.05)  # Hard 5% cap for sports
+
+    # Score-tiered hard floor/ceiling: ensure small bets for low-confidence signals
+    # Score < 60: cap at 4% bankroll regardless of kelly output
+    # Score < 55: cap at 3% bankroll
+    if score < 55:
+        max_abs = min(max_abs, S.env().paper_bankroll * 0.03)
+    elif score < 60:
+        max_abs = min(max_abs, S.env().paper_bankroll * 0.04)
+    elif score < 65:
+        max_abs = min(max_abs, S.env().paper_bankroll * 0.06)
+    elif score < 70:
+        max_abs = min(max_abs, S.env().paper_bankroll * 0.08)
+    # score >= 70: use full max_abs from caps
+
     return round(min(max_abs, S.env().paper_bankroll * max_pct, max(MIN_BET, bet)), 2)
 
 
@@ -479,6 +511,30 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
         )
         is_hft_signal = len(hft_wallets) > 0 or _any_hft_trade_tagged
 
+        # ── COUNTER-WHALE ANALYSIS ───────────────────────────────────────────
+        # Check if verified whales are buying the OPPOSITE side of this market.
+        # Find trades for (cid, opposite_outcome) in cid_groups.
+        opposite_elite_cash = 0.0
+        our_elite_cash = sum(t["cash"] for t in elite_wallets.values()) if elite_wallets else 0.0
+        for (other_cid, other_outcome), other_group in cid_groups.items():
+            if other_cid == cid and other_outcome != outcome:
+                for t in other_group:
+                    w = t["wallet"]
+                    if wallets.get(w, _EMPTY_W).get("elite") or wallets.get(w, _EMPTY_W).get("verified"):
+                        opposite_elite_cash += t["cash"]
+                break
+
+        # If opposing elite flow > 60% of our elite flow, the signal is contested — skip
+        if opposite_elite_cash > 0 and our_elite_cash > 0:
+            opposition_ratio = opposite_elite_cash / (our_elite_cash + opposite_elite_cash)
+            if opposition_ratio > 0.60:
+                rejects.append(
+                    f"  {outcome:<12} {title[:40]}\n"
+                    f"    ↳ Counter-whale: ${opposite_elite_cash:.0f} opposing vs ${our_elite_cash:.0f} ours"
+                    f" ({opposition_ratio*100:.0f}% against)"
+                )
+                continue
+
         # ── GATE: must have at least one elite whale ──────────────────────────
         if not elite_wallets:
             watchable_count = len([w for w in by_w if wallets.get(w, _EMPTY_W).get("watchable")])
@@ -501,8 +557,38 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
         )
         mkt, mkt_fail = get_market(cid, trade_title, asset=asset_hint, slug=slug_hint)
         if not mkt:
-            rejects.append(f"  {outcome:<12} {title[:40]}\n    ↳ Market: {mkt_fail}")
-            continue
+            # For HFT spike signals: don't kill the signal just because Gamma API is down.
+            # We already know the price from the trade record itself.
+            # Build a minimal synthetic market object from trade data so the signal survives.
+            _is_hft_pre = any(
+                t.get("hft_spike_ratio", 0) > 0 or t.get("is_large_trade")
+                for t in by_w.values()
+            ) and len(hft_wallets) > 0
+            if _is_hft_pre:
+                # Use trade price as both entry and current price (no drift = fresh)
+                _trade_price = next(iter(elite_wallets.values())).get("price", 0.5)
+                mkt = {
+                    "yes_price": _trade_price, "no_price": 1.0 - _trade_price,
+                    "outcome_prices": {"Yes": _trade_price, "No": 1.0 - _trade_price},
+                    "asset_to_price": {asset_hint: _trade_price} if asset_hint else {},
+                    "liq": 10_000,   # assume liquid — we'll find out on exit
+                    "volume": 50_000,
+                    "title": trade_title,
+                    "hrs_left": 168,  # assume > 7 days — safe for HFT spikes
+                    "slug": slug_hint or "",
+                    "event_slug": "",
+                    "ts": now_t,
+                    "outcome_labels": [],
+                    "token_index": {},
+                    "index_to_price": {0: _trade_price, 1: 1.0 - _trade_price},
+                }
+                S._log(
+                    f"  ⚡ HFT API fallback: {title[:35]} — using trade price ${_trade_price:.4f}",
+                    "DIAG"
+                )
+            else:
+                rejects.append(f"  {outcome:<12} {title[:40]}\n    ↳ Market: {mkt_fail}")
+                continue
         cur = get_outcome_price(mkt, outcome, asset=asset_hint)
 
         # SANITY CHECK: if cur suspiciously equals the exact default (~0.545),
@@ -524,6 +610,37 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
 
         # ── Market type classification ─────────────────────────────────────
         mkt_type = classify_market(title, event_slug_sig, mkt.get("hrs_left"))
+
+        # ── SPORTS-SPECIFIC GATES ────────────────────────────────────────────
+        # Sports markets (baseball, tennis, soccer, basketball) are inherently random.
+        # Even elite whales fail on sports regularly. Apply stricter rules:
+        # - Require at least 2 NON-SPORTS-BOT elite whales for sports
+        #   Sports bots (RN1, GamblingIsAllYouNeed, swisstony, elkmonkey) are
+        #   market-makers. They trade BOTH sides rapidly for spread, not prediction.
+        #   Counting them as "2 elites" for sports was the #1 source of losses.
+        # - Cap individual position size at 5% for sports (applied in trader)
+        if mkt_type == "SPORTS":
+            # Filter sports_bot wallets out of the elite count entirely
+            genuine_sports_elites = {
+                w: t for w, t in elite_wallets.items()
+                if not S.env().wallet_cache.get(w, {}).get("sports_bot", False)
+            }
+            n_genuine = len(genuine_sports_elites)
+            # RELAXED: 1+ genuine elite allowed here (tighter 2-elite check applied
+            # later at the second sports gate after EV/drift pass).
+            if n_genuine < 1:
+                sports_bot_names = [
+                    S.env().wallet_cache.get(w, {}).get("name", w[:10])
+                    for w in elite_wallets if w not in genuine_sports_elites
+                ]
+                rejects.append(
+                    f"  {outcome:<12} {title[:40]}\n"
+                    f"    ↳ Sports needs 1+ genuine elite (have {n_genuine} after "
+                    f"filtering {len(elite_wallets)-n_genuine} sports bots: {sports_bot_names})"
+                )
+                continue
+            # Sports also need tighter drift — sports markets move fast
+            # We'll reuse existing drift gate but flag for tighter sizing
 
         # ── Elite avg entry ───────────────────────────────────────────────
         # t["price"] is ALWAYS the correct price for the outcome that was traded
@@ -653,11 +770,14 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
         # to profit — check that the remaining upside justifies the entry.
         # For a binary at cur price: win $((1/cur) - 1), lose $1.
         # EV > 0 requires: fair_prob > cur  (whale's entry = their fair prob estimate)
+        # RELAXED: lowered from 5%/3% to 2%/1% — Polymarket's thin-margin environment
+        # rarely produces >3% EV from whale signals. The drift gate already ensures
+        # we're close to the whale's entry, so a positive EV direction is sufficient.
         _fair_prob = max(0.02, min(0.97, elite_avg_entry))
         _potential_win  = (1.0 / max(cur, 0.01)) - 1.0   # $gain per $1 bet if wins
         _raw_ev_per_1   = _fair_prob * _potential_win - (1.0 - _fair_prob)
-        # For HFT spikes: require higher EV since momentum fades fast
-        _ev_threshold = 0.05 if is_hft_signal else 0.03
+        # For HFT spikes: require slightly higher EV since momentum fades fast
+        _ev_threshold = 0.02 if is_hft_signal else 0.01
         if _raw_ev_per_1 < _ev_threshold:
             rejects.append(
                 f"  {outcome:<12} {title[:40]}\n"
@@ -705,11 +825,9 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
                 )
                 continue
 
-        # ── Sports market gate ────────────────────────────────────────────
-        # Sports are blocked by default (BLOCK_SPORTS config).
-        # EXCEPTION: An extreme HFT spike (500x+ avg) from an elite wallet
-        # on a live game is real signal — someone knows something.
-        # Require: elite HFT wallet + massive spike ratio + large absolute size.
+        # ── Sports market gate (second check — post drift/EV gates) ──────────
+        # Sports are no longer hard-blocked. But we require 2+ GENUINE (non-sports-bot)
+        # elite whales, OR a genuinely extreme HFT spike (500x+).
         if mkt_type == "SPORTS":
             _max_spike = max(
                 (t.get("hft_spike_ratio", 0) for t in group),
@@ -721,18 +839,17 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
                 _max_spike >= 500 and
                 len(elite_wallets) >= 1
             )
+            # Re-compute genuine elites (sports_bot filtered) for this final check
+            _genuine_sports_elites = {
+                w: t for w, t in elite_wallets.items()
+                if not S.env().wallet_cache.get(w, {}).get("sports_bot", False)
+            }
             if not _is_extreme_spike:
-                if C.BLOCK_SPORTS:
+                if len(_genuine_sports_elites) < 2:
                     rejects.append(
                         f"  {outcome:<12} {title[:40]}\n"
-                        f"    ↳ SPORTS blocked (spike {_max_spike:.0f}x < 500x threshold)"
-                    )
-                    continue
-                # If BLOCK_SPORTS is off, still require 2+ elites
-                if len(elite_wallets) < 2:
-                    rejects.append(
-                        f"  {outcome:<12} {title[:40]}\n"
-                        f"    ↳ SPORTS need 2+ elites, have {len(elite_wallets)}"
+                        f"    ↳ SPORTS need 2+ genuine elites (have {len(_genuine_sports_elites)}) "
+                        f"or extreme spike ({_max_spike:.0f}x < 500x)"
                     )
                     continue
 
@@ -750,21 +867,36 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
                 continue
 
         # ── Crypto short-duration coin-flip gate ──────────────────────────
-        # "Bitcoin Up or Down" 15-min windows are coin flips.
-        # These are market-making positions — the elite whale's edge doesn't transfer.
-        # Only allow if: 2+ elite whales AND has_large_trade AND mkt has decent hours left
+        # Same-day crypto price-target markets are coin flips:
+        #   "Bitcoin reach $79k on April 24?" — hours left, unhedgeable
+        #   "Bitcoin above $78k on April 24?" — same
+        #   "Bitcoin between $76-78k on April 24?" — same
+        # The whale may be HEDGING their real portfolio (buying multiple buckets),
+        # NOT making a directional prediction. We have zero edge on these.
+        # Gate: any CRYPTO market with < 24h left that matches a price-target pattern.
+        _CRYPTO_COINFLIP_RE = re.compile(
+            r'\b(up or down|reach \$|above \$|below \$|between \$|'
+            r'at \$\d|hit \$|dip to|crash to|'
+            r'bitcoin up|ethereum up|xrp up|btc up|eth up)\b',
+            re.IGNORECASE
+        )
         _is_crypto_coinflip = (
             mkt_type == "CRYPTO" and
-            hrs_left_gate is not None and hrs_left_gate < 6.0 and
-            ("up or down" in title.lower() or "bitcoin up" in title.lower() or
-             "ethereum up" in title.lower() or "xrp up" in title.lower())
+            hrs_left_gate is not None and hrs_left_gate < 24.0 and
+            _CRYPTO_COINFLIP_RE.search(title)
         )
         if _is_crypto_coinflip:
-            if len(elite_wallets) < 2 or not has_large_trade:
+            # Require 2+ genuine elites (not sports bots) AND a large trade
+            _genuine_crypto_elites = {
+                w: t for w, t in elite_wallets.items()
+                if not S.env().wallet_cache.get(w, {}).get("sports_bot", False)
+            }
+            if len(_genuine_crypto_elites) < 2 or not has_large_trade:
                 rejects.append(
                     f"  {outcome:<12} {title[:40]}\n"
-                    f"    ↳ Crypto coin-flip gate: need 2+ elites + large trade, "
-                    f"have {len(elite_wallets)} elite, large={has_large_trade}"
+                    f"    ↳ Crypto coin-flip gate ({hrs_left_gate:.1f}h left): "
+                    f"need 2+ genuine elites + large trade, "
+                    f"have {len(_genuine_crypto_elites)} genuine elite, large={has_large_trade}"
                 )
                 continue
 
@@ -808,6 +940,8 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
             "asset":          asset_hint,   # v8: store asset for price refresh
             "mkt":            mkt,
             "mkt_type":       mkt_type,     # v9: SPORTS/CRYPTO/POLITICS/EVENT
+            "is_sports":      (mkt_type == "SPORTS"),
+            "opposing_flow":  opposite_elite_cash,
             "ver":            all_ver,
             "elite_ver":      elite_wallets,
             "n_ver":          n_ver,
