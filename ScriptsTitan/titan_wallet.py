@@ -60,26 +60,45 @@ def is_sports_bot(profile: dict) -> bool:
     Return True if this wallet is likely a sports market-making bot.
 
     Heuristics:
-      - High trades per hour (>= 50) combined with low avg_bet
-      - Name matches known sports bot patterns
+      - Elite wallet with very high TPH (>= SPORTS_BOT_MIN_TPH, default 150) — these
+        wallets make money from volume/spread, NOT from predicting outcomes. Counting
+        them as 'elite confluence' for sports signals was the #1 source of losses.
+        e.g. BillBenter2026 (1567 TPH), RN1 (1720 TPH), swisstony (922 TPH) — all
+        market-makers. Their buy on a sports market is noise, not information.
       - Explicitly tagged as sports_bot in cache
+      - Name matches known sports bot patterns
+      - High trades per hour combined with low avg_bet (non-elite version)
     """
     if profile.get("sports_bot"):
         return True
-    name = profile.get("name", "").lower()
-    tph  = profile.get("trades_per_hour", 0)
+
+    tph     = profile.get("trades_per_hour", 0)
     avg_bet = profile.get("avg_bet", 0)
 
-    # Known sports bot names
+    # Import here to avoid circular dependency; use getattr fallback if not loaded
+    try:
+        import titan_config as _C
+        sports_bot_tph = getattr(_C, "SPORTS_BOT_MIN_TPH", 150)
+    except Exception:
+        sports_bot_tph = 150
+
+    # Any wallet (elite or not) doing 150+ trades/hour is a market-maker on sports.
+    # Their edge is speed + spread capture, not directional prediction.
+    if tph >= sports_bot_tph:
+        return True
+
+    name = profile.get("name", "").lower()
+    # Known sports bot names (belt-and-suspenders for wallets before TPH is computed)
     _SPORTS_BOT_NAMES = {
-        "gamblingisallyouneed", "swisstony", "rn1", "cannae",
-        "elkmonkey", "billyel", "sportsguy", "texaskid",
+        "gamblingisallyouneed", "swisstony", "rn1", "cannae", "lilybaeum",
+        "billdenter", "billdenter2026", "elkmonkey", "billyel", "sportsguy",
+        "texaskid", "ferrarichampions", "ferrarichampions2026", "snakeball",
     }
     for sbn in _SPORTS_BOT_NAMES:
         if sbn in name:
             return True
 
-    # High-frequency + small bets = likely sports bot
+    # Lower-TPH heuristic for non-elite wallets
     if tph >= 50 and avg_bet > 0 and avg_bet < 100:
         return True
 

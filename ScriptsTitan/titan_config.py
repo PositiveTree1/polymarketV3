@@ -44,8 +44,9 @@ USE_PROPORTIONAL_SIZING: bool = True;  PROPORTIONAL_WEIGHT: float = 0
 DISCOVERY_INTERVAL_CYCLES: int = 0
 WALLET_TTL: int = 0;  MARKET_TTL: int = 0;  ACTIVITY_LIMIT: int = 0
 STRATEGY_MODE: str = "base";  TRADEABLE_TIERS_LIST: list = ["CONVICTION", "ALERT", "HFT"]
-ALLOWED_MARKET_TYPES: list = ["POLITICS", "CRYPTO", "EVENT", "SPORTS"]
-MIN_ELITE_CONFLUENCE: int = 1;  BLOCK_SPORTS: bool = False
+ALLOWED_MARKET_TYPES: list = ["POLITICS", "CRYPTO", "EVENT"]
+MIN_ELITE_CONFLUENCE: int = 1;  BLOCK_SPORTS: bool = True
+SPORTS_BOT_MIN_TPH: int = 150
 VIP_WALLETS: list = [];  PRIORITY_WALLETS: list = [];  SEED_WATCHLIST: list = []
 DATA_API: str = "";  GAMMA_API: str = "";  HEADERS: dict = {}
 STATE_FILE: str = "";  WHALE_FILE: str = ""
@@ -85,9 +86,10 @@ def reload():
 
     g["STRATEGY_MODE"]        = flat.get("STRATEGY_MODE", "base")
     g["TRADEABLE_TIERS_LIST"] = flat.get("TRADEABLE_TIERS_LIST", ["CONVICTION", "ALERT", "HFT"])
-    g["ALLOWED_MARKET_TYPES"] = flat.get("ALLOWED_MARKET_TYPES", ["POLITICS","CRYPTO","EVENT","SPORTS"])
+    g["ALLOWED_MARKET_TYPES"] = flat.get("ALLOWED_MARKET_TYPES", ["POLITICS","CRYPTO","EVENT"])
     g["MIN_ELITE_CONFLUENCE"] = int(flat.get("MIN_ELITE_CONFLUENCE", 1))
-    g["BLOCK_SPORTS"]         = bool(flat.get("BLOCK_SPORTS", False))
+    g["BLOCK_SPORTS"]         = bool(flat.get("BLOCK_SPORTS", True))
+    g["SPORTS_BOT_MIN_TPH"]   = int(flat.get("SPORTS_BOT_MIN_TPH", 150))
 
     for key, val in flat.items():
         if key not in ("vip_wallets", "priority_wallets", "seed_watchlist"):

@@ -441,6 +441,310 @@ pos_tree.configure(yscrollcommand=pos_vsb.set)
 pos_vsb.pack(side="right", fill="y")
 pos_tree.pack(fill="x", padx=4, pady=(4,2))
 
+
+def show_position_detail(key, pos):
+    """Show a floating detail popup for an open position."""
+    import time as _t
+    win = tk.Toplevel(root)
+    win.title(f"Position Detail — {pos.get('title','')[:50]}")
+    win.configure(bg="#060615")
+    win.geometry("820x640")
+    win.resizable(True, True)
+
+    mono10  = font.Font(family="Courier", size=10)
+    mono9   = font.Font(family="Courier", size=9)
+    bold11  = font.Font(family="Courier", size=11, weight="bold")
+    bold9   = font.Font(family="Courier", size=9, weight="bold")
+
+    entry    = pos.get("entry_price", 0)
+    w_entry  = pos.get("avg_entry", entry)
+    cur      = pos.get("cur_price", entry)
+    shares   = pos.get("shares", 0)
+    bet      = pos.get("bet", 0)
+    pnl_pct  = (cur - entry) / max(entry, 0.001) * 100
+    pnl_usd  = (cur - entry) * shares
+    hold_min = (_t.time() - pos.get("entry_ts", _t.time())) / 60
+    title    = pos.get("title", "")
+    outcome  = pos.get("outcome", key[1] if isinstance(key, tuple) else "")
+    cid      = pos.get("cid", key[0] if isinstance(key, tuple) else "")
+    slug     = pos.get("slug", "") or pos.get("event_slug", "")
+
+    # Header
+    hf = tk.Frame(win, bg="#0a0a20", pady=8)
+    hf.pack(fill="x", padx=8, pady=(8,0))
+    pnl_color = "#00ff55" if pnl_pct >= 0 else "#ff5555"
+    tier_icon = "💎" if pos.get("is_conviction") else ("⚡" if pos.get("is_hft") else "")
+    tk.Label(hf, text=f"{tier_icon}[{pos.get('tier','?')}]  {title}",
+             fg="#00aaff", bg="#0a0a20", font=bold11, wraplength=780, justify="left").pack(anchor="w", padx=12)
+    tk.Label(hf, text=f"Side: {outcome}   Score: {pos.get('score',0):.0f}pts   CID: {cid[:30]}…",
+             fg="#556677", bg="#0a0a20", font=mono9).pack(anchor="w", padx=12)
+
+    # Stats grid
+    sf2 = tk.Frame(win, bg="#060615")
+    sf2.pack(fill="x", padx=8, pady=6)
+
+    def stat_cell(parent, label, value, color="#aaaacc", col=0, row=0):
+        f = tk.Frame(parent, bg="#0d0d20", bd=1, relief="solid")
+        f.grid(row=row, column=col, padx=4, pady=3, sticky="nsew")
+        tk.Label(f, text=label, fg="#445566", bg="#0d0d20", font=mono9, pady=2).pack()
+        tk.Label(f, text=value, fg=color, bg="#0d0d20", font=bold9, pady=2).pack()
+
+    stats_data = [
+        ("Whale Entry",   f"${w_entry:.4f}",          "#ffaa44"),
+        ("Our Entry",     f"${entry:.4f}",             "#aaaaff"),
+        ("Current Price", f"${cur:.4f}",               pnl_color),
+        ("P&L $",         f"${pnl_usd:+.4f}",          pnl_color),
+        ("P&L %",         f"{pnl_pct:+.2f}%",          pnl_color),
+        ("Bet Size",      f"${bet:.2f}",               "#00aaff"),
+        ("Shares",        f"{shares:.2f}",             "#aaaacc"),
+        ("Held",          f"{hold_min:.0f} min",       "#888888"),
+        ("Liq",           f"${pos.get('liq',0):,.0f}", "#446688"),
+        ("Score",         f"{pos.get('score',0):.0f}", "#ffdd44"),
+        ("Tier",          pos.get('tier','?'),          "#ff8844"),
+        ("Type",          "HFT⚡" if pos.get('is_hft') else ("💎CONVICTION" if pos.get('is_conviction') else "STANDARD"), "#aaaacc"),
+    ]
+    for i, (lbl, val, col) in enumerate(stats_data):
+        sf2.columnconfigure(i % 4, weight=1)
+        stat_cell(sf2, lbl, val, col, i % 4, i // 4)
+
+    # Whales
+    wf = tk.Frame(win, bg="#060615")
+    wf.pack(fill="x", padx=8)
+    tk.Label(wf, text="WHALE WALLETS", fg="#00ff88", bg="#060615", font=bold9).pack(anchor="w", padx=4, pady=(4,2))
+    elite_wallets = pos.get("elite_wallets", []) + pos.get("whale_wallets", [])
+    elite_names   = pos.get("elite_names", [])
+    for i, w_addr in enumerate(elite_wallets[:8]):
+        name  = (elite_names[i] if i < len(elite_names) else None) or _TS._wallet.wallet_cache.get(w_addr, {}).get("name", w_addr[:16]+"…")
+        prof  = _TS._wallet.wallet_cache.get(w_addr, {})
+        hft_t = "⚡" if prof.get("hft") else ""
+        wr    = prof.get("win_rate", 0) * 100
+        pnl_w = prof.get("total_pnl", 0)
+        tk.Label(wf, text=f"  {hft_t}{name:<22} WR:{wr:.0f}%  PnL:${pnl_w:+,.0f}  Score:{prof.get('score',0):.2f}",
+                 fg="#00cc88", bg="#060615", font=mono9).pack(anchor="w", padx=12)
+
+    # Links
+    lf = tk.Frame(win, bg="#060615")
+    lf.pack(fill="x", padx=8, pady=6)
+
+    market_url = f"https://polymarket.com/event/{slug}" if slug else "https://polymarket.com"
+
+    def open_polymarket():
+        webbrowser.open(market_url)
+
+    def copy_title():
+        try:
+            win.clipboard_clear()
+            win.clipboard_append(title)
+            win.update()
+        except Exception:
+            pass
+
+    tk.Button(lf, text="🌐 Open on Polymarket", bg="#0a1a3a", fg="#00aaff",
+              font=mono9, padx=10, command=open_polymarket).pack(side="left", padx=4)
+    tk.Button(lf, text="📋 Copy Title", bg="#1a2a1a", fg="#00ff88",
+              font=mono9, padx=10, command=copy_title).pack(side="left", padx=4)
+
+    url_lbl = tk.Label(lf, text=market_url[:80], fg="#334455", bg="#060615", font=mono9)
+    url_lbl.pack(side="left", padx=8)
+
+    # Mini price chart
+    cf = tk.Frame(win, bg="#060615")
+    cf.pack(fill="both", expand=True, padx=8, pady=(4,8))
+    tk.Label(cf, text="PRICE HISTORY", fg="#00ff88", bg="#060615", font=bold9).pack(anchor="w", padx=4)
+    chart_canvas = tk.Canvas(cf, bg="#050510", highlightthickness=1,
+                              highlightbackground="#1a2a4a", height=160)
+    chart_canvas.pack(fill="both", expand=True, padx=4, pady=4)
+
+    def draw_detail_chart():
+        chart_canvas.delete("all")
+        w = chart_canvas.winfo_width()
+        h = chart_canvas.winfo_height()
+        if w < 20 or h < 20:
+            return
+        ph = pos.get("price_history", [])
+        if len(ph) < 2:
+            chart_canvas.create_text(w//2, h//2, text="Insufficient price history",
+                                     fill="#334455", font=mono9)
+            return
+        prices = [p for _, p in ph]
+        px, py = 50, 20
+        cw = w - px - 10
+        ch = h - py - 25
+        mn = min(prices + [entry])
+        mx = max(prices + [entry])
+        spread = max(mx - mn, 0.002)
+        mn -= spread * 0.1; mx += spread * 0.1
+        def tx(i): return px + (i / max(len(prices)-1, 1)) * cw
+        def ty(v): return py + (1 - (v - mn) / (mx - mn)) * ch
+        # Grid
+        for i in range(5):
+            v = mn + (mx - mn) * i / 4
+            y = ty(v)
+            chart_canvas.create_line(px, y, w-10, y, fill="#0d1020", dash=(2,4))
+            chart_canvas.create_text(px-4, y, text=f"${v:.3f}", fill="#334455",
+                                     font=("Courier", 7), anchor="e")
+        # Entry line
+        ey = ty(entry)
+        chart_canvas.create_line(px, ey, w-10, ey, fill="#665500", dash=(4,4))
+        chart_canvas.create_text(w-8, ey, text="ENTRY", fill="#998833",
+                                 font=("Courier", 7), anchor="e")
+        # Price line
+        coords = []
+        for i, p in enumerate(prices):
+            coords += [tx(i), ty(p)]
+        if len(coords) >= 4:
+            last_c = "#00ff55" if prices[-1] >= entry else "#ff5555"
+            chart_canvas.create_line(coords, fill=last_c, width=2, smooth=len(prices)>=8)
+        # End dot
+        xe = tx(len(prices)-1); ye = ty(prices[-1])
+        dot_c = "#00ff55" if prices[-1] >= entry else "#ff5555"
+        chart_canvas.create_oval(xe-4, ye-4, xe+4, ye+4, fill=dot_c, outline="#ffffff", width=1)
+        chart_canvas.create_text(xe+6, ye, text=f"${prices[-1]:.4f}",
+                                 fill=dot_c, font=("Courier", 8), anchor="w")
+        n_pts = len(prices)
+        chart_canvas.create_text(px, h-8, text=f"{n_pts} price points", fill="#334455",
+                                 font=("Courier", 7), anchor="w")
+
+    win.after(200, draw_detail_chart)
+    chart_canvas.bind("<Configure>", lambda e: win.after(50, draw_detail_chart))
+
+
+def show_trade_history_detail(trade):
+    """Show a floating detail popup for a closed trade."""
+    win = tk.Toplevel(root)
+    typ = trade.get("type", "?")
+    win.title(f"Trade Detail — {trade.get('title','')[:50]}")
+    win.configure(bg="#060615")
+    win.geometry("760x500")
+
+    mono9  = font.Font(family="Courier", size=9)
+    bold9  = font.Font(family="Courier", size=9, weight="bold")
+    bold11 = font.Font(family="Courier", size=11, weight="bold")
+
+    pnl_u = trade.get("pnl_usdc") or 0
+    pnl_p = trade.get("pnl_pct")  or 0
+    pnl_color = "#00ff55" if pnl_u >= 0 else "#ff5555"
+    title = trade.get("title", "Unknown")
+    slug  = trade.get("slug", "") or trade.get("event_slug", "")
+
+    hf = tk.Frame(win, bg="#0a0a20", pady=8)
+    hf.pack(fill="x", padx=8, pady=(8,0))
+    icon = "🛒" if typ == "BUY" else ("✅" if pnl_u >= 0 else "❌")
+    tk.Label(hf, text=f"{icon} [{typ}] [{trade.get('tier','?')}]  {title}",
+             fg="#00aaff" if typ == "BUY" else pnl_color, bg="#0a0a20", font=bold11,
+             wraplength=730, justify="left").pack(anchor="w", padx=12)
+    tk.Label(hf, text=f"Outcome: {trade.get('outcome','')}   Time: {trade.get('ts_str','')}",
+             fg="#556677", bg="#0a0a20", font=mono9).pack(anchor="w", padx=12)
+
+    sf2 = tk.Frame(win, bg="#060615")
+    sf2.pack(fill="x", padx=8, pady=6)
+
+    def stat_cell(parent, label, value, color="#aaaacc", col=0, row=0):
+        f = tk.Frame(parent, bg="#0d0d20", bd=1, relief="solid")
+        f.grid(row=row, column=col, padx=4, pady=3, sticky="nsew")
+        tk.Label(f, text=label, fg="#445566", bg="#0d0d20", font=mono9, pady=2).pack()
+        tk.Label(f, text=value, fg=color, bg="#0d0d20", font=bold9, pady=2).pack()
+
+    w_entry = trade.get("avg_entry", trade.get("entry_price", 0))
+    entry_p = trade.get("entry_price", 0)
+    exit_p  = trade.get("exit_price", 0)
+    stats_data = [
+        ("Whale Entry",  f"${w_entry:.4f}",                          "#ffaa44"),
+        ("Our Entry",    f"${entry_p:.4f}",                          "#aaaaff"),
+        ("Exit Price",   f"${exit_p:.4f}" if exit_p else "—",        pnl_color if typ=="SELL" else "#888888"),
+        ("P&L $",        f"${pnl_u:+.4f}" if typ=="SELL" else "—",   pnl_color),
+        ("P&L %",        f"{pnl_p:+.1f}%" if typ=="SELL" else "—",   pnl_color),
+        ("Bet Size",     f"${trade.get('bet',0):.2f}",               "#00aaff"),
+        ("Tier",         trade.get("tier","?"),                      "#ff8844"),
+        ("Bankroll @",   f"${trade.get('bankroll',0):.3f}",          "#778899"),
+    ]
+    for i, (lbl, val, col) in enumerate(stats_data):
+        sf2.columnconfigure(i % 4, weight=1)
+        stat_cell(sf2, lbl, val, col, i % 4, i // 4)
+
+    # Whales — show name + how much each whale put into this trade
+    wf = tk.Frame(win, bg="#060615")
+    wf.pack(fill="x", padx=8)
+    whale_names = trade.get("whale_names", [])
+    whale_addrs = trade.get("elite_wallets", [])
+    whale_cash  = trade.get("whale_buy_cash", {})  # addr → $ amount
+    if whale_names or whale_addrs:
+        tk.Label(wf, text="VIA WHALES:", fg="#00ff88", bg="#060615", font=mono9).pack(anchor="w", padx=12, pady=(4,2))
+        for i, name in enumerate(whale_names[:6]):
+            addr = whale_addrs[i] if i < len(whale_addrs) else ""
+            cash_val = whale_cash.get(addr.lower(), whale_cash.get(addr, 0))
+            cash_str = f"  —  put in ${cash_val:,.0f}" if cash_val > 0 else ""
+            prof = _TS._wallet.wallet_cache.get(addr.lower(), {})
+            wr   = prof.get("win_rate", 0) * 100
+            pnl_w = prof.get("total_pnl", 0)
+            detail = f"WR:{wr:.0f}%  PnL:${pnl_w:+,.0f}" if wr or pnl_w else ""
+            tk.Label(wf,
+                     text=f"  🐋 {name:<22}{cash_str}   {detail}",
+                     fg="#00cc88", bg="#060615", font=mono9).pack(anchor="w", padx=16)
+
+    # Exit reason
+    reason = trade.get("reason", "")
+    if reason:
+        tk.Label(win, text=f"Exit reason: {reason}",
+                 fg="#ffaa44", bg="#060615", font=mono9).pack(anchor="w", padx=20)
+
+    # Links
+    lf = tk.Frame(win, bg="#060615")
+    lf.pack(fill="x", padx=8, pady=8)
+    market_url = f"https://polymarket.com/event/{slug}" if slug else "https://polymarket.com"
+
+    def open_polymarket():
+        webbrowser.open(market_url)
+
+    def copy_title():
+        try:
+            win.clipboard_clear()
+            win.clipboard_append(title)
+            win.update()
+        except Exception:
+            pass
+
+    tk.Button(lf, text="🌐 Open on Polymarket", bg="#0a1a3a", fg="#00aaff",
+              font=mono9, padx=10, command=open_polymarket).pack(side="left", padx=4)
+    tk.Button(lf, text="📋 Copy Title", bg="#1a2a1a", fg="#00ff88",
+              font=mono9, padx=10, command=copy_title).pack(side="left", padx=4)
+
+    # Full raw data
+    raw_f = tk.Frame(win, bg="#060615")
+    raw_f.pack(fill="both", expand=True, padx=8, pady=(0,8))
+    tk.Label(raw_f, text="ALL RAW FIELDS", fg="#556677", bg="#060615", font=mono9).pack(anchor="w", padx=4)
+    raw_txt = scrolledtext.ScrolledText(raw_f, bg="#040410", fg="#778899", font=("Courier", 8),
+                                         height=8, wrap="word")
+    raw_txt.pack(fill="both", expand=True)
+    import json as _rjson
+    raw_txt.insert("1.0", _rjson.dumps(trade, indent=2, default=str))
+    raw_txt.configure(state="disabled")
+
+
+
+def _on_pos_double_click(event):
+    sel = pos_tree.selection()
+    if not sel:
+        return
+    vals = pos_tree.item(sel[0])['values']
+    if not vals:
+        return
+    mkt_name = str(vals[0]).replace('💎', '').replace('⚡', '')
+    outcome  = str(vals[1])
+    for key, pos in _w().open_positions.items():
+        title_cmp = pos.get('title', '')
+        if title_cmp[:48] in mkt_name or mkt_name[:30] in title_cmp:
+            if pos.get('outcome', '') == outcome or outcome in pos.get('outcome', ''):
+                show_position_detail(key, pos)
+                return
+    # Fallback: try first match by title substring
+    for key, pos in _w().open_positions.items():
+        if mkt_name[:20] in pos.get('title', ''):
+            show_position_detail(key, pos)
+            return
+
+pos_tree.bind("<Double-1>", _on_pos_double_click)
+
 pos_split = tk.Frame(tab_positions, bg="#080810")
 pos_split.pack(fill="both", expand=True, padx=4)
 
@@ -452,9 +756,45 @@ pos_graph.pack(fill="both", expand=True, padx=2, pady=2)
 
 pos_btn_bar = tk.Frame(pos_chart_frame, bg="#080810")
 pos_btn_bar.pack(fill="x")
+
+def _open_selected_market():
+    sel = pos_tree.selection()
+    if sel:
+        vals = pos_tree.item(sel[0])['values']
+        if vals:
+            mkt_name = str(vals[0]).replace('💎', '').replace('⚡', '')
+            outcome  = str(vals[1])
+            for key, pos in _w().open_positions.items():
+                title_cmp = pos.get('title', '')
+                if title_cmp[:48] in mkt_name or mkt_name[:30] in title_cmp:
+                    slug = pos.get('slug', '') or pos.get('event_slug', '')
+                    if slug:
+                        webbrowser.open(f"https://polymarket.com/event/{slug}")
+                        return
+    webbrowser.open("https://polymarket.com")
+
+def _copy_selected_title():
+    sel = pos_tree.selection()
+    if sel:
+        vals = pos_tree.item(sel[0])['values']
+        if vals:
+            mkt_name = str(vals[0]).replace('💎', '').replace('⚡', '')
+            for key, pos in _w().open_positions.items():
+                if pos.get('title', '')[:48] in mkt_name or mkt_name[:30] in pos.get('title', ''):
+                    try:
+                        root.clipboard_clear()
+                        root.clipboard_append(pos.get('title', mkt_name))
+                        root.update()
+                    except Exception:
+                        pass
+                    return
+
 tk.Button(pos_btn_bar, text="🌐 POLYMARKET", bg="#0a1a3a", fg="#00aaff",
-          font=mono_sm,
-          command=lambda: webbrowser.open("https://polymarket.com")).pack(side="left", padx=4, pady=4)
+          font=mono_sm, command=_open_selected_market).pack(side="left", padx=4, pady=4)
+tk.Button(pos_btn_bar, text="📋 COPY TITLE", bg="#1a2a1a", fg="#00ff88",
+          font=mono_sm, command=_copy_selected_title).pack(side="left", padx=4, pady=4)
+tk.Label(pos_btn_bar, text="Double-click a position for full detail", fg="#334455",
+         bg="#080810", font=mono_sm).pack(side="left", padx=8)
 
 pos_log_frame = tk.Frame(pos_split, bg="#080810", width=380)
 pos_log_frame.pack(side="right", fill="both", expand=False)
@@ -536,6 +876,29 @@ hist_tree.configure(yscrollcommand=hist_vsb.set)
 hist_vsb.pack(side="right", fill="y")
 hist_tree.pack(fill="x", padx=4, pady=(0,4))
 
+def _on_hist_double_click(event):
+    sel = hist_tree.selection()
+    if not sel:
+        return
+    vals = hist_tree.item(sel[0])['values']
+    if not vals:
+        return
+    ts_str   = str(vals[0])
+    mkt_name = str(vals[2]) if len(vals) > 2 else ""
+    outcome  = str(vals[3]) if len(vals) > 3 else ""
+    # Find matching trade in history
+    for t in reversed(_w().trade_history[-500:]):
+        if t.get('ts_str', '') == ts_str:
+            show_trade_history_detail(t)
+            return
+    # Fallback: match by title+outcome
+    for t in reversed(_w().trade_history[-500:]):
+        if mkt_name[:20] in t.get('title', '') and t.get('outcome', '') == outcome:
+            show_trade_history_detail(t)
+            return
+
+hist_tree.bind("<Double-1>", _on_hist_double_click)
+
 
 def draw_pnl_graph():
     graph_canvas.delete("all")
@@ -543,62 +906,171 @@ def draw_pnl_graph():
     h = graph_canvas.winfo_height()
     if w < 10 or h < 10: return
 
+    import time as _tt
+    from datetime import datetime as _dtx
+
     eq_hist = getattr(_w(), "equity_history", [])
-    if len(eq_hist) >= 2:
-        points = [v for _, v in eq_hist]
+
+    # Compute current net worth including open position mark-to-market
+    open_positions = _w().open_positions
+    open_val = sum(
+        pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0)
+        for pos in open_positions.values()
+    )
+    cur_nw = _w().paper_bankroll + open_val
+
+    if len(eq_hist) >= 1:
+        all_pts = list(eq_hist)
+        if not all_pts or abs(cur_nw - all_pts[-1][1]) > 0.001:
+            all_pts.append((_tt.time(), cur_nw))
     else:
-        sells = [t for t in _w().trade_history
-                 if t.get("type") == "SELL" and t.get("bankroll") is not None]
-        if not sells:
-            graph_canvas.create_text(w//2, h//2,
-                text="No trades yet — graph appears after first trade",
-                fill="#334433", font=("Courier", 10), anchor="center")
-            return
-        points = [engine.BANKROLL_START] + [float(t["bankroll"]) for t in sells]
+        all_pts = [(_tt.time() - 1, engine.BANKROLL_START), (_tt.time(), cur_nw)]
 
-    if len(points) < 2: return
+    if len(all_pts) < 2: return
 
-    pad_l, pad_r, pad_t, pad_b = 60, 20, 20, 40
+    # (MTM interpolation removed: equity_history now accurately tracks total equity directly)
+
+    # Thin out very dense data (keep at most 800 points for rendering)
+    if len(all_pts) > 800:
+        step = len(all_pts) // 800
+        all_pts = all_pts[::step] + [all_pts[-1]]
+
+    # Collect trade events for annotation
+    trade_events_for_graph = []
+    for t in _w().trade_history:
+        ts = t.get("ts")
+        if not ts: continue
+        if t.get("type") == "BUY":
+            trade_events_for_graph.append((ts, "BUY", t.get("bet", 0)))
+        elif t.get("type") == "SELL":
+            pnl = t.get("pnl_usdc", 0) or 0
+            trade_events_for_graph.append((ts, "SELL", pnl))
+
+    times  = [t for t, _ in all_pts]
+    values = [v for _, v in all_pts]
+
+    pad_l, pad_r, pad_t, pad_b = 68, 20, 28, 44
     plot_w = w - pad_l - pad_r
     plot_h = h - pad_t - pad_b
 
-    min_v = min(points); max_v = max(points)
+    min_v = min(values); max_v = max(values)
     spread = max(max_v - min_v, 0.5)
-    min_v -= spread * 0.1; max_v += spread * 0.1
+    min_v -= spread * 0.10; max_v += spread * 0.10
+    min_t = times[0];  max_t = times[-1]
+    t_range = max(max_t - min_t, 1)
 
-    def to_x(i): return pad_l + (i / max(len(points)-1, 1)) * plot_w
+    def to_x(t): return pad_l + (t - min_t) / t_range * plot_w
     def to_y(v): return pad_t + (1 - (v - min_v) / (max_v - min_v)) * plot_h
 
+    # Background watermark
+    graph_canvas.create_text(pad_l + plot_w//2, pad_t + plot_h//2,
+        text="TOTAL NET WORTH", fill="#08120a", font=("Courier", 22, "bold"))
+
+    # Horizontal grid lines
     for i in range(7):
         val = min_v + (max_v - min_v) * i / 6
         y   = to_y(val)
-        graph_canvas.create_line(pad_l, y, w-pad_r, y, fill="#1a1a28", dash=(2,4))
+        graph_canvas.create_line(pad_l, y, w-pad_r, y, fill="#0e1318", dash=(2,4))
         graph_canvas.create_text(pad_l-4, y, text=f"${val:.3f}",
                                   fill="#335544", font=("Courier", 8), anchor="e")
 
+    # Bankroll start line
     y0 = to_y(engine.BANKROLL_START)
     graph_canvas.create_line(pad_l, y0, w-pad_r, y0, fill="#2a4a2a", dash=(4,3))
+    graph_canvas.create_text(pad_l-4, y0, text="START", fill="#336633",
+                              font=("Courier", 7), anchor="e")
 
-    poly_pts = [pad_l, to_y(points[0])]
-    for i, v in enumerate(points): poly_pts += [to_x(i), to_y(v)]
-    poly_pts += [to_x(len(points)-1), pad_t+plot_h, pad_l, pad_t+plot_h]
-    last_v   = points[-1]
-    fill_col = "#001a0a" if last_v >= engine.BANKROLL_START else "#1a0000"
+    # Time axis labels
+    n_time_labels = min(5, len(all_pts))
+    for i in range(n_time_labels):
+        idx = int(i * (len(all_pts)-1) / max(n_time_labels-1, 1))
+        t_val = times[idx]
+        x_pos = to_x(t_val)
+        try:
+            lbl = _dtx.fromtimestamp(t_val).strftime("%H:%M")
+        except Exception:
+            lbl = ""
+        graph_canvas.create_line(x_pos, pad_t + plot_h, x_pos, pad_t + plot_h + 4, fill="#334455")
+        graph_canvas.create_text(x_pos, pad_t + plot_h + 14, text=lbl, fill="#335566",
+                                  font=("Courier", 7), anchor="center")
+
+    last_v = values[-1]
+
+    # ── Draw filled area first (single polygon, colour by final state) ─────────
+    poly_pts = [pad_l, to_y(values[0])]
+    for t_v, v in all_pts:
+        poly_pts += [to_x(t_v), to_y(v)]
+    poly_pts += [to_x(times[-1]), pad_t + plot_h, pad_l, pad_t + plot_h]
+    fill_col = "#001a08" if last_v >= engine.BANKROLL_START else "#1a0000"
+    # smooth=False on the polygon — smooth=True causes the fill to bow/bulge away from the line
     graph_canvas.create_polygon(poly_pts, fill=fill_col, outline="", smooth=False)
 
-    for i in range(1, len(points)):
-        x1 = to_x(i-1); y1 = to_y(points[i-1])
-        x2 = to_x(i);   y2 = to_y(points[i])
-        color = "#00ff55" if points[i] >= points[i-1] else "#ff5555"
-        graph_canvas.create_line(x1, y1, x2, y2, fill=color, width=2)
+    # ── Draw line as per-segment green/red based on direction ─────────────────
+    # Each segment is coloured by whether the value is rising or falling.
+    # We batch consecutive same-colour segments for efficiency.
+    xs = [to_x(t_v) for t_v in times]
+    ys = [to_y(v)   for v   in values]
 
-    graph_canvas.create_oval(pad_l-3, to_y(points[0])-3, pad_l+3, to_y(points[0])+3,
+    GREEN_UP   = "#00ff66"
+    RED_DOWN   = "#ff4444"
+    FLAT_COL   = "#888888"
+
+    # Build colour for each segment between point i and i+1
+    seg_colors = []
+    for i in range(len(values) - 1):
+        diff = values[i+1] - values[i]
+        if diff > 0.0005:
+            seg_colors.append(GREEN_UP)
+        elif diff < -0.0005:
+            seg_colors.append(RED_DOWN)
+        else:
+            seg_colors.append(FLAT_COL)
+
+    # Draw smooth segments — group consecutive same-colour runs and draw each
+    # as a single smooth polyline for a fluid look
+    i = 0
+    while i < len(seg_colors):
+        col = seg_colors[i]
+        j = i + 1
+        while j < len(seg_colors) and seg_colors[j] == col:
+            j += 1
+        # Segment from point i to point j (inclusive), with 1-point overlap for continuity
+        seg_xs = xs[i:j+1]
+        seg_ys = ys[i:j+1]
+        if len(seg_xs) >= 2:
+            coords = []
+            for sx, sy in zip(seg_xs, seg_ys):
+                coords += [sx, sy]
+            use_smooth = len(coords) >= 8
+            graph_canvas.create_line(coords, fill=col, width=2,
+                                     smooth=use_smooth,
+                                     joinstyle="round", capstyle="round")
+        i = j
+
+    # ── Annotate trade events ──────────────────────────────────────────────────
+    for ev_ts, ev_type, ev_val in trade_events_for_graph:
+        if ev_ts < min_t or ev_ts > max_t:
+            continue
+        ex = to_x(ev_ts)
+        if ev_type == "BUY":
+            graph_canvas.create_line(ex, pad_t, ex, pad_t+plot_h, fill="#003366", dash=(2,6), width=1)
+            graph_canvas.create_text(ex, pad_t+4, text="▼", fill="#0055aa", font=("Courier", 7), anchor="n")
+        elif ev_type == "SELL":
+            col  = "#005500" if ev_val >= 0 else "#550000"
+            tcol = "#00cc44" if ev_val >= 0 else "#cc3333"
+            graph_canvas.create_line(ex, pad_t, ex, pad_t+plot_h, fill=col, dash=(2,6), width=1)
+            graph_canvas.create_text(ex, pad_t+plot_h-4, text=f"{ev_val:+.2f}", fill=tcol,
+                                     font=("Courier", 7), anchor="s")
+
+    # Start dot
+    graph_canvas.create_oval(pad_l-3, ys[0]-3, pad_l+3, ys[0]+3,
                               fill="#aaaaaa", outline="")
-    x_end = to_x(len(points)-1)
-    y_end = to_y(last_v)
-    cur_color = "#00ff55" if last_v >= engine.BANKROLL_START else "#ff5555"
-    graph_canvas.create_oval(x_end-4, y_end-4, x_end+4, y_end+4,
-                              fill=cur_color, outline="#ffffff")
+    # End dot
+    x_end = xs[-1]
+    y_end = ys[-1]
+    cur_color = GREEN_UP if last_v >= engine.BANKROLL_START else RED_DOWN
+    graph_canvas.create_oval(x_end-5, y_end-5, x_end+5, y_end+5,
+                              fill=cur_color, outline="#ffffff", width=1)
 
     diff = last_v - engine.BANKROLL_START
     open_value = sum(
@@ -607,9 +1079,13 @@ def draw_pnl_graph():
     )
     label = f"${last_v:.3f} ({diff:+.3f})"
     if open_value > 0:
-        label += f"  [${_w().paper_bankroll:.2f} cash + ${open_value:.2f} positions]"
-    graph_canvas.create_text(min(x_end+8, w-200), y_end,
+        label += f"  [${_w().paper_bankroll:.2f} cash + ${open_value:.2f} pos]"
+    graph_canvas.create_text(min(x_end+8, w-250), y_end,
         text=label, fill=cur_color, font=("Courier", 9), anchor="w")
+
+    graph_canvas.create_text(pad_l, pad_t - 10,
+        text=f"{len(all_pts)} pts  ▼=BUY  ±$=SELL  🟢up 🔴down",
+        fill="#334455", font=("Courier", 7), anchor="w")
 
 
 def refresh_pnl_tab():
@@ -1485,7 +1961,7 @@ def on_position_open_cb(pos):
         elite_names = pos.get("elite_names", [])
         whale_str   = ", ".join(elite_names[:3]) or "?"
         pos_log_write(
-            f"🛒 AUTO-BUY: {pos['title'][:35]} [{pos['outcome']}] "
+            f"🛒 AUTO-BUY: {pos['title'][:80]} [{pos['outcome']}] "
             f"@ ${pos['entry_price']:.4f} (whale entry ${pos.get('avg_entry',pos['entry_price']):.4f}) "
             f"| ${pos['bet']:.2f} | [{pos['tier']} {pos['score']:.0f}pts] "
             f"| via {whale_str}",
@@ -1503,7 +1979,7 @@ def on_position_close_cb(pos, pnl_usdc, pnl_pct):
         emoji = "✅" if pnl_usdc >= 0 else "❌"
         whale_str = ", ".join(pos.get("elite_names", [])[:2]) or "?"
         pos_log_write(
-            f"{emoji} AUTO-SELL: {pos['title'][:32]} [{pos['outcome']}] "
+            f"{emoji} AUTO-SELL: {pos['title'][:80]} [{pos['outcome']}] "
             f"| Entry ${pos['entry_price']:.4f} → Exit ${pos.get('cur_price',0):.4f} "
             f"| P&L ${pnl_usdc:+.4f} ({pnl_pct*100:+.1f}%) "
             f"| {pos.get('reason','')} | via {whale_str}",
@@ -1518,7 +1994,14 @@ def on_cycle_complete_cb(signals, wallets, rejects, trades):
     global _last_signals, _last_wallets, _last_rejects, _last_trades
     _last_signals = signals
     _last_wallets = wallets
-    _last_rejects = rejects
+    
+    if rejects:
+        for r in reversed(rejects):
+            if r in _last_rejects:
+                _last_rejects.remove(r)
+            _last_rejects.insert(0, r)
+        _last_rejects = _last_rejects[:50]
+        
     _last_trades  = trades
     _pending_update[0] = True
 
@@ -1596,7 +2079,7 @@ def ui_refresh():
     if sel:
         vals = pos_tree.item(sel[0])['values']
         if vals:
-            mkt_name = str(vals[0])
+            mkt_name = str(vals[0]).replace('💎', '').replace('⚡', '')
             outcome  = str(vals[1])
             for (c, o), p in _w().open_positions.items():
                 if p['title'][:48] in mkt_name or mkt_name in p['title'][:48]:
@@ -1608,9 +2091,59 @@ def ui_refresh():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  FAST PRICE UPDATER
+# ═══════════════════════════════════════════════════════════════════════════════
+def fast_price_updater():
+    from titan_market import fetch_position_price_fast
+    import time
+    _last_equity_record = [0.0]
+    while True:
+        try:
+            positions = list(_w().open_positions.items())
+            if positions:
+                updated = False
+                for key, pos in positions:
+                    cid = pos.get("cid", key[0])
+                    outcome = pos.get("outcome", key[1])
+                    asset = pos.get("asset", "")
+                    fast_p = fetch_position_price_fast(cid, asset, outcome)
+                    if fast_p is not None and fast_p != pos.get("cur_price"):
+                        pos["cur_price"] = fast_p
+                        if "price_history" not in pos:
+                            pos["price_history"] = []
+                        pos["price_history"].append((time.time(), fast_p))
+                        if len(pos["price_history"]) > 2880:
+                            del pos["price_history"][:-2880]
+                        updated = True
+                if updated:
+                    _pending_update[0] = True
+
+            # Record equity history every 5 seconds for the P&L graph,
+            # but ONLY when the value actually changed — this prevents the
+            # "flat plateau + vertical spike" artifact on the P&L graph.
+            now = time.time()
+            if now - _last_equity_record[0] >= 5.0:
+                _last_equity_record[0] = now
+                open_val = sum(
+                    p.get("cur_price", p.get("entry_price", 0)) * p.get("shares", 0)
+                    for p in _w().open_positions.values()
+                )
+                eq = _w().paper_bankroll + open_val
+                # Only append if changed by > $0.005 OR it has been > 60s since last record
+                hist = _w().equity_history
+                if not hist or abs(eq - hist[-1][1]) > 0.005 or (now - hist[-1][0]) > 60:
+                    hist.append((now, eq))
+                    if len(hist) > 10000:
+                        del hist[:1000]
+        except Exception:
+            pass
+        time.sleep(3.0)
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  BOOT
 # ═══════════════════════════════════════════════════════════════════════════════
 def on_boot_complete():
+    threading.Thread(target=fast_price_updater, daemon=True).start()
     engine.start(
         log_callback      = on_log_cb,
         position_open_cb  = on_position_open_cb,
@@ -1676,6 +2209,36 @@ def on_boot_complete():
                     telegram_notifier.send_dashboard_button(_ngrok_url)
                 threading.Thread(target=_start_app_and_send, daemon=True).start()
 
+            else:
+                def _ask_groq():
+                    import requests, json
+                    snapshot = engine.get_system_snapshot() if hasattr(engine, 'get_system_snapshot') else ""
+                    prompt = f"System Snapshot:\n{snapshot}\n\nUser: {text}"
+                    try:
+                        resp = requests.post(
+                            "https://api.groq.com/openai/v1/chat/completions",
+                            headers={
+                                "Authorization": "Bearer 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",
+                                "Content-Type": "application/json"
+                            },
+                            json={
+                                "model": "llama-3.3-70b-versatile",
+                                "messages": [
+                                    {"role": "system", "content": "You are TITAN AI, a trading bot assistant. Keep answers brief, under 200 words. Reference the system snapshot."},
+                                    {"role": "user", "content": prompt}
+                                ]
+                            },
+                            timeout=30
+                        )
+                        if resp.status_code == 200:
+                            reply = resp.json()["choices"][0]["message"]["content"]
+                            telegram_notifier._send(reply, is_markdown=False)
+                        else:
+                            telegram_notifier._send(f"AI Error: {resp.status_code} - {resp.text}", is_markdown=False)
+                    except Exception as e:
+                        telegram_notifier._send(f"AI Exception: {e}", is_markdown=False)
+                threading.Thread(target=_ask_groq, daemon=True).start()
+
         telegram_notifier.start_polling(handle_tg_message)
 
         # Background server for dashboard
@@ -1703,11 +2266,12 @@ def on_boot_complete():
                         "stats": {
                             "equity": total_equity,
                             "bankroll": _w().paper_bankroll,
+                            "start_bankroll": engine.BANKROLL_START,
                             "session_pnl": _w().session_pnl,
                             "open_pos_count": len(_w().open_positions),
                             "total_trades": len(_w().trade_history)
                         },
-                        "pnl_history": [round(v - engine.BANKROLL_START, 4) for _, v in (_w().equity_history[-200:] if _w().equity_history else [])],
+                        "pnl_history": [round(v, 4) for _, v in (_w().equity_history[-200:] if _w().equity_history else [])],
                         "whales": [
                             {"wallet": w.get("wallet", ""), "name": w.get("name", "Unknown"), "pnl": w.get("total_pnl", 0), "volume": w.get("volume", 0), "score": w.get("score", 0)} for w in whales
                         ],

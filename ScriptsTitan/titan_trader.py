@@ -24,6 +24,14 @@ from titan_signals import classify_market, estimate_expected_value, _KNOWN_HEDGE
 from titan_wallet  import is_hft_wallet, record_whale_trade_performance
 from titan_persistence import save_state, save_whale_roster_async
 
+# Optional: resolution monitor (lazy import to avoid circular)
+def _get_ws_monitor():
+    try:
+        import titan_resolution_monitor as _rm
+        return _rm
+    except ImportError:
+        return None
+
 
 
 
@@ -66,27 +74,38 @@ def _try_fetch_resolution_price(cid: str, asset: str, outcome: str) -> float | N
 
         # Strategy 2: Data API trades for this conditionId — look for near-0/1 prices
         # which appear when a market resolves (losing tokens trade near 0.01)
+        #
+        # CRITICAL BUG FIX (was generating phantom profits):
+        # The old code returned hardcoded 0.99 / 0.01 when seeing the OPPOSITE
+        # outcome's trade. This is WRONG because:
+        #   - Polymarket binary markets do NOT always sum to 1.0 at resolution.
+        #   - Seeing "Yes" trade at 0.97 does NOT mean "No" is worth 0.03.
+        #   - The CLOB price for each token is completely independent.
+        #   - Example: US-Iran "No" was held at 0.83 entry. "Yes" traded at 0.97
+        #     during the market's life (not resolution). Old code returned 0.99
+        #     for "No" — a completely fabricated profit of +19%.
+        #
+        # FIX: ONLY use a trade record to price our outcome if:
+        #   a) The asset (token ID) exactly matches ours, OR
+        #   b) The outcome LABEL exactly matches ours.
+        # NEVER infer our outcome's price from the opposite outcome's trade price.
         data = S.safe_get(f"{DATA_API}/trades", {
             "conditionId": cid,
             "limit": 10,
         })
         if data and isinstance(data, list):
+            our_lower = outcome.lower().strip()
             for t in data:
                 price = float(t.get("price") or 0)
-                t_outcome = t.get("outcome", "")
-                t_asset = t.get("asset", "")
-                if price >= 0.97:
-                    if (t_outcome.lower() == outcome.lower() or
-                            (asset and t_asset == asset)):
-                        return price  # We hold the winning side
-                    else:
-                        return 0.01  # We hold the losing side
-                elif price <= 0.03:
-                    if (t_outcome.lower() == outcome.lower() or
-                            (asset and t_asset == asset)):
-                        return price  # We hold the losing side
-                    else:
-                        return 0.99  # We hold the winning side
+                t_outcome = (t.get("outcome") or "").lower().strip()
+                t_asset = t.get("asset") or ""
+                if price <= 0 or price >= 1:
+                    continue
+                # Only trust trades that are definitively for OUR outcome token
+                is_our_token = (asset and t_asset == asset)
+                is_our_label = (our_lower and t_outcome == our_lower)
+                if (is_our_token or is_our_label) and (price >= 0.97 or price <= 0.03):
+                    return price
 
         # Strategy 3: Positions endpoint — check our own position's current value
         if asset:
@@ -193,8 +212,27 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
         pnl_pct = (cur - entry) / max(entry, 0.001)
         reason  = None
 
+        # (a0) WebSocket resolution — HIGHEST PRIORITY check.
+        # The WS resolution monitor fires immediately when Polymarket settles a market.
+        # This is faster and more reliable than polling Gamma REST API.
+        # Critically catches sports/football matches that resolve while Gamma 422s.
+        _ws = _get_ws_monitor()
+        if _ws:
+            ws_res = _ws.is_resolved_via_ws(cid)
+            if ws_res:
+                ws_price = ws_res.get("price", cur)
+                cur = ws_price
+                pos["cur_price"] = cur
+                pnl_pct = (cur - entry) / max(entry, 0.001)
+                reason = f"WS_RESOLVED price={cur:.4f} via={ws_res.get('event_type','?')}"
+                S._log(
+                    f"  📡 WS exit triggered: {pos.get('title','?')[:35]} "
+                    f"@ {cur:.4f} P&L={pnl_pct*100:+.1f}%",
+                    "INFO"
+                )
+
         # (a) Market resolving — always exit
-        if resolving:
+        if not reason and resolving:
             reason = f"MARKET_RESOLVING cur={cur:.3f}"
 
         # (b) WHALE EXIT — the most important signal.
@@ -247,11 +285,7 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
         # STOP_LOSS_ENABLED=true enables this regardless of whale status.
         # CRITICAL: For sports, always apply stop loss — whale can't exit fast enough.
         mkt_type_pos = pos.get("mkt_type", "POLITICS")
-        if mkt_type_pos == "SPORTS":
-            _sport_stop = -0.25   # -25% for sports — fast stop
-            if not reason and pnl_pct <= _sport_stop:
-                reason = f"SPORTS_STOP_LOSS {pnl_pct*100:.1f}%"
-        elif not reason and C.STOP_LOSS_ENABLED and pnl_pct <= C.STOP_LOSS_PCT:
+        if not reason and C.STOP_LOSS_ENABLED and pnl_pct <= C.STOP_LOSS_PCT:
             reason = f"STOP_LOSS {pnl_pct*100:.1f}%"
 
         # (f) Expiring soon
@@ -388,6 +422,7 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             "bankroll":      round(S.env().paper_bankroll, 4),
             "tier":          pos.get("tier", "?"),
             "elite_wallets": pos.get("elite_wallets", []),
+            "whale_buy_cash": pos.get("whale_buy_cash", {}),   # per-whale $ amounts
             "whale_names":   [
                 S.env().wallet_cache.get(w, {}).get("name", w[:10]+"…")
                 for w in pos.get("elite_wallets", [])[:3]
@@ -399,6 +434,11 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
         S.env().position_whale_map.pop(cid_out, None)
         del S.env().open_positions[key]
         S.env().cooldown_cids[cid_out] = now_t
+
+        # WS: unsubscribe from resolution events for this closed position
+        _ws_unsub = _get_ws_monitor()
+        if _ws_unsub:
+            _ws_unsub.unsubscribe_position(cid_out)
 
         record_whale_trade_performance(pos.get("elite_wallets", []), pnl_usdc_net, won=(pnl_usdc_net >= 0))
 
@@ -591,6 +631,19 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
         S.env().active_market_cids.add(cid)
         S.env().position_whale_map[cid] = set(all_whale_addrs)
 
+        # WS: subscribe to real-time resolution events for this position.
+        # We subscribe to our specific token ID. The WS monitor will also
+        # try to subscribe to the sibling token from market cache.
+        _ws_sub = _get_ws_monitor()
+        if _ws_sub and asset:
+            tokens = [asset]
+            # Include sibling tokens from market cache for full resolution coverage
+            mkt_cached = S.market_cache.get(cid, {})
+            for tid in mkt_cached.get("asset_to_price", {}).keys():
+                if tid != asset and tid not in tokens:
+                    tokens.append(tid)
+            _ws_sub.subscribe_position(cid, tokens)
+
         opening_this_cycle.add(key)
         opening_cids_this_cycle.add(cid)
         open_cids.add(key)
@@ -616,6 +669,7 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             "tier":          tier,
             "elite_wallets": elite_wallet_addrs,
             "whale_names":   elite_names,
+            "whale_buy_cash": whale_buy_cash,   # per-whale $ amounts — shown in trade detail popup
             "avg_entry":     sig.get("avg_entry", cur),
             "score":         sig.get("score", 0),
             "n_confluence":  sig.get("n_confluence", 0),

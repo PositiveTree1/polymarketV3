@@ -170,7 +170,7 @@ class TelegramNotifier:
             api_url = f"https://api.telegram.org/bot{self._token}/getUpdates"
             while True:
                 try:
-                    resp = requests.get(api_url, params={"offset": offset, "timeout": 30}, timeout=15)
+                    resp = requests.get(api_url, params={"offset": offset, "timeout": 30}, timeout=35)
                     if resp.status_code == 200:
                         data = resp.json()
                         for result in data.get("result", []):

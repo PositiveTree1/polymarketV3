@@ -96,25 +96,28 @@ def _log(msg, level="INFO"):
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────────
-def safe_get(url, params=None, retries=3, timeout=12):
+def safe_get(url, params=None, retries=3, timeout=12, quiet=False):
     for i in range(retries):
         try:
             r = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
             if r.status_code == 429:
                 wait = 2 ** (i + 1)
-                _log(f"⚠ Rate limited — sleeping {wait}s", "WARN")
+                if not quiet:
+                    _log(f"⚠ Rate limited — sleeping {wait}s", "WARN")
                 time.sleep(wait)
                 continue
             if r.status_code == 200:
                 return r.json()
-            _log(f"⚠ HTTP {r.status_code} from {url[:60]}", "DIAG")
+            if not quiet:
+                _log(f"⚠ HTTP {r.status_code} from {url[:60]}", "DIAG")
             return None
         except requests.exceptions.Timeout:
             time.sleep(1.5)
         except requests.exceptions.ConnectionError:
             time.sleep(2)
         except Exception as e:
-            _log(f"⚠ Request error: {e}", "DIAG")
+            if not quiet:
+                _log(f"⚠ Request error: {e}", "DIAG")
             time.sleep(0.5)
     return None
 

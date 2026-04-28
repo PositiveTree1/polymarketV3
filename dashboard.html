@@ -193,20 +193,44 @@
                 data: {
                     labels: [],
                     datasets: [{
-                        label: 'PnL',
+                        label: 'Total Net Worth',
                         data: [],
                         borderColor: '#58a6ff',
                         borderWidth: 2,
                         pointRadius: 0,
+                        pointHoverRadius: 6,
+                        pointHitRadius: 30,
                         fill: true,
                         backgroundColor: 'rgba(88, 166, 255, 0.1)',
-                        tension: 0.3
+                        tension: 0.4,
+                        cubicInterpolationMode: 'monotone'
                     }]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    plugins: { legend: { display: false } },
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    plugins: { 
+                        legend: { display: false },
+                        tooltip: {
+                            enabled: true,
+                            backgroundColor: 'rgba(22, 27, 34, 0.9)',
+                            titleColor: '#8b949e',
+                            bodyColor: '#fff',
+                            borderColor: '#30363d',
+                            borderWidth: 1,
+                            padding: 10,
+                            displayColors: false,
+                            callbacks: {
+                                label: function(context) {
+                                    return fmtUSD(context.parsed.y, 2);
+                                }
+                            }
+                        }
+                    },
                     scales: {
                         x: { display: false },
                         y: { 
@@ -246,11 +270,11 @@
                     chart.data.labels = data.pnl_history.map((_, i) => i);
                     chart.data.datasets[0].data = data.pnl_history;
                     const last = data.pnl_history[data.pnl_history.length-1];
-                    const first = data.pnl_history[0];
-                    chart.data.datasets[0].borderColor = (last >= first) ? '#39d353' : '#f85149';
-                    chart.data.datasets[0].backgroundColor = (last >= first) ? 'rgba(57, 211, 83, 0.05)' : 'rgba(248, 81, 73, 0.05)';
+                    const start_bankroll = data.stats.start_bankroll || data.pnl_history[0];
+                    chart.data.datasets[0].borderColor = (last >= start_bankroll) ? '#39d353' : '#f85149';
+                    chart.data.datasets[0].backgroundColor = (last >= start_bankroll) ? 'rgba(57, 211, 83, 0.05)' : 'rgba(248, 81, 73, 0.05)';
                     chart.update('none');
-                    document.getElementById('pnl-total-label').textContent = (last-first >= 0 ? '+' : '') + fmtUSD(last-first, 0) + ' SESSION';
+                    document.getElementById('pnl-total-label').textContent = (last-start_bankroll >= 0 ? '+' : '') + fmtUSD(last-start_bankroll, 0) + ' TOTAL';
                 }
 
                 // 4. Positions

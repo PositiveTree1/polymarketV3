@@ -52,7 +52,7 @@ def _rescore_watchlist():
     save_whale_roster_async()
 
 
-def analyse(trades):
+def analyse(trades, is_hft_loop=False):
     S.env().cycle_count += 1
 
     if S.env().cycle_count % DISCOVERY_INTERVAL_CYCLES == 0:
@@ -145,19 +145,31 @@ def analyse(trades):
         "INFO"
     )
 
+    if is_hft_loop and rejects and not signals:
+        for r in rejects:
+            clean_r = r.replace("\n", " ")
+            _log(f"  ❌ HFT Spike rejected: {clean_r}", "INFO")
+
     trade_events = auto_trade(signals, whale_exits)
     for ev_type, msg, _color in trade_events:
         level = "TRADE" if ev_type in ("OPEN", "CLOSE") else "WARN"
         _log(msg, level)
 
-    # Sample portfolio equity every cycle
+    # Sample portfolio equity every cycle — only record when value changes meaningfully.
+    # This prevents the "flat line + vertical spike" P&L graph artifact caused by
+    # recording identical values every 12s and then a sudden jump on position close.
     open_value = sum(
         pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0)
         for pos in S.env().open_positions.values()
     )
-    S.env().equity_history.append((time.time(), S.env().paper_bankroll + open_value))
-    if len(S.env().equity_history) > 5000:
-        del S.env().equity_history[:500]
+    current_equity = S.env().paper_bankroll + open_value
+    _eq = S.env().equity_history
+    # Only append if value changed by > $0.001 OR it has been > 30s since last point
+    # Smaller threshold + shorter interval = smoother graph curve
+    if not _eq or abs(current_equity - _eq[-1][1]) > 0.001 or (time.time() - _eq[-1][0]) > 30:
+        _eq.append((time.time(), current_equity))
+    if len(_eq) > 5000:
+        del _eq[:500]
 
     # Whale report card every 50 cycles
     if S.env().cycle_count % 50 == 0 and S.env().cycle_count > 0:
@@ -240,7 +252,7 @@ def _hft_fast_loop():
             if spike_trades:
                 _log(f"⚡ HFT fast loop: processing {len(spike_trades)} spike(s)…", "DIAG")
                 C.reload()
-                analyse(spike_trades)
+                analyse(spike_trades, is_hft_loop=True)
         except Exception as e:
             import traceback
             _log(f"HFT fast loop error: {e}\n{traceback.format_exc()[:300]}", "ERR")
@@ -282,6 +294,17 @@ def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycl
     )
     _log("─" * 60, "DATA")
 
+    # Start WebSocket resolution monitor — catches market resolution instantly
+    # without relying on Gamma REST polling. Solves the "football match finished
+    # but bot didn't know" problem. Subscribes to token IDs of open positions.
+    try:
+        import titan_resolution_monitor as _rm
+        _rm.start()
+        # Subscribe to any positions that were restored from saved state
+        _rm.sync_open_positions()
+    except Exception as _e:
+        _log(f"⚠ WS resolution monitor failed to start: {_e}", "WARN")
+
     t_main = threading.Thread(target=run_loop, daemon=True)
     t_hft  = threading.Thread(target=_hft_fast_loop, daemon=True)
     t_main.start()
@@ -296,10 +319,18 @@ def get_system_snapshot() -> str:
     wins      = [t for t in sells if (t.get("pnl_usdc") or 0) >= 0]
     total_pnl = S.env().paper_bankroll - BANKROLL_START
     win_rate  = (len(wins) / len(sells) * 100) if sells else 0
+    open_value = sum(
+        pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0)
+        for pos in S.env().open_positions.values()
+    )
+    current_equity = S.env().paper_bankroll + open_value
     lines = [
         "═" * 70,
         f"  TITAN SNAPSHOT — {now}",
         "═" * 70, "",
+        "[STATISTICS]",
+        f"Net Worth : ${current_equity:.2f} (Total Equity)",
+        f"Open Value: ${open_value:.2f}",
         f"Bankroll  : ${S.env().paper_bankroll:.2f}  (start ${BANKROLL_START:.2f})",
         f"Total PnL : ${total_pnl:+.4f}",
         f"Win Rate  : {win_rate:.1f}%  ({len(wins)}W/{len(sells)-len(wins)}L)",

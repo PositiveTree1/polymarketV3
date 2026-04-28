@@ -39,8 +39,9 @@ from titan_wallet import fetch_wallet, get_elite_wallets, is_hft_wallet
 # ─────────────────────────────────────────────────────────────────────────────
 _gamma_fail_count   = 0
 _gamma_open_until   = 0.0   # timestamp after which circuit is "closed" (normal)
-_CIRCUIT_THRESHOLD  = 10    # consecutive 422s before tripping (raised from 3 — trips too fast)
-_CIRCUIT_COOLDOWN   = 20    # seconds to pause (lowered from 45 — shorter recovery window)
+_CIRCUIT_THRESHOLD  = 3     # consecutive 422s before tripping — HFT loop fires 30+ per burst,
+                            # need to trip fast or we spam hundreds of 422s per cycle
+_CIRCUIT_COOLDOWN   = 60    # seconds to pause — 20s was too short, circuit just re-tripped immediately
 _gamma_cid_fails: dict = {} # conditionId → fail_count (per-CID blacklist)
 _CID_BLACKLIST_THRESHOLD = 3
 _CID_BLACKLIST_DURATION  = 300  # 5 minutes (reduced from 10 — allow retry sooner)
@@ -230,12 +231,16 @@ def get_market(cid: str, trade_title: str = None, asset: str = "", slug: str = "
             prices = json.loads(raw_prices) if isinstance(raw_prices, str) else list(raw_prices)
             prices = [float(p) for p in prices]
             yes_price = prices[0] if prices else 0.5
-            no_price  = prices[1] if len(prices) > 1 else (1.0 - yes_price)
+            # IMPORTANT: Do NOT compute no_price = 1 - yes_price.
+            # Each token's price is independently set. Use the actual index-1 price.
+            no_price  = prices[1] if len(prices) > 1 else None
         except Exception:
             return None, "Price parse failed (closed market)"
+        if yes_price is None and no_price is None:
+            return None, "No prices available (closed market)"
         # Return minimal dict for resolution detection only — don't cache
         return {
-            "yes_price": yes_price, "no_price": no_price,
+            "yes_price": yes_price or 0.5, "no_price": no_price or 0.5,
             "outcome_labels": [], "outcome_prices": {},
             "asset_to_price": {}, "asset_to_index": {},
             "token_index": {}, "index_to_price": {0: yes_price, 1: no_price},
@@ -254,12 +259,20 @@ def get_market(cid: str, trade_title: str = None, asset: str = "", slug: str = "
         prices = json.loads(raw_prices) if isinstance(raw_prices, str) else list(raw_prices)
         prices = [float(p) for p in prices]
         yes_price = prices[0] if prices else None
-        no_price  = prices[1] if len(prices) > 1 else (1.0 - yes_price if yes_price else None)
+        # IMPORTANT: Do NOT compute no_price = 1 - yes_price.
+        # Each Polymarket outcome token is independently priced on the CLOB.
+        # Their sum ≈ 1.0 but is NOT exactly 1.0 — market makers set them separately.
+        # Using 1 - yes_price as a proxy for no_price can produce wildly wrong
+        # prices at resolution (e.g. yes=0.99 → no should be ~0.01, not 0.01 by chance).
+        # Always use the actual price from outcomePrices[1].
+        no_price  = prices[1] if len(prices) > 1 else None
     except Exception:
         return None, "Price parse failed"
 
     if not yes_price or not (0.02 < yes_price < 0.98):
         return None, f"Yes price {yes_price} out of bounds"
+    if no_price is None:
+        return None, "No price unavailable (single-price market)"
 
     raw_outcomes = m.get("outcomes") or "[]"
     try:
@@ -276,7 +289,7 @@ def get_market(cid: str, trade_title: str = None, asset: str = "", slug: str = "
     index_to_price = {}   # 0 -> yes_price, 1 -> no_price
 
     index_to_price[0] = prices[0] if prices else 0.5
-    index_to_price[1] = prices[1] if len(prices) > 1 else (1.0 - index_to_price[0])
+    index_to_price[1] = prices[1] if len(prices) > 1 else 0.5  # Never assume 1-minus
 
     if len(outcome_labels) >= 2 and len(prices) >= 2:
         lbl0 = str(outcome_labels[0])
@@ -290,7 +303,7 @@ def get_market(cid: str, trade_title: str = None, asset: str = "", slug: str = "
         outcome_prices[lbl1.lower()] = prices[1]
     else:
         outcome_prices["Yes"] = yes_price
-        outcome_prices["No"]  = no_price if no_price else 1.0 - yes_price
+        outcome_prices["No"]  = no_price if no_price is not None else 0.5  # Never 1-minus
         token_index["Yes"] = 0
         token_index["No"]  = 1
 
@@ -388,10 +401,20 @@ def get_outcome_price(mkt: dict, outcome: str, asset: str = "") -> float:
     if lower in ("yes", "true", "1"):
         return mkt["yes_price"]
     if lower in ("no", "false", "0"):
-        return mkt.get("no_price", 1.0 - mkt["yes_price"])
+        no_p = mkt.get("no_price")
+        if no_p is not None:
+            return no_p
+        # no_price not available — log and return stale yes_price as sentinel
+        # This should be rare: it means outcomePrices only had 1 element.
+        S._log(f"  ⚠ get_outcome_price: no_price unavailable for outcome='{outcome}'", "DIAG")
+        return mkt["yes_price"]  # caller must handle this gracefully
 
-    # 5. Fall back — return yes_price silently
-    return mkt["yes_price"]
+    # 5. Outcome label not matched at all — log and return 0.5 as neutral sentinel
+    # Returning yes_price silently when outcome is unknown is dangerous:
+    # if we hold "No" but miss the label match, we'd return the "Yes" price
+    # and book a phantom profit/loss.
+    S._log(f"  ⚠ get_outcome_price: unmatched outcome='{outcome}' — returning 0.5", "DIAG")
+    return 0.5  # Neutral sentinel — callers should treat this as "unknown"
 
 
 def get_outcome_price_by_trade(mkt: dict, trade: dict) -> float:
@@ -411,15 +434,19 @@ def get_outcome_price_by_trade(mkt: dict, trade: dict) -> float:
     # Fall back to label-based lookup
     price = get_outcome_price(mkt, outcome, asset)
 
-    # Secondary check: if we got yes_price but outcome might be token 1
+    # Secondary check using explicit label comparison against outcome_labels.
+    # This ensures we return the correct indexed price even when the label
+    # lookup falls through to an alias.
     labels = mkt.get("outcome_labels", [])
     if len(labels) >= 2:
         lbl0 = str(labels[0])
         lbl1 = str(labels[1])
-        if (outcome.lower() == lbl1.lower() or outcome.strip() == lbl1.strip()):
-            return mkt.get("no_price", 1.0 - mkt["yes_price"])
-        if (outcome.lower() == lbl0.lower() or outcome.strip() == lbl0.strip()):
-            return mkt["yes_price"]
+        ip   = mkt.get("index_to_price", {})
+        if outcome.lower() == lbl1.lower() or outcome.strip() == lbl1.strip():
+            # We hold the token-1 outcome — return its actual price, NOT 1-minus
+            return ip.get(1, mkt.get("no_price", price))
+        if outcome.lower() == lbl0.lower() or outcome.strip() == lbl0.strip():
+            return ip.get(0, mkt.get("yes_price", price))
 
     return price
 
@@ -441,23 +468,11 @@ def fetch_position_price_fast(cid: str, asset: str, outcome: str) -> float | Non
     try:
         import json as _json
 
-        # Strategy 1: positions endpoint - most direct (our token's current market value)
-        if asset:
-            pos_data = S.safe_get(f"{DATA_API}/positions", {"asset": asset, "limit": 1})
-            if pos_data and isinstance(pos_data, list) and pos_data:
-                cur_p = float(pos_data[0].get("curPrice") or pos_data[0].get("cur_price") or 0)
-                if 0.001 <= cur_p <= 0.999:
-                    return cur_p
-                if cur_p < 0.001 and pos_data[0].get("curPrice") is not None:
-                    return 0.005   # near-zero = effectively resolved loss
-                if cur_p > 0.999 and pos_data[0].get("curPrice") is not None:
-                    return 0.995   # near-one = effectively resolved win
-
         # Strategy 2: Gamma clob_token_ids - works when conditionId fails
         if asset:
             data = S.safe_get(f"{GAMMA_API}/markets", {
                 "clob_token_ids": f'["{asset}"]', "limit": 1
-            })
+            }, quiet=True)
             if data and isinstance(data, list) and data:
                 m = data[0]
                 raw_prices = m.get("outcomePrices") or "[]"
@@ -485,33 +500,42 @@ def fetch_position_price_fast(cid: str, asset: str, outcome: str) -> float | Non
                             cached["ts"] = time.time()
                         return p
 
-        # Strategy 3: Data API recent trades (always works, even post-resolution)
-        # KEY FIX: invert price when we find the OPPOSITE outcome's recent trade
-        data = S.safe_get(f"{DATA_API}/trades", {"conditionId": cid, "limit": 10})
+        # Strategy 3: Data API recent trades — DIRECT MATCH ONLY.
+        #
+        # CRITICAL BUG FIX: Removed price inversion ("1.0 - opposite_price").
+        # Polymarket token prices are INDEPENDENT — they do NOT sum to 1.0.
+        # Two different outcome tokens are separately traded on the CLOB.
+        # Market makers set each token's price independently based on order flow.
+        # The sum can be 0.96, 1.02, or anything close to 1 but not exactly.
+        # At resolution the LOSING token goes to ~0.01, WINNING goes to ~0.99,
+        # but that happens independently — you cannot infer one from the other.
+        #
+        # Only return a price if we find a trade for OUR specific outcome token
+        # (by asset/token ID match first, then by outcome label).
+        data = S.safe_get(f"{DATA_API}/trades", {"conditionId": cid, "limit": 20}, quiet=True)
         if data and isinstance(data, list):
             our_lower = outcome.lower().strip()
-            best_direct = None
-            best_inverted = None
+            asset_match = None
+            label_match = None
             for t in data:
                 t_price = float(t.get("price") or 0)
                 t_outcome = (t.get("outcome") or "").lower().strip()
                 t_asset = t.get("asset") or ""
                 if t_price <= 0 or t_price >= 1:
                     continue
-                # Direct asset match - most reliable
+                # Asset/token ID exact match — definitive, always use
                 if asset and t_asset == asset:
-                    return t_price
-                # Label match
-                if t_outcome and our_lower:
-                    if t_outcome == our_lower and best_direct is None:
-                        best_direct = t_price
-                    elif t_outcome != our_lower and best_inverted is None:
-                        # Opposite outcome found - invert to get our price
-                        best_inverted = 1.0 - t_price
-            if best_direct is not None:
-                return best_direct
-            if best_inverted is not None:
-                return best_inverted
+                    asset_match = t_price
+                    break  # Best possible match found
+                # Label match — only collect, don't return yet
+                if t_outcome and our_lower and t_outcome == our_lower and label_match is None:
+                    label_match = t_price
+            if asset_match is not None:
+                return asset_match
+            # Only use label match if NO asset ID was available at buy time (legacy positions)
+            # When asset IS set but no asset match found, return None — don't risk phantom P&L
+            if label_match is not None and not asset:
+                return label_match
 
     except Exception as e:
         S._log(f"  warning fetch_position_price_fast failed: {e}", "DIAG")
@@ -623,7 +647,11 @@ def _poll_wallet_trades(wallet: str, limit: int, min_cash: float,
             )
             continue
         else:
-            # Flag large trades for all wallet types
+            # Flag large trades for all wallet types.
+            # IMPORTANT: only set is_large_trade when avg_bet > 0 (we have a baseline).
+            # If avg_bet == 0, the wallet hasn't been profiled yet — we cannot compute
+            # a meaningful ratio, so is_large_trade stays False. This prevents 0x-ratio
+            # spike-promotes in build_signals().
             if avg_bet > 0 and trade["cash"] >= avg_bet * 3.0:
                 trade["is_large_trade"] = True
             results.append(trade)
@@ -697,7 +725,7 @@ def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) 
                 break
         avg_bet = prof.get("avg_bet", 0)
         trades  = _poll_wallet_trades(
-            wallet, 20, max(50.0, float(MIN_TRADE_CASH)),
+            wallet, 100, max(50.0, float(MIN_TRADE_CASH)),
             hot_cutoff, warm_cutoff, "watchlist_poll",
             False, avg_bet, False
         )

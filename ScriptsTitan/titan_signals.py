@@ -36,7 +36,16 @@ _SPORTS_PATTERNS = re.compile(
     r'\b(vs\.?|spread|o/u|over|under|winner|set \d|game \d|bo[13]|'
     r'nhl|nba|mlb|nfl|ufc|atp|wta|epl|sea-|nhl-|mlb-|nba-|ufc-|atp-|'
     r'kings|flames|rays|yankees|royals|tigers|brewers|pirates|nationals|'
-    r'lol:|valorant:|counter-strike:)\b',
+    r'lol:|valorant:|counter-strike:|'
+    # Single-team "win on date" match markets — e.g. "Will Le Havre AC win on 2026-04-26?"
+    # These are always sports; the team is playing a scheduled fixture
+    r'win on \d{4}-\d{2}-\d{2}|win on 20\d\d|'
+    # "leading at halftime", "clean sheet", "both teams to score" patterns
+    r'leading at halftime|clean sheet|both teams|'
+    # Indian Premier League, Champions League match specifics
+    r'indian premier league|ipl:|champions league [a-z]|'
+    # Esports
+    r'esports|furia|loud game|map \d|round \d)\b',
     re.IGNORECASE
 )
 _CRYPTO_PATTERNS = re.compile(
@@ -95,8 +104,15 @@ def estimate_expected_value(cur_price: float, avg_entry: float, liq: float,
     # They paid avg_entry cents for a $1 payout — that IS their probability estimate.
     # Binary EV: we buy at cur_price. If outcome hits, we gain (1 - cur_price).
     # If it misses, we lose cur_price. Edge is valid when fair_prob > cur_price.
-    fair_prob = max(0.05, min(0.95, avg_entry))
-    ev_per_dollar = fair_prob * (1.0 - cur_price) - (1.0 - fair_prob) * cur_price
+    # True EV per dollar: 
+    # Win: receive (1/cur_price) dollars -> profit = (1/cur_price) - 1
+    # Lose: lose 1 dollar -> loss = 1
+    # EV = fair_prob * (1/cur_price - 1) - (1 - fair_prob) * 1
+    
+    # FIX: Add a conservative 5% expected edge to the whale's entry price.
+    # If a whale buys at 0.88, their implied fair probability is > 0.88.
+    fair_prob = max(0.05, min(0.98, avg_entry + 0.05))
+    ev_per_dollar = (fair_prob / cur_price) - 1.0
     ev_after_friction = ev_per_dollar - total_friction
     ev_dollar = ev_after_friction * bet_size
 
@@ -428,11 +444,20 @@ def kelly_bet(signal: dict, wallets: dict, score: float = None) -> float:
     if is_hft_sig and not is_large:
         max_abs = min(max_abs * 0.5, 2.0)
 
-    # SPORTS PENALTY: sports are random events — no betting edge, use tiny size
+    # SPORTS SIZING: scale bet by conviction strength rather than flat 40% penalty.
+    # conviction_mult is 0.5-1.0 for 1-elite bypass (just passed), 1.0 for 2+ elites.
+    # A conviction=0.50 signal gets 50% * 0.55 = ~27% of calculated size.
+    # A conviction=0.90 signal (1 whale put in 18x avg, big portfolio fraction) gets ~50%.
+    # A 2-elite signal keeps the full 55% cap.
     mkt_type = signal.get("mkt_type", "POLITICS")
     if mkt_type == "SPORTS":
-        bet = bet * 0.4   # 40% of calculated size for sports
-        max_abs = min(max_abs, S.env().paper_bankroll * 0.05)  # Hard 5% cap for sports
+        conv_mult = signal.get("sports_conviction_mult", 0.5)
+        # 1-elite low conviction (0.50) → 35% of size; 2-elite (1.0) → 55% of size
+        sports_scale = 0.35 + conv_mult * 0.20   # range: 0.35 to 0.55
+        bet = bet * sports_scale
+        # Hard portfolio cap: scales from 3% (low conv) to 5% (high conv)
+        sports_max_pct = 0.03 + conv_mult * 0.02  # 3% to 5%
+        max_abs = min(max_abs, S.env().paper_bankroll * sports_max_pct)
 
     # Score-tiered hard floor/ceiling: ensure small bets for low-confidence signals
     # Score < 60: cap at 4% bankroll regardless of kelly output
@@ -495,6 +520,50 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
         elite_wallets    = {w: t for w, t in by_w.items() if wallets.get(w, _EMPTY_W).get("elite")}
         verified_wallets = {w: t for w, t in by_w.items()
                             if wallets.get(w, _EMPTY_W).get("verified") and w not in elite_wallets}
+
+        # CRITICAL FIX: For HFT spike trades, if the spiking wallet isn't yet classified
+        # as elite in wallet_cache (can happen in the first ~2 min of boot before fetch_wallet
+        # has run), treat it as elite for THIS signal. The spike ratio IS the signal —
+        # a 100x+ spike from a known HFT wallet is more reliable than waiting for classification.
+        # fetch_hft_spike_trades() pre-fetches the wallet, but if it's still not elite
+        # (e.g. PnL/portfolio proxy below threshold), we still want to act on the spike.
+        _any_hft_trade_tagged = any(
+            t.get("is_large_trade") or t.get("hft_spike_ratio", 0) > 0
+            for t in by_w.values()
+        )
+        if _any_hft_trade_tagged and not elite_wallets:
+            # Promote spike-tagged wallets to elite for this signal only.
+            # GUARDS:
+            #   1. hft_spike_ratio must be >= 20 (genuine spike, not routine trade)
+            #      OR is_large_trade must be set (≥3x avg from non-HFT path)
+            #   2. hft_spike_ratio=0 is NEVER a promotion — means avg_bet was 0
+            #      (wallet not profiled yet) so the ratio is meaningless.
+            #   3. Wallet must be a real HFT or verified — watchable-only is NOT
+            #      sufficient to treat someone as elite. VIP tag ≠ elite status.
+            for w, t in by_w.items():
+                spike_r = t.get("hft_spike_ratio", 0)
+                is_large = t.get("is_large_trade", False)
+                # Require a real measured ratio — 0x means avg_bet was unknown
+                if spike_r < 20 and not is_large:
+                    continue
+                if w in elite_wallets:
+                    continue
+                prof = wallets.get(w, _EMPTY_W)
+                # Must be a genuine HFT wallet or verified — not just watchable/VIP-listed
+                if not (is_hft_wallet(prof) or prof.get("verified")):
+                    S._log(
+                        f"  ⛔ Spike-promote BLOCKED: {prof.get('name', w[:10]+'…')} "
+                        f"(ratio={spike_r:.0f}x) not HFT/verified — only watchable/VIP",
+                        "DIAG"
+                    )
+                    continue
+                elite_wallets[w] = t
+                S._log(
+                    f"  ⚡ Spike-promote: {prof.get('name', w[:10]+'…')} "
+                    f"(ratio={spike_r:.0f}x) treated as elite for this signal",
+                    "DIAG"
+                )
+
         hft_wallets      = {w: t for w, t in by_w.items()
                             if (wallets.get(w, _EMPTY_W).get("hft") or
                                 is_hft_wallet(wallets.get(w, _EMPTY_W)))
@@ -505,10 +574,6 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
         # Compute a preliminary is_hft_signal here so the drift/slippage gates
         # below can apply HFT-specific thresholds. The definitive version is
         # recomputed after newest_elite_ts is known (line ~661).
-        _any_hft_trade_tagged = any(
-            t.get("is_large_trade") or t.get("hft_spike_ratio", 0) > 0
-            for t in by_w.values()
-        )
         is_hft_signal = len(hft_wallets) > 0 or _any_hft_trade_tagged
 
         # ── COUNTER-WHALE ANALYSIS ───────────────────────────────────────────
@@ -567,6 +632,32 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
             if _is_hft_pre:
                 # Use trade price as both entry and current price (no drift = fresh)
                 _trade_price = next(iter(elite_wallets.values())).get("price", 0.5)
+                # Sports markets resolve in hours, not days.
+                # Previously hardcoded 168h caused live sports games to pass the
+                # MIN_HOURS_LEFT gate when Gamma was down. Now detect from title.
+                _title_lower = trade_title.lower()
+                _is_sports_title = any(kw in _title_lower for kw in (
+                    " vs ", "vs.", "spread", "o/u", "over", "under",
+                    "nhl", "nba", "mlb", "nfl", "ufc", "atp", "wta",
+                ))
+                # Detect micro-duration crypto scalp markets (Solana/BTC/ETH Up or Down
+                # with specific time stamps like "9:05AM", "10:10", "April 26, 10:05").
+                # These expire in 5-15 minutes and should NEVER be copy-traded — by the
+                # time a signal is built and a trade placed, the market is already closed.
+                _is_micro_market = any(kw in _title_lower for kw in (
+                    "up or down", "solana up", "btc up", "eth up",
+                    "bitcoin up", "ethereum up",
+                )) or (
+                    # Time-stamped title: "April 26, 9:05AM" or "9:05AM" patterns
+                    any(c.isdigit() for c in _title_lower) and
+                    any(kw in _title_lower for kw in (":0", ":1", ":2", ":3", ":4", ":5")) and
+                    any(kw in _title_lower for kw in ("up or down", "solana", "bitcoin", "ethereum", "btc", "eth", "sol"))
+                )
+                if _is_micro_market:
+                    rejects.append(f"  {outcome:<12} {title[:40]}\n"
+                                   f"    ↳ Micro-duration scalp market (expires in minutes) — not copy-tradeable")
+                    continue
+                _synthetic_hrs = 3.0 if _is_sports_title else 48.0
                 mkt = {
                     "yes_price": _trade_price, "no_price": 1.0 - _trade_price,
                     "outcome_prices": {"Yes": _trade_price, "No": 1.0 - _trade_price},
@@ -574,7 +665,7 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
                     "liq": 10_000,   # assume liquid — we'll find out on exit
                     "volume": 50_000,
                     "title": trade_title,
-                    "hrs_left": 168,  # assume > 7 days — safe for HFT spikes
+                    "hrs_left": _synthetic_hrs,  # sports=3h, other=48h (was hardcoded 168h — bug)
                     "slug": slug_hint or "",
                     "event_slug": "",
                     "ts": now_t,
@@ -826,8 +917,17 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
                 continue
 
         # ── Sports market gate (second check — post drift/EV gates) ──────────
-        # Sports are no longer hard-blocked. But we require 2+ GENUINE (non-sports-bot)
-        # elite whales, OR a genuinely extreme HFT spike (500x+).
+        # Sports require either:
+        #   A) 2+ genuine (non-sports-bot) elite whales, OR
+        #   B) 1 genuine elite with HIGH CONVICTION (large trade relative to their
+        #      portfolio AND their average bet), OR
+        #   C) Extreme HFT spike (500x+) with 1+ genuine elite
+        #
+        # Conviction for B is computed as a weighted score:
+        #   - portfolio_fraction score: how large is this vs their portfolio (0-1)
+        #   - spike_ratio score: how large vs their average bet (0-1)
+        #   Combined score >= 0.5 = sufficient conviction to allow 1-elite entry
+        #   This score ALSO feeds into bet sizing (stored as sports_conviction_mult).
         if mkt_type == "SPORTS":
             _max_spike = max(
                 (t.get("hft_spike_ratio", 0) for t in group),
@@ -844,14 +944,79 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
                 w: t for w, t in elite_wallets.items()
                 if not S.env().wallet_cache.get(w, {}).get("sports_bot", False)
             }
-            if not _is_extreme_spike:
-                if len(_genuine_sports_elites) < 2:
-                    rejects.append(
-                        f"  {outcome:<12} {title[:40]}\n"
-                        f"    ↳ SPORTS need 2+ genuine elites (have {len(_genuine_sports_elites)}) "
-                        f"or extreme spike ({_max_spike:.0f}x < 500x)"
+
+            # Compute conviction score for each genuine elite
+            _sports_conviction_mult = 0.0  # 0.0 to 1.0, fed to bet sizing
+            _conviction_details = []
+            for w, t in _genuine_sports_elites.items():
+                prof      = wallets.get(w, {})
+                cash      = t["cash"]
+                avg_b     = prof.get("avg_bet", 0)
+                portfolio = prof.get("total_value", 0) or prof.get("total_pnl", 0)
+
+                # Score 1: how large vs their average bet (cap at 1.0 for 20x+)
+                spike_score = 0.0
+                if avg_b > 0:
+                    ratio = cash / avg_b
+                    # 3x → 0.15, 10x → 0.50, 20x → 1.0
+                    spike_score = min(1.0, ratio / 20.0)
+
+                # Score 2: how large vs their portfolio (cap at 1.0 for 2%+)
+                port_score = 0.0
+                if portfolio > 0:
+                    frac = cash / portfolio
+                    # 0.1% → 0.05, 0.5% → 0.25, 2%+ → 1.0
+                    port_score = min(1.0, frac / 0.02)
+
+                # Combined: weighted average — spike matters more for HFT, portfolio for non-HFT
+                w_prof = wallets.get(w, {})
+                is_w_hft = w_prof.get("hft") or w_prof.get("trades_per_hour", 0) >= 50
+                if is_w_hft:
+                    conviction = spike_score * 0.70 + port_score * 0.30
+                else:
+                    conviction = spike_score * 0.45 + port_score * 0.55
+
+                # Absolute cash floor: a $50 trade is never conviction even if it's 20x avg
+                if cash < 200:
+                    conviction *= (cash / 200.0)
+
+                w_name = S.env().wallet_cache.get(w, {}).get("name", w[:10])
+                _conviction_details.append(
+                    f"{w_name} ${cash:.0f} "
+                    f"(spike={spike_score:.2f} port={port_score:.2f} → conv={conviction:.2f})"
+                )
+                _sports_conviction_mult = max(_sports_conviction_mult, conviction)
+
+            # Decision logic
+            if _is_extreme_spike:
+                pass  # Allow — extreme spike overrides everything
+            elif len(_genuine_sports_elites) >= 2:
+                pass  # Allow — 2+ genuine elites, standard path
+            elif len(_genuine_sports_elites) == 1 and _sports_conviction_mult >= 0.50:
+                # Allow with 1 elite IF they have meaningful conviction
+                w_name_detail = _conviction_details[0] if _conviction_details else ""
+                S._log(
+                    f"  ⚽ Sports 1-elite bypass: conviction={_sports_conviction_mult:.2f} — {w_name_detail}",
+                    "DIAG"
+                )
+            else:
+                # Reject — insufficient confluence or conviction
+                sports_bot_names = [
+                    S.env().wallet_cache.get(w, {}).get("name", w[:10])
+                    for w in elite_wallets if w not in _genuine_sports_elites
+                ]
+                if len(_genuine_sports_elites) == 0:
+                    reason = (
+                        f"Sports needs 1+ genuine elite (have {len(_genuine_sports_elites)} after "
+                        f"filtering {len(elite_wallets)-len(_genuine_sports_elites)} sports bots: {sports_bot_names})"
                     )
-                    continue
+                else:
+                    reason = (
+                        f"Sports 1-elite conviction too low ({_sports_conviction_mult:.2f} < 0.50): "
+                        f"{_conviction_details[0] if _conviction_details else 'no detail'}"
+                    )
+                rejects.append(f"  {outcome:<12} {title[:40]}\n    ↳ {reason}")
+                continue
 
         # ── Short-duration EVENT/CRYPTO gate ─────────────────────────────
         # Markets closing in < 1h are near-expiry binary traps.
@@ -968,6 +1133,7 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
             "wallets":        wallets,
             "exits_detected": exits_on_this,
             "exits_same_side": exits_same_side,
+            "sports_conviction_mult": locals().get("_sports_conviction_mult", 1.0) if mkt_type == "SPORTS" else 1.0,
         }
 
         bd    = score_signal(sig)
