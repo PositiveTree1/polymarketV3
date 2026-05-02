@@ -64,6 +64,9 @@ strategy_recent_form: dict = {}
 strategy_drift_discount: dict = {}
 strategy_open_book: dict = {}
 strategy_consensus_basket: dict = {}
+strategy_scoring: dict = {}
+strategy_kelly: dict = {}
+position_management_ext: dict = {}
 
 
 def _load_json():
@@ -147,6 +150,9 @@ def reload():
     g["strategy_drift_discount"]  = {**_default_dd,  **flat.get("strategy_drift_discount", {})}
     g["strategy_open_book"]       = {**_default_ob,  **flat.get("strategy_open_book", {})}
     g["strategy_consensus_basket"]= {**_default_cb,  **flat.get("strategy_consensus_basket", {})}
+    g["strategy_scoring"]         = flat.get("strategy_scoring", {})
+    g["strategy_kelly"]           = flat.get("strategy_kelly", {})
+    g["position_management_ext"]  = flat.get("position_management_ext", {})
 
     for key, val in flat.items():
         if key not in ("vip_wallets", "priority_wallets", "seed_watchlist") and not key.startswith("strategy_"):

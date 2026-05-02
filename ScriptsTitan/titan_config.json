@@ -439,7 +439,9 @@
         "min_score": 50,
         "max_positions": 5,
         "max_bet_abs": 1.20,
-        "stop_loss_pct": -0.35
+        "stop_loss_pct": -0.35,
+        "conviction_portfolio_pct": 0.005,
+        "opposition_ratio_block": 0.60
     },
     "vip_wallets": {
         "_group": "VIP Wallets",
@@ -497,5 +499,72 @@
             "0x7f9e2d1df78614564a70becc7fa14aa9a6623a0e",
             "0xdf17f4a8dd01a4cfa6fc3da323a2baee5f8697d1"
         ]
+    },
+    "strategy_scoring": {
+        "_group": "Scoring Constants — score_signal()",
+        "wallet_max_pts": 30,
+        "confluence_pts": [0, 6, 10, 14, 18],
+        "large_trade_conf_bonus": 4,
+        "elite_only_conf_floor": 8,
+        "recency_hot_thresholds": [
+            [0.25, 20], [0.5, 17], [1, 14], [2, 9], [3, 6], [4, 4], [null, 2]
+        ],
+        "recency_warm_thresholds": [
+            [4, 6], [6, 4], [8, 2], [null, 1]
+        ],
+        "hft_recency_bonus": 5,
+        "hft_recency_cap": 20,
+        "opp_neg_drift_base": 8,
+        "opp_neg_drift_scale": 25,
+        "opp_neg_drift_max": 15,
+        "opp_pos_drift_thresholds": [
+            [0.04, 15], [0.08, 12], [0.12, 8], [0.15, 4], [null, 0]
+        ],
+        "liq_quality_max": 5.0,
+        "liq_quality_scale": 8000,
+        "vol_quality_max": 3.0,
+        "vol_quality_scale": 40000,
+        "time_quality_pts": [2, 1, 0],
+        "time_quality_thresholds": [72, 24],
+        "conviction_bonus_massive": 5,
+        "conviction_bonus_large": 2,
+        "large_trade_bonus": 3,
+        "price_zone_ideal_bonus": 5,
+        "price_zone_acceptable_bonus": 2,
+        "price_zone_outside_penalty": -10,
+        "multi_whale_pts": [0, 0, 5, 8],
+        "exit_penalty_per_whale": -8,
+        "weekly_pnl_penalty_min": -10,
+        "score_discount_wscore_ref": 0.85,
+        "score_discount_factor": 0.15
+    },
+    "strategy_kelly": {
+        "_group": "Kelly Sizing Constants — kelly_bet()",
+        "score_mult_base": 0.5,
+        "score_mult_scale": 0.5,
+        "conf_mult_step": 0.25,
+        "conf_mult_cap": 1.75,
+        "tier_multipliers": {
+            "CONVICTION": 1.6,
+            "ALERT": 1.2,
+            "STRONG": 1.0,
+            "MEDIUM": 0.7,
+            "ELITE_ONLY": 0.9,
+            "HFT": 0.5
+        },
+        "score_floor_base_ref": 55,
+        "score_floor_scale": 45,
+        "score_floor_mult": 1.5,
+        "large_trade_max_abs_boost": 1.5,
+        "large_trade_bankroll_cap": 0.22,
+        "adaptive_caps": [
+            [8,   1.50, 0.15],
+            [15,  2.50, 0.18],
+            [30,  4.00, 0.18]
+        ]
+    },
+    "position_management_ext": {
+        "_group": "Position Management Extensions",
+        "whale_exit_min_sell_fraction": 0.30
     }
 }

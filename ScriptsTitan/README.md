@@ -179,6 +179,8 @@ The bot also pushes notifications on boot, every buy, every sell, and on errors.
 
 ## Architecture
 
+> Full context document for AI sessions and onboarding: [TITAN_CONTEXT.md](TITAN_CONTEXT.md)
+
 ```
 titan_ui.py          ← Entry point. Tkinter GUI + boot screen.
 titan_engine.py      ← Main orchestration. 15s loop + 3s HFT loop.

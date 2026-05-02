@@ -101,6 +101,8 @@ Auto-trade fires for: `CONVICTION`, `ALERT`, `HFT` (configurable via `TRADEABLE_
 
 ## Multi-Strategy Engine (v10)
 
+> Full strategy reference: [TITAN_STRATEGIES.md](TITAN_STRATEGIES.md)
+
 Three strategies run in parallel via `build_signals()`:
 
 | Strategy | Logic |

@@ -204,7 +204,8 @@ def check_whale_exits(cid_to_wallet_sets: dict, entry_times: dict = None) -> dic
             buy_cash = cid_wallet_buy_cash.get(cid, {}).get(wallet.lower(), 0)
             if buy_cash > 0 and sell_cash > 0:
                 sell_fraction = sell_cash / buy_cash
-                if sell_fraction < 0.30:
+                _min_frac = float(getattr(C, "position_management_ext", {}).get("whale_exit_min_sell_fraction", 0.30))
+                if sell_fraction < _min_frac:
                     S._log(
                         f"  🐋 Partial trim ignored: {S.env().wallet_cache.get(wallet,{}).get('name',wallet[:10])} "
                         f"sold {sell_fraction*100:.0f}% of position (need ≥30%)",
@@ -247,79 +248,76 @@ def whale_still_holding(wallet: str, cid: str) -> bool:
 #  SCORING
 # ─────────────────────────────────────────────────────────────────────────────
 def score_signal(s: dict) -> dict:
+    _sc = getattr(C, "strategy_scoring", {})
     bd = {}
 
-    bd["wallet"] = round(s["avg_wscore"] * 30, 1)
+    bd["wallet"] = round(s["avg_wscore"] * _sc.get("wallet_max_pts", 30), 1)
 
     n_confluence = s.get("n_confluence", 0)
-    bd["conf"] = (
-        18 if n_confluence >= 4 else
-        14 if n_confluence == 3 else
-        10 if n_confluence == 2 else
-        6  if n_confluence == 1 else
-        0
-    )
+    _conf_pts = _sc.get("confluence_pts", [0, 6, 10, 14, 18])
+    bd["conf"] = _conf_pts[min(n_confluence, len(_conf_pts) - 1)]
     if s.get("elite_only_mode"):
-        bd["conf"] = max(bd["conf"], 8)
-
+        bd["conf"] = max(bd["conf"], _sc.get("elite_only_conf_floor", 8))
     if s.get("has_large_trade"):
-        bd["conf"] = min(18, bd["conf"] + 4)
+        bd["conf"] = min(_conf_pts[-1], bd["conf"] + _sc.get("large_trade_conf_bonus", 4))
 
     age_h  = (time.time() - s["newest_ts"]) / 3600
     window = s.get("window", "warm")
     if window in ("hot", "hft"):
-        bd["rec"] = (20 if age_h < 0.25 else 17 if age_h < 0.5 else
-                     14 if age_h < 1   else  9 if age_h < 2   else
-                      6 if age_h < 3   else  4 if age_h < 4   else 2)
+        _hot = _sc.get("recency_hot_thresholds", [[0.25,20],[0.5,17],[1,14],[2,9],[3,6],[4,4],[None,2]])
+        bd["rec"] = next(pts for (thr, pts) in _hot if thr is None or age_h < thr)
     else:
-        bd["rec"] = (6 if age_h < 4 else 4 if age_h < 6 else 2 if age_h < 8 else 1)
+        _warm = _sc.get("recency_warm_thresholds", [[4,6],[6,4],[8,2],[None,1]])
+        bd["rec"] = next(pts for (thr, pts) in _warm if thr is None or age_h < thr)
 
     if s.get("is_hft") and (time.time() - s["newest_ts"]) <= HFT_MIRROR_DELAY_MAX_SECONDS:
-        bd["rec"] = min(20, bd["rec"] + 5)
+        bd["rec"] = min(_sc.get("hft_recency_cap", 20), bd["rec"] + _sc.get("hft_recency_bonus", 5))
 
     drift = s["drift"]
     if drift < 0:
-        bd["opp"] = max(0, min(15, 8 + int(abs(drift) * 25)))
+        _base = _sc.get("opp_neg_drift_base", 8)
+        _scale = _sc.get("opp_neg_drift_scale", 25)
+        _max = _sc.get("opp_neg_drift_max", 15)
+        bd["opp"] = max(0, min(_max, _base + int(abs(drift) * _scale)))
     else:
-        bd["opp"] = (15 if drift < 0.04 else 12 if drift < 0.08 else
-                     8  if drift < 0.12 else  4 if drift < 0.15 else 0)
+        _pos = _sc.get("opp_pos_drift_thresholds", [[0.04,15],[0.08,12],[0.12,8],[0.15,4],[None,0]])
+        bd["opp"] = next(pts for (thr, pts) in _pos if thr is None or drift < thr)
 
     mkt   = s["mkt"]
-    liq_p = min(5.0, mkt["liq"]    / 8_000 * 5)
-    vol_p = min(3.0, mkt["volume"] / 40_000 * 3)
+    liq_p = min(_sc.get("liq_quality_max", 5.0), mkt["liq"] / _sc.get("liq_quality_scale", 8000) * _sc.get("liq_quality_max", 5.0))
+    vol_p = min(_sc.get("vol_quality_max", 3.0), mkt["volume"] / _sc.get("vol_quality_scale", 40000) * _sc.get("vol_quality_max", 3.0))
     hrs   = mkt.get("hrs_left")
-    t_p   = 2 if (hrs is None or hrs > 72) else 1 if hrs > 24 else 0
+    _tq_pts = _sc.get("time_quality_pts", [2, 1, 0])
+    _tq_thr = _sc.get("time_quality_thresholds", [72, 24])
+    t_p = _tq_pts[0] if (hrs is None or hrs > _tq_thr[0]) else _tq_pts[1] if hrs > _tq_thr[1] else _tq_pts[2]
     bd["mkt"] = round(liq_p + vol_p + t_p, 1)
 
     mb = s["max_bet_cash"]
-    bd["bonus"] = (5 if mb >= MASSIVE_TRADE else 2 if mb >= LARGE_TRADE else 0)
+    bd["bonus"] = (_sc.get("conviction_bonus_massive", 5) if mb >= MASSIVE_TRADE
+                   else _sc.get("conviction_bonus_large", 2) if mb >= LARGE_TRADE else 0)
     if s.get("has_large_trade"):
-        bd["bonus"] = min(10, bd["bonus"] + 3)
+        bd["bonus"] = min(10, bd["bonus"] + _sc.get("large_trade_bonus", 3))
 
     cur_p = s.get("cur", 0.5)
     if C.IDEAL_PRICE_MIN <= cur_p <= C.IDEAL_PRICE_MAX:
-        bd["price_zone"] = 5
+        bd["price_zone"] = _sc.get("price_zone_ideal_bonus", 5)
     elif C.MIN_ENTRY_PRICE <= cur_p <= C.MAX_ENTRY_PRICE:
-        bd["price_zone"] = 2
+        bd["price_zone"] = _sc.get("price_zone_acceptable_bonus", 2)
     else:
-        bd["price_zone"] = -10
+        bd["price_zone"] = _sc.get("price_zone_outside_penalty", -10)
 
     n_el = s.get("n_elite", 0)
-    if n_el >= 3:
-        bd["multi_whale"] = 8
-    elif n_el == 2:
-        bd["multi_whale"] = 5
-    else:
-        bd["multi_whale"] = 0
+    _mw = _sc.get("multi_whale_pts", [0, 0, 5, 8])
+    bd["multi_whale"] = _mw[min(n_el, len(_mw) - 1)]
 
-    bd["exit_penalty"] = -(len(s.get("exits_same_side", [])) * 8)
+    bd["exit_penalty"] = len(s.get("exits_same_side", [])) * _sc.get("exit_penalty_per_whale", -8)
 
     weekly_pnl_total = sum(
         get_whale_weekly_pnl(w)
         for w in s.get("elite_ver", {}).keys()
     )
     if weekly_pnl_total < -1.0:
-        bd["weekly_penalty"] = max(-10, round(weekly_pnl_total, 0))
+        bd["weekly_penalty"] = max(_sc.get("weekly_pnl_penalty_min", -10), round(weekly_pnl_total, 0))
     else:
         bd["weekly_penalty"] = 0
 
@@ -332,12 +330,11 @@ def score_signal(s: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 def _adaptive_bet_caps():
     br = S.env().paper_bankroll
-    if br < 15:    return 2.00,  0.15
-    elif br < 30:  return 5.00,  0.20
-    elif br < 75:  return 12.00, 0.20
-    elif br < 200: return 30.00, 0.20
-    elif br < 500: return 60.00, 0.20
-    else:          return 150.00, 0.20
+    _caps = getattr(C, "strategy_kelly", {}).get("adaptive_caps", [])
+    for threshold, max_abs, max_pct in _caps:
+        if br < threshold:
+            return max_abs, max_pct
+    return MAX_BET_ABS, MAX_BET_PCT
 
 
 def kelly_bet(signal: dict, wallets: dict, score: float = None) -> float:
@@ -357,54 +354,50 @@ def kelly_bet(signal: dict, wallets: dict, score: float = None) -> float:
     fair_value = max(0.05, min(0.95, fair_value))
     cur        = max(0.05, min(0.95, cur))
 
-    score_discount = max(0.0, (0.85 - avg_wscore) * 0.15)
+    _kc = getattr(C, "strategy_kelly", {})
+    _sc = getattr(C, "strategy_scoring", {})
+    _wscore_ref  = _sc.get("score_discount_wscore_ref", 0.85)
+    _disc_factor = _sc.get("score_discount_factor", 0.15)
+    score_discount = max(0.0, (_wscore_ref - avg_wscore) * _disc_factor)
     kelly_fair = max(0.05, min(0.95, fair_value - score_discount))
 
     b     = max(0.05, (1.0 / cur) - 1.0 - ROUND_TRIP_FEE)
     kelly = max(0.0, kelly_fair - (1 - kelly_fair) / b)
     f_kelly = kelly * KELLY_FRACTION
 
-    smult = 0.5 + 0.5 * (score / 100)
-    conf_mult = 1.0 + (n_elite - 1) * 0.25
-    conf_mult = min(conf_mult, 1.75)
+    _smult_base  = _kc.get("score_mult_base", 0.5)
+    _smult_scale = _kc.get("score_mult_scale", 0.5)
+    smult = _smult_base + _smult_scale * (score / 100)
+    _conf_step = _kc.get("conf_mult_step", 0.25)
+    _conf_cap  = _kc.get("conf_mult_cap", 1.75)
+    conf_mult = min(_conf_cap, 1.0 + (n_elite - 1) * _conf_step)
 
-    tier_mult = {
-        "CONVICTION": 1.6,
-        "ALERT": 1.2,
-        "STRONG": 1.0,
-        "MEDIUM": 0.7,
-        "ELITE_ONLY": 0.9,
-        "HFT": 0.5,
-    }.get(tier, 0.8)
+    _tier_defaults = {"CONVICTION": 1.6, "ALERT": 1.2, "STRONG": 1.0, "MEDIUM": 0.7, "ELITE_ONLY": 0.9, "HFT": 0.5}
+    _tier_cfg = _kc.get("tier_multipliers", _tier_defaults)
+    tier_mult = _tier_cfg.get(tier, 0.8)
 
     # v10: Strategy-specific bet multiplier
     strategy_mult = _strategy_bet_multiplier(signal)
 
     kelly_bet_raw = S.env().paper_bankroll * f_kelly * smult * conf_mult * tier_mult * strategy_mult
 
-    score_floor = MIN_BET * (1 + max(0, (score - 55) / 45) * 1.5)
+    _sf_ref   = _kc.get("score_floor_base_ref", 55)
+    _sf_scale = _kc.get("score_floor_scale", 45)
+    _sf_mult  = _kc.get("score_floor_mult", 1.5)
+    score_floor = MIN_BET * (1 + max(0, (score - _sf_ref) / _sf_scale) * _sf_mult)
 
     br = S.env().paper_bankroll
-    if br < 8:
-        max_abs = 1.50
-        max_pct = 0.15
-    elif br < 15:
-        max_abs = 2.50
-        max_pct = 0.18
-    elif br < 30:
-        max_abs = 4.00
-        max_pct = 0.18
-    else:
-        max_abs = MAX_BET_ABS
-        max_pct = MAX_BET_PCT
+    max_abs, max_pct = _adaptive_bet_caps()
 
     # v10: Strategy-specific absolute cap
     if "consensus_basket" in strategy:
         cb_cfg = getattr(C, "strategy_consensus_basket", {})
         max_abs = min(max_abs, float(cb_cfg.get("max_bet_abs", 1.20)))
 
+    _lt_boost = _kc.get("large_trade_max_abs_boost", 1.5)
+    _lt_br_cap = _kc.get("large_trade_bankroll_cap", 0.22)
     if is_large and not signal.get("is_hft", False):
-        max_abs = min(max_abs * 1.5, br * 0.22)
+        max_abs = min(max_abs * _lt_boost, br * _lt_br_cap)
 
     bet = max(score_floor, kelly_bet_raw)
     return round(min(max_abs, br * max_pct, max(MIN_BET, bet)), 2)
@@ -999,9 +992,10 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
                         opposite_elite_cash += t["cash"]
                 break
 
+        _opp_block = float(getattr(C, "strategy_consensus_basket", {}).get("opposition_ratio_block", 0.60))
         if opposite_elite_cash > 0 and our_elite_cash > 0:
             opposition_ratio = opposite_elite_cash / (our_elite_cash + opposite_elite_cash)
-            if opposition_ratio > 0.60:
+            if opposition_ratio > _opp_block:
                 rejects.append(
                     f"  {outcome:<12} {title[:40]}\n"
                     f"    ↳ [CB] Counter-whale: {opposition_ratio*100:.0f}% opposing flow"
@@ -1130,7 +1124,7 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
         # Large trade detection
         has_large_trade = False
         conviction_detail = ""
-        _CONVICTION_PORTFOLIO_PCT = 0.005
+        _CONVICTION_PORTFOLIO_PCT = float(getattr(C, "strategy_consensus_basket", {}).get("conviction_portfolio_pct", 0.005))
         _CONVICTION_ABS_FLOOR = float(LARGE_TRADE)
         for w, t in {**elite_wallets, **verified_wallets}.items():
             prof = wallets.get(w, {})
