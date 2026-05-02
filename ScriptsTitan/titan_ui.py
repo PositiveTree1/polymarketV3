@@ -162,7 +162,7 @@ hdr = tk.Frame(root, bg="#0a0a1a", pady=5)
 hdr.pack(fill="x")
 
 app_title_var    = tk.StringVar(value="🐳 TITAN — Whale Mirror Engine")
-app_subtitle_var = tk.StringVar(value="FOLLOW THE WHALE | HFT SPIKE + CONVICTION | ENGINE ACTIVE")
+app_subtitle_var = tk.StringVar(value="v10 CONVICTION-ONLY | 2+ Elites | 20-72¢ Zone | -30% Stop | ENGINE ACTIVE")
 
 tk.Label(hdr, textvariable=app_title_var,
          fg="#00ff88", bg="#0a0a1a", font=title_f).pack(side="left", padx=12)
@@ -906,171 +906,62 @@ def draw_pnl_graph():
     h = graph_canvas.winfo_height()
     if w < 10 or h < 10: return
 
-    import time as _tt
-    from datetime import datetime as _dtx
-
     eq_hist = getattr(_w(), "equity_history", [])
-
-    # Compute current net worth including open position mark-to-market
-    open_positions = _w().open_positions
-    open_val = sum(
-        pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0)
-        for pos in open_positions.values()
-    )
-    cur_nw = _w().paper_bankroll + open_val
-
-    if len(eq_hist) >= 1:
-        all_pts = list(eq_hist)
-        if not all_pts or abs(cur_nw - all_pts[-1][1]) > 0.001:
-            all_pts.append((_tt.time(), cur_nw))
+    if len(eq_hist) >= 2:
+        points = [v for _, v in eq_hist]
     else:
-        all_pts = [(_tt.time() - 1, engine.BANKROLL_START), (_tt.time(), cur_nw)]
+        sells = [t for t in _w().trade_history
+                 if t.get("type") == "SELL" and t.get("bankroll") is not None]
+        if not sells:
+            graph_canvas.create_text(w//2, h//2,
+                text="No trades yet — graph appears after first trade",
+                fill="#334433", font=("Courier", 10), anchor="center")
+            return
+        points = [engine.BANKROLL_START] + [float(t["bankroll"]) for t in sells]
 
-    if len(all_pts) < 2: return
+    if len(points) < 2: return
 
-    # (MTM interpolation removed: equity_history now accurately tracks total equity directly)
-
-    # Thin out very dense data (keep at most 800 points for rendering)
-    if len(all_pts) > 800:
-        step = len(all_pts) // 800
-        all_pts = all_pts[::step] + [all_pts[-1]]
-
-    # Collect trade events for annotation
-    trade_events_for_graph = []
-    for t in _w().trade_history:
-        ts = t.get("ts")
-        if not ts: continue
-        if t.get("type") == "BUY":
-            trade_events_for_graph.append((ts, "BUY", t.get("bet", 0)))
-        elif t.get("type") == "SELL":
-            pnl = t.get("pnl_usdc", 0) or 0
-            trade_events_for_graph.append((ts, "SELL", pnl))
-
-    times  = [t for t, _ in all_pts]
-    values = [v for _, v in all_pts]
-
-    pad_l, pad_r, pad_t, pad_b = 68, 20, 28, 44
+    pad_l, pad_r, pad_t, pad_b = 60, 20, 20, 40
     plot_w = w - pad_l - pad_r
     plot_h = h - pad_t - pad_b
 
-    min_v = min(values); max_v = max(values)
+    min_v = min(points); max_v = max(points)
     spread = max(max_v - min_v, 0.5)
-    min_v -= spread * 0.10; max_v += spread * 0.10
-    min_t = times[0];  max_t = times[-1]
-    t_range = max(max_t - min_t, 1)
+    min_v -= spread * 0.1; max_v += spread * 0.1
 
-    def to_x(t): return pad_l + (t - min_t) / t_range * plot_w
+    def to_x(i): return pad_l + (i / max(len(points)-1, 1)) * plot_w
     def to_y(v): return pad_t + (1 - (v - min_v) / (max_v - min_v)) * plot_h
 
-    # Background watermark
-    graph_canvas.create_text(pad_l + plot_w//2, pad_t + plot_h//2,
-        text="TOTAL NET WORTH", fill="#08120a", font=("Courier", 22, "bold"))
-
-    # Horizontal grid lines
     for i in range(7):
         val = min_v + (max_v - min_v) * i / 6
         y   = to_y(val)
-        graph_canvas.create_line(pad_l, y, w-pad_r, y, fill="#0e1318", dash=(2,4))
+        graph_canvas.create_line(pad_l, y, w-pad_r, y, fill="#1a1a28", dash=(2,4))
         graph_canvas.create_text(pad_l-4, y, text=f"${val:.3f}",
                                   fill="#335544", font=("Courier", 8), anchor="e")
 
-    # Bankroll start line
     y0 = to_y(engine.BANKROLL_START)
     graph_canvas.create_line(pad_l, y0, w-pad_r, y0, fill="#2a4a2a", dash=(4,3))
-    graph_canvas.create_text(pad_l-4, y0, text="START", fill="#336633",
-                              font=("Courier", 7), anchor="e")
 
-    # Time axis labels
-    n_time_labels = min(5, len(all_pts))
-    for i in range(n_time_labels):
-        idx = int(i * (len(all_pts)-1) / max(n_time_labels-1, 1))
-        t_val = times[idx]
-        x_pos = to_x(t_val)
-        try:
-            lbl = _dtx.fromtimestamp(t_val).strftime("%H:%M")
-        except Exception:
-            lbl = ""
-        graph_canvas.create_line(x_pos, pad_t + plot_h, x_pos, pad_t + plot_h + 4, fill="#334455")
-        graph_canvas.create_text(x_pos, pad_t + plot_h + 14, text=lbl, fill="#335566",
-                                  font=("Courier", 7), anchor="center")
-
-    last_v = values[-1]
-
-    # ── Draw filled area first (single polygon, colour by final state) ─────────
-    poly_pts = [pad_l, to_y(values[0])]
-    for t_v, v in all_pts:
-        poly_pts += [to_x(t_v), to_y(v)]
-    poly_pts += [to_x(times[-1]), pad_t + plot_h, pad_l, pad_t + plot_h]
-    fill_col = "#001a08" if last_v >= engine.BANKROLL_START else "#1a0000"
-    # smooth=False on the polygon — smooth=True causes the fill to bow/bulge away from the line
+    poly_pts = [pad_l, to_y(points[0])]
+    for i, v in enumerate(points): poly_pts += [to_x(i), to_y(v)]
+    poly_pts += [to_x(len(points)-1), pad_t+plot_h, pad_l, pad_t+plot_h]
+    last_v   = points[-1]
+    fill_col = "#001a0a" if last_v >= engine.BANKROLL_START else "#1a0000"
     graph_canvas.create_polygon(poly_pts, fill=fill_col, outline="", smooth=False)
 
-    # ── Draw line as per-segment green/red based on direction ─────────────────
-    # Each segment is coloured by whether the value is rising or falling.
-    # We batch consecutive same-colour segments for efficiency.
-    xs = [to_x(t_v) for t_v in times]
-    ys = [to_y(v)   for v   in values]
+    for i in range(1, len(points)):
+        x1 = to_x(i-1); y1 = to_y(points[i-1])
+        x2 = to_x(i);   y2 = to_y(points[i])
+        color = "#00ff55" if points[i] >= points[i-1] else "#ff5555"
+        graph_canvas.create_line(x1, y1, x2, y2, fill=color, width=2)
 
-    GREEN_UP   = "#00ff66"
-    RED_DOWN   = "#ff4444"
-    FLAT_COL   = "#888888"
-
-    # Build colour for each segment between point i and i+1
-    seg_colors = []
-    for i in range(len(values) - 1):
-        diff = values[i+1] - values[i]
-        if diff > 0.0005:
-            seg_colors.append(GREEN_UP)
-        elif diff < -0.0005:
-            seg_colors.append(RED_DOWN)
-        else:
-            seg_colors.append(FLAT_COL)
-
-    # Draw smooth segments — group consecutive same-colour runs and draw each
-    # as a single smooth polyline for a fluid look
-    i = 0
-    while i < len(seg_colors):
-        col = seg_colors[i]
-        j = i + 1
-        while j < len(seg_colors) and seg_colors[j] == col:
-            j += 1
-        # Segment from point i to point j (inclusive), with 1-point overlap for continuity
-        seg_xs = xs[i:j+1]
-        seg_ys = ys[i:j+1]
-        if len(seg_xs) >= 2:
-            coords = []
-            for sx, sy in zip(seg_xs, seg_ys):
-                coords += [sx, sy]
-            use_smooth = len(coords) >= 8
-            graph_canvas.create_line(coords, fill=col, width=2,
-                                     smooth=use_smooth,
-                                     joinstyle="round", capstyle="round")
-        i = j
-
-    # ── Annotate trade events ──────────────────────────────────────────────────
-    for ev_ts, ev_type, ev_val in trade_events_for_graph:
-        if ev_ts < min_t or ev_ts > max_t:
-            continue
-        ex = to_x(ev_ts)
-        if ev_type == "BUY":
-            graph_canvas.create_line(ex, pad_t, ex, pad_t+plot_h, fill="#003366", dash=(2,6), width=1)
-            graph_canvas.create_text(ex, pad_t+4, text="▼", fill="#0055aa", font=("Courier", 7), anchor="n")
-        elif ev_type == "SELL":
-            col  = "#005500" if ev_val >= 0 else "#550000"
-            tcol = "#00cc44" if ev_val >= 0 else "#cc3333"
-            graph_canvas.create_line(ex, pad_t, ex, pad_t+plot_h, fill=col, dash=(2,6), width=1)
-            graph_canvas.create_text(ex, pad_t+plot_h-4, text=f"{ev_val:+.2f}", fill=tcol,
-                                     font=("Courier", 7), anchor="s")
-
-    # Start dot
-    graph_canvas.create_oval(pad_l-3, ys[0]-3, pad_l+3, ys[0]+3,
+    graph_canvas.create_oval(pad_l-3, to_y(points[0])-3, pad_l+3, to_y(points[0])+3,
                               fill="#aaaaaa", outline="")
-    # End dot
-    x_end = xs[-1]
-    y_end = ys[-1]
-    cur_color = GREEN_UP if last_v >= engine.BANKROLL_START else RED_DOWN
-    graph_canvas.create_oval(x_end-5, y_end-5, x_end+5, y_end+5,
-                              fill=cur_color, outline="#ffffff", width=1)
+    x_end = to_x(len(points)-1)
+    y_end = to_y(last_v)
+    cur_color = "#00ff55" if last_v >= engine.BANKROLL_START else "#ff5555"
+    graph_canvas.create_oval(x_end-4, y_end-4, x_end+4, y_end+4,
+                              fill=cur_color, outline="#ffffff")
 
     diff = last_v - engine.BANKROLL_START
     open_value = sum(
@@ -1079,13 +970,9 @@ def draw_pnl_graph():
     )
     label = f"${last_v:.3f} ({diff:+.3f})"
     if open_value > 0:
-        label += f"  [${_w().paper_bankroll:.2f} cash + ${open_value:.2f} pos]"
-    graph_canvas.create_text(min(x_end+8, w-250), y_end,
+        label += f"  [${_w().paper_bankroll:.2f} cash + ${open_value:.2f} positions]"
+    graph_canvas.create_text(min(x_end+8, w-200), y_end,
         text=label, fill=cur_color, font=("Courier", 9), anchor="w")
-
-    graph_canvas.create_text(pad_l, pad_t - 10,
-        text=f"{len(all_pts)} pts  ▼=BUY  ±$=SELL  🟢up 🔴down",
-        fill="#334455", font=("Courier", 7), anchor="w")
 
 
 def refresh_pnl_tab():

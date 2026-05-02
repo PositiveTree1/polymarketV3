@@ -1,15 +1,23 @@
 """
-TITAN — Main orchestration engine. Single-wallet edition.
+TITAN — Main orchestration engine. Single-wallet edition. v10 MULTI-STRATEGY.
 
 Two loops run in parallel:
-  • run_loop()      — main 12s cycle: public feed + elite poll + signals + trade
+  • run_loop()      — main 15s cycle: public feed + elite poll + signals + trade
   • _hft_fast_loop()— 3s cycle: polls only HFT wallets, looks for outsized spikes
 
-EXIT PHILOSOPHY:
+v10 CHANGES:
+  1. MULTI-STRATEGY: build_signals() now dispatches to recent_form, drift_discount,
+     and consensus_basket sub-builders. Engine logs strategy tags in per-trade output.
+  2. RECENT FORM REFRESH: Every 50 cycles, _refresh_recent_form_scores() runs
+     in a background thread to keep recent_pnl_30d/7d current (6h TTL).
+  3. STRATEGY LOG BANNER: start() prints active strategies and their key params.
+  4. CYCLE STATS: per-cycle log now shows signal counts per strategy.
+
+EXIT PHILOSOPHY (unchanged from v9):
   Follow the whale. If the whale who triggered our buy has NOT sold, we do NOT
   sell regardless of stop-loss or profit target — unless the market is resolving.
-  WHALE_EXIT_SELL controls this. STOP_LOSS_ENABLED=false means stops are disabled
-  unless the whale exits.
+  WHALE_EXIT_SELL controls this. Each signal now also carries stop_loss_pct from
+  its strategy config (None = no stop loss).
 """
 
 import time
@@ -21,7 +29,9 @@ import titan_state as S
 from titan_state import _log, safe_get
 
 from titan_persistence import load_state, save_state, save_whale_roster, save_whale_roster_async
-from titan_wallet  import fetch_wallet, get_elite_wallets, discover_new_whales, scan_top_market_holders, get_whale_performance_summary
+from titan_wallet  import (fetch_wallet, get_elite_wallets, discover_new_whales,
+                           scan_top_market_holders, get_whale_performance_summary,
+                           _refresh_recent_form_scores)
 from titan_market  import get_market, fetch_trades, fetch_hft_spike_trades
 from titan_signals import build_signals, check_whale_exits, _adaptive_bet_caps
 from titan_trader  import auto_trade
@@ -62,6 +72,10 @@ def analyse(trades, is_hft_loop=False):
     if S.env().cycle_count % 20 == 2:
         threading.Thread(target=_rescore_watchlist, daemon=True).start()
 
+    # v10: Refresh recent form scores (6h TTL) for Recent Form strategy
+    if S.env().cycle_count % 50 == 3:
+        threading.Thread(target=_refresh_recent_form_scores, daemon=True).start()
+
     # Score wallets seen in the feed
     feed_wallets = {t["wallet"] for t in trades}
     wallets      = {}
@@ -90,7 +104,8 @@ def analyse(trades, is_hft_loop=False):
 
         cached = S.env().wallet_cache.get(w, {})
         for flag in ("elite","verified","watchable","hft","score","win_rate","total_pnl",
-                     "avg_bet","n_resolved","trades_per_hour","total_value","name"):
+                     "avg_bet","n_resolved","trades_per_hour","total_value","name",
+                     "recent_pnl_30d","recent_pnl_7d","recent_ts"):
             if not p.get(flag) and cached.get(flag):
                 p[flag] = cached[flag]
 
@@ -127,8 +142,6 @@ def analyse(trades, is_hft_loop=False):
     if cid_to_wallet_sets:
         whale_exits = check_whale_exits(cid_to_wallet_sets, entry_times)
     elif S.env().open_positions:
-        # FIX: Even with no cid_to_wallet_sets, still check exits for any open positions
-        # that may not have been registered in position_whale_map (e.g. restored from state).
         rebuilt = {}
         for key, pos in S.env().open_positions.items():
             cid = pos.get("cid", key[0])
@@ -139,8 +152,18 @@ def analyse(trades, is_hft_loop=False):
             whale_exits = check_whale_exits(rebuilt, entry_times)
 
     signals, rejects = build_signals(trades, wallets, whale_exits)
+
+    # v10: Break down signal count by strategy for the cycle log
+    strat_counts: dict = {}
+    for sig in signals:
+        strat = sig.get("strategy", "?")
+        # Strip merged tags to first strategy
+        primary = strat.split("+")[0]
+        strat_counts[primary] = strat_counts.get(primary, 0) + 1
+    strat_str = " ".join(f"{s}:{n}" for s, n in strat_counts.items()) if strat_counts else "none"
+
     _log(
-        f"🎯 {len(signals)} signals | {len(rejects)} rejects | "
+        f"🎯 {len(signals)} signals [{strat_str}] | {len(rejects)} rejects | "
         f"{ver_count} verified ({elite_count} elite) wallets",
         "INFO"
     )
@@ -155,17 +178,13 @@ def analyse(trades, is_hft_loop=False):
         level = "TRADE" if ev_type in ("OPEN", "CLOSE") else "WARN"
         _log(msg, level)
 
-    # Sample portfolio equity every cycle — only record when value changes meaningfully.
-    # This prevents the "flat line + vertical spike" P&L graph artifact caused by
-    # recording identical values every 12s and then a sudden jump on position close.
+    # Sample portfolio equity every cycle
     open_value = sum(
         pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0)
         for pos in S.env().open_positions.values()
     )
     current_equity = S.env().paper_bankroll + open_value
     _eq = S.env().equity_history
-    # Only append if value changed by > $0.001 OR it has been > 30s since last point
-    # Smaller threshold + shorter interval = smoother graph curve
     if not _eq or abs(current_equity - _eq[-1][1]) > 0.001 or (time.time() - _eq[-1][0]) > 30:
         _eq.append((time.time(), current_equity))
     if len(_eq) > 5000:
@@ -222,11 +241,6 @@ def run_loop():
 def _hft_fast_loop():
     """
     Runs every 3 seconds. Polls only HFT wallets looking for outsized spike trades.
-    When a spike is found, it is immediately passed to analyse() — the same pipeline
-    that handles whale exits, signals, and auto-trade. This means:
-      - BUY happens instantly when the HFT whale makes their spike trade
-      - EXIT happens automatically when that same whale sells (WHALE_EXIT_SELL=true)
-      - No stop-loss, no profit target fires until the whale moves
     """
     _log("⚡ HFT fast loop started (3s cycle)", "INFO")
     _log("⚡ HFT fast loop waiting 45s for wallet_cache to populate…", "INFO")
@@ -268,9 +282,38 @@ def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycl
     load_state()
     C.reload()
 
-    _log("🚀 TITAN — Single-Wallet Whale Mirror Engine", "INFO")
-    _log("   Two signals: BIG TRADE conviction + HFT spike momentum", "INFO")
-    _log("   Exit rule: follow the whale — sell when THEY sell", "INFO")
+    _log("🚀 TITAN v10 — Multi-Strategy Whale Mirror Engine", "INFO")
+
+    # v10: Print active strategies and their key params
+    active = getattr(C, "ACTIVE_STRATEGIES", [])
+    _log(f"   Active strategies: {', '.join(active)}", "INFO")
+    for strat in active:
+        cfg = getattr(C, f"strategy_{strat}", {})
+        if not cfg:
+            continue
+        if strat == "recent_form":
+            _log(
+                f"   [{strat}] min_pnl_30d=${cfg.get('min_pnl_30d',0):+.0f} "
+                f"max_tph={cfg.get('max_tph',20)} price=[{cfg.get('price_min',0.18):.2f},{cfg.get('price_max',0.78):.2f}] "
+                f"min_score={cfg.get('min_score',42)} max_age={cfg.get('max_signal_age_h',0.75)}h",
+                "INFO"
+            )
+        elif strat == "drift_discount":
+            _log(
+                f"   [{strat}] discount=[{cfg.get('min_discount_pct',0.04)*100:.0f}%,{cfg.get('max_discount_pct',0.12)*100:.0f}%] "
+                f"max_age={cfg.get('max_signal_age_h',6.0)}h "
+                f"price=[{cfg.get('price_min',0.20):.2f},{cfg.get('price_max',0.72):.2f}]",
+                "INFO"
+            )
+        elif strat == "consensus_basket":
+            _log(
+                f"   [{strat}] min_elite={cfg.get('min_elite_confluence',1)} "
+                f"max_bet=${cfg.get('max_bet_abs',1.20):.2f} "
+                f"stop={cfg.get('stop_loss_pct',None)} "
+                f"price=[{cfg.get('price_min',0.20):.2f},{cfg.get('price_max',0.72):.2f}]",
+                "INFO"
+            )
+
     max_abs, max_pct = _adaptive_bet_caps()
     _log(
         f"   Bankroll: ${S.env().paper_bankroll:.2f}  MaxBet: {max_pct*100:.0f}% / ${max_abs:.2f}  "
@@ -283,8 +326,8 @@ def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycl
         "INFO"
     )
     _log(
-        f"   Liq≥${MIN_LIQUIDITY:,.0f}  Vol≥${MIN_VOLUME:,.0f}  "
-        f"MaxAge≤{MAX_SIGNAL_AGE_H}h  Slippage≤{MAX_ENTRY_SLIPPAGE*100:.0f}%",
+        f"   Price zone: [{MIN_ENTRY_PRICE:.2f}, {MAX_ENTRY_PRICE:.2f}]  "
+        f"Ideal: [{IDEAL_PRICE_MIN:.2f}, {IDEAL_PRICE_MAX:.2f}]",
         "INFO"
     )
     _log(
@@ -294,13 +337,10 @@ def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycl
     )
     _log("─" * 60, "DATA")
 
-    # Start WebSocket resolution monitor — catches market resolution instantly
-    # without relying on Gamma REST polling. Solves the "football match finished
-    # but bot didn't know" problem. Subscribes to token IDs of open positions.
+    # Start WebSocket resolution monitor
     try:
         import titan_resolution_monitor as _rm
         _rm.start()
-        # Subscribe to any positions that were restored from saved state
         _rm.sync_open_positions()
     except Exception as _e:
         _log(f"⚠ WS resolution monitor failed to start: {_e}", "WARN")
@@ -324,9 +364,11 @@ def get_system_snapshot() -> str:
         for pos in S.env().open_positions.values()
     )
     current_equity = S.env().paper_bankroll + open_value
+    active = getattr(C, "ACTIVE_STRATEGIES", [])
     lines = [
         "═" * 70,
-        f"  TITAN SNAPSHOT — {now}",
+        f"  TITAN v10 SNAPSHOT — {now}",
+        f"  Strategies: {', '.join(active)}",
         "═" * 70, "",
         "[STATISTICS]",
         f"Net Worth : ${current_equity:.2f} (Total Equity)",
@@ -344,8 +386,9 @@ def get_system_snapshot() -> str:
         held  = (time.time() - pos.get("entry_ts", time.time())) / 60
         hft   = "⚡" if pos.get("is_hft") else ""
         conv  = "💎" if pos.get("is_conviction") else ""
+        strat = pos.get("strategy", "?")[:2].upper()
         lines.append(
-            f"  {conv}{hft}[{pos.get('tier','?')}] {pos.get('title','?')[:46]} / {key[1] if isinstance(key,tuple) else '?'}"
+            f"  {conv}{hft}[{pos.get('tier','?')}|{strat}] {pos.get('title','?')[:44]} / {key[1] if isinstance(key,tuple) else '?'}"
             f"  P&L:{pnl:+.1f}%  Held:{held:.0f}min  ${pos.get('bet',0):.2f}"
         )
     lines += ["", "[ELITE ROSTER]"]
@@ -355,10 +398,11 @@ def get_system_snapshot() -> str:
     )
     for w, p in elites[:15]:
         hft = "⚡" if p.get("hft") else ""
+        rf_tag = f" RF30d:${p.get('recent_pnl_30d',0):+.0f}" if p.get("recent_pnl_30d") is not None else ""
         lines.append(
             f"  {hft}{p.get('name', w[:10]+'…'):<22} "
             f"Score:{p.get('score',0):.2f}  WR:{p.get('win_rate',0)*100:.0f}%  "
-            f"PnL:${p.get('total_pnl',0):+,.0f}  TPH:{p.get('trades_per_hour',0):.1f}"
+            f"PnL:${p.get('total_pnl',0):+,.0f}  TPH:{p.get('trades_per_hour',0):.1f}{rf_tag}"
         )
     lines += ["", "[LAST 15 LOGS]"]
     meaningful = [l for l in S.env().SYSTEM_LOGS[-40:]

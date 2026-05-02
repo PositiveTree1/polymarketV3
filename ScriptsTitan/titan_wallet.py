@@ -1,5 +1,5 @@
 """
-TITAN — Wallet scoring, HFT detection, and whale performance tracking. v9 OVERHAUL.
+TITAN — Wallet scoring, HFT detection, and whale performance tracking. v10 OVERHAUL.
 
 HFT DETECTION:
   Some elite wallets (e.g. swisstony) are high-frequency traders.
@@ -17,6 +17,16 @@ v9 ADDITIONS:
 
   3. PER-TRADE ALPHA METRIC: alpha_per_trade = total_pnl / n_resolved.
      Wallets need alpha_per_trade >= $20 to be considered genuine alpha.
+
+v10 ADDITIONS:
+  4. RECENT FORM SCORING: recent_pnl_30d and recent_pnl_7d fields added to
+     wallet cache. Computed from the /activity endpoint filtered by timestamp.
+     Used by the Recent Form Copy strategy.
+
+  5. get_wallet_open_positions(): Fetches current open positions for a wallet.
+     Used by the Open Book consensus scanner.
+
+  6. is_recent_form_qualified(): Gate function for Recent Form Copy strategy.
 """
 
 import time
@@ -60,11 +70,7 @@ def is_sports_bot(profile: dict) -> bool:
     Return True if this wallet is likely a sports market-making bot.
 
     Heuristics:
-      - Elite wallet with very high TPH (>= SPORTS_BOT_MIN_TPH, default 150) — these
-        wallets make money from volume/spread, NOT from predicting outcomes. Counting
-        them as 'elite confluence' for sports signals was the #1 source of losses.
-        e.g. BillBenter2026 (1567 TPH), RN1 (1720 TPH), swisstony (922 TPH) — all
-        market-makers. Their buy on a sports market is noise, not information.
+      - Elite wallet with very high TPH (>= SPORTS_BOT_MIN_TPH, default 150)
       - Explicitly tagged as sports_bot in cache
       - Name matches known sports bot patterns
       - High trades per hour combined with low avg_bet (non-elite version)
@@ -75,20 +81,16 @@ def is_sports_bot(profile: dict) -> bool:
     tph     = profile.get("trades_per_hour", 0)
     avg_bet = profile.get("avg_bet", 0)
 
-    # Import here to avoid circular dependency; use getattr fallback if not loaded
     try:
         import titan_config as _C
         sports_bot_tph = getattr(_C, "SPORTS_BOT_MIN_TPH", 150)
     except Exception:
         sports_bot_tph = 150
 
-    # Any wallet (elite or not) doing 150+ trades/hour is a market-maker on sports.
-    # Their edge is speed + spread capture, not directional prediction.
     if tph >= sports_bot_tph:
         return True
 
     name = profile.get("name", "").lower()
-    # Known sports bot names (belt-and-suspenders for wallets before TPH is computed)
     _SPORTS_BOT_NAMES = {
         "gamblingisallyouneed", "swisstony", "rn1", "cannae", "lilybaeum",
         "billdenter", "billdenter2026", "elkmonkey", "billyel", "sportsguy",
@@ -98,7 +100,6 @@ def is_sports_bot(profile: dict) -> bool:
         if sbn in name:
             return True
 
-    # Lower-TPH heuristic for non-elite wallets
     if tph >= 50 and avg_bet > 0 and avg_bet < 100:
         return True
 
@@ -120,10 +121,8 @@ def alpha_per_trade(profile: dict) -> float:
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  WHALE PERFORMANCE TRACKER
-#  Tracks which whales' copied trades made or lost us money.
-#  Used to auto-demote underperforming whale sources.
 # ─────────────────────────────────────────────────────────────────────────────
-_whale_performance: dict = {}  # wallet_addr → {wins, losses, total_pnl, n_trades, weekly_pnl, weekly_trades, week_start_ts}
+_whale_performance: dict = {}  # wallet_addr → {wins, losses, total_pnl, n_trades, recent_trades}
 
 
 def record_whale_trade_performance(wallet_addrs: list, pnl_usdc: float, won: bool):
@@ -139,7 +138,7 @@ def record_whale_trade_performance(wallet_addrs: list, pnl_usdc: float, won: boo
         if w not in _whale_performance:
             _whale_performance[w] = {
                 "wins": 0, "losses": 0, "total_pnl": 0.0, "n_trades": 0,
-                "recent_trades": [],  # list of (ts, pnl) for rolling 7-day window
+                "recent_trades": [],
             }
         rec = _whale_performance[w]
         rec["n_trades"] += 1
@@ -149,7 +148,6 @@ def record_whale_trade_performance(wallet_addrs: list, pnl_usdc: float, won: boo
         else:
             rec["losses"] += 1
 
-        # Add to rolling window and prune old entries
         rec.setdefault("recent_trades", []).append((now_t, pnl_usdc))
         rec["recent_trades"] = [(ts, p) for ts, p in rec["recent_trades"] if ts >= week_ago]
 
@@ -198,12 +196,66 @@ def get_whale_performance_summary() -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  v10: RECENT FORM FUNCTIONS
+# ─────────────────────────────────────────────────────────────────────────────
+def get_wallet_open_positions(wallet: str) -> list:
+    """
+    Fetch current open positions for a wallet.
+    Returns list of {cid, outcome, asset, cur_price, size} dicts.
+    Used by Open Book consensus scanner.
+    Results are NOT cached (need live data for consensus accuracy).
+    """
+    data = S.safe_get(f"{DATA_API}/positions", {
+        "user":          wallet,
+        "limit":         100,
+        "sortBy":        "CURRENT",
+        "sortDirection": "DESC",
+        "sizeThreshold": 0.1,
+    })
+    if not data or not isinstance(data, list):
+        return []
+    results = []
+    for p in data:
+        cur = float(p.get("curPrice", 0) or 0)
+        if cur <= 0.02 or cur >= 0.98:
+            continue  # resolving/resolved — not useful for consensus
+        results.append({
+            "cid":     p.get("conditionId") or "",
+            "outcome": p.get("outcome") or "",
+            "asset":   p.get("asset") or "",
+            "cur":     cur,
+            "size":    float(p.get("size", 0) or 0),
+        })
+    return results
+
+
+def is_recent_form_qualified(profile: dict,
+                              min_pnl_30d: float = 0,
+                              min_pnl_7d: float = -50,
+                              max_tph: float = 20) -> bool:
+    """
+    Gate for Recent Form Copy strategy.
+    Wallet must be profitable recently AND not be an HFT bot.
+    """
+    tph = profile.get("trades_per_hour", 0)
+    if tph > max_tph:
+        return False
+    pnl_30d = profile.get("recent_pnl_30d", None)
+    pnl_7d  = profile.get("recent_pnl_7d", None)
+    if pnl_30d is None or pnl_7d is None:
+        return False  # no recent data available yet
+    return pnl_30d >= min_pnl_30d and pnl_7d >= min_pnl_7d
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  WIN RATE CALCULATION
 # ─────────────────────────────────────────────────────────────────────────────
 def fetch_real_winrate(wallet: str) -> dict:
     """
     Compute win rate from resolved trades.
     Returns win_rate, wilson_lb, total resolved, avg_profit, avg_bet.
+
+    v10: Also computes recent_pnl_30d and recent_pnl_7d for Recent Form strategy.
     """
     redeems = S.safe_get(f"{DATA_API}/activity", {
         "user": wallet, "type": "REDEEM",
@@ -237,6 +289,30 @@ def fetch_real_winrate(wallet: str) -> dict:
             span_hours = (ts_list[0] - ts_list[-1]) / 3600
             if span_hours > 0:
                 trades_per_hour = len(ts_list) / span_hours
+
+    # v10: Compute time-windowed PnL for Recent Form strategy
+    now_t   = time.time()
+    days_30 = now_t - 30 * 86400
+    days_7  = now_t - 7  * 86400
+
+    trades_30d = [t for t in trades_raw if float(t.get("timestamp") or 0) >= days_30]
+    trades_7d  = [t for t in trades_raw if float(t.get("timestamp") or 0) >= days_7]
+
+    redeems_30d = [r for r in redeems if float(r.get("timestamp") or 0) >= days_30]
+    redeems_7d  = [r for r in redeems if float(r.get("timestamp") or 0) >= days_7]
+
+    def _cash(t):
+        v = float(t.get("usdcSize") or 0) or float(t.get("size") or 0) * float(t.get("price") or 0)
+        return v
+
+    recent_pnl_30d = (
+        sum(float(r.get("usdcSize", 0) or 0) for r in redeems_30d) -
+        sum(_cash(t) for t in trades_30d)
+    )
+    recent_pnl_7d = (
+        sum(float(r.get("usdcSize", 0) or 0) for r in redeems_7d) -
+        sum(_cash(t) for t in trades_7d)
+    )
 
     trade_by_key = {}
     total_spent  = 0.0
@@ -311,6 +387,8 @@ def fetch_real_winrate(wallet: str) -> dict:
             "wilson_lb": wb * 0.5, "source": "open_positions_proxy",
             "avg_profit": avg_profit, "avg_bet": round(avg_bet, 2),
             "trades_per_hour": round(trades_per_hour, 2),
+            "recent_pnl_30d": round(recent_pnl_30d, 2),
+            "recent_pnl_7d":  round(recent_pnl_7d, 2),
         }
 
     wr = wins / total
@@ -322,6 +400,8 @@ def fetch_real_winrate(wallet: str) -> dict:
         "avg_profit": avg_profit,
         "avg_bet":    round(avg_bet, 2),
         "trades_per_hour": round(trades_per_hour, 2),
+        "recent_pnl_30d": round(recent_pnl_30d, 2),
+        "recent_pnl_7d":  round(recent_pnl_7d, 2),
     }
 
 
@@ -357,6 +437,7 @@ def fetch_wallet(wallet: str) -> dict:
         "n_resolved": 0, "n_pos": 0, "total_value": 0,
         "total_pnl": 0, "pnl_pct": 0, "avg_pos_size": 0,
         "avg_profit": 0, "avg_bet": 0, "trades_per_hour": 0,
+        "recent_pnl_30d": None, "recent_pnl_7d": None, "recent_ts": 0,
         "verified": False, "watchable": False, "elite": False, "hft": False,
         "name": keep_name or (wallet[:10] + "…"), "ts": now_t,
         "detail": "No data", "wr_source": "none",
@@ -387,6 +468,9 @@ def fetch_wallet(wallet: str) -> dict:
     avg_profit = wr_data.get("avg_profit", 0)
     avg_bet    = wr_data.get("avg_bet", 0)
     tph        = wr_data.get("trades_per_hour", 0)
+    # v10: store recent-form fields with their own TTL
+    recent_pnl_30d = wr_data.get("recent_pnl_30d", None)
+    recent_pnl_7d  = wr_data.get("recent_pnl_7d", None)
 
     avg_profit_estimated = False
     if avg_profit <= 0 and n_res >= 10 and pnl > 0:
@@ -415,11 +499,9 @@ def fetch_wallet(wallet: str) -> dict:
     if n_res < MIN_RESOLVED_BETS: fail_reasons.append(f"Resolved {n_res}<{MIN_RESOLVED_BETS}")
     if pnl < MIN_PNL:             fail_reasons.append(f"PnL ${pnl:+,.0f}")
 
-    # For HFT wallets, lower the avg_profit and avg_bet bar:
-    # their edge comes from volume, not per-trade profit
     hft_detected = tph >= HFT_MIN_TRADES_PER_HOUR or (avg_bet > 0 and avg_bet < 50 and n_res > 100)
     if hft_detected:
-        roi_ok  = True   # HFT bots need different metrics — don't gate on per-trade profit
+        roi_ok  = True
         port_ok = cur >= 500 or pnl >= 500
     else:
         roi_ok  = (avg_profit >= MIN_AVG_PROFIT_PER_TRADE and avg_bet >= MIN_AVG_BET_SIZE)
@@ -439,14 +521,8 @@ def fetch_wallet(wallet: str) -> dict:
         fail_reasons.append(f"VER_WR {wr*100:.0f}%<{MIN_WIN_RATE_VER*100:.0f}%")
 
     portfolio_proxy = max(cur, pnl)
-
-    # Calculate alpha_per_trade BEFORE using it in the elite gate
     apt = alpha_per_trade({"total_pnl": pnl, "n_resolved": n_res})
-
-    # Alpha gate: only block wallets with ZERO or negative alpha per trade.
-    # A lenient $1 threshold catches true market makers (tiny per-trade alpha)
-    # without accidentally demoting legitimate elites whose pnl data is incomplete.
-    _alpha_threshold = 1.0  # $1 minimum alpha per resolved trade
+    _alpha_threshold = 1.0
     elite = (
         verified and
         pnl             >= ELITE_MIN_PNL      and
@@ -474,13 +550,16 @@ def fetch_wallet(wallet: str) -> dict:
     est_tag = "~" if avg_profit_estimated else ""
     hft_tag = "⚡HFT" if hft_detected else ""
 
-    # v9: Sports bot detection
     sports_bot_detected = is_sports_bot({
         "name": final_name, "trades_per_hour": tph,
         "avg_bet": avg_bet, "sports_bot": False,
     })
-    # apt already calculated above before elite gate
     sports_tag = "🏈SPORTS" if sports_bot_detected else ""
+
+    # v10: recent form tag for display
+    rf_tag = ""
+    if recent_pnl_30d is not None:
+        rf_tag = f" RF30d:${recent_pnl_30d:+.0f}"
 
     result = {
         "score": round(score, 5), "win_rate": wr, "wilson_lb": wb,
@@ -488,19 +567,23 @@ def fetch_wallet(wallet: str) -> dict:
         "total_value": cur, "total_pnl": pnl, "pnl_pct": pct,
         "avg_pos_size": avg_sz, "avg_profit": avg_profit, "avg_bet": avg_bet,
         "trades_per_hour": round(tph, 2),
-        "alpha_per_trade": round(apt, 2),   # v9: per-trade alpha metric
+        "alpha_per_trade": round(apt, 2),
         "hft": hft_detected,
-        "sports_bot": sports_bot_detected,  # v9: sports bot flag
+        "sports_bot": sports_bot_detected,
         "verified": verified, "watchable": watchable, "elite": elite,
         "name": final_name, "ts": now_t, "wr_source": wr_src,
         "fail_reasons": fail_reasons,
+        # v10: recent form fields (6-hour TTL managed separately via recent_ts)
+        "recent_pnl_30d": round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
+        "recent_pnl_7d":  round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
+        "recent_ts": now_t,  # timestamp of last recent-form computation
         "detail": (
             f"Score:{score:.2f} WR:{wr*100:.0f}% WilsonLB:{wb*100:.0f}% "
             f"Res:{n_res} Port:${cur:,.0f} PnL:${pnl:+,.0f}({pct:+.1f}%) "
             f"AvgProfit:{est_tag}${avg_profit:.1f} AvgBet:${avg_bet:.0f} "
             f"AlphaPT:${apt:.1f} TPH:{tph:.1f} [{wr_src}] "
             f"{'🔥ELITE' if elite else '✅VER' if verified else '👁WATCH' if watchable else '❌'}"
-            f"{hft_tag}{sports_tag}"
+            f"{hft_tag}{sports_tag}{rf_tag}"
         ),
     }
 
@@ -515,6 +598,35 @@ def fetch_wallet(wallet: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 def get_elite_wallets() -> list:
     return [w.lower() for w, p in S.env().wallet_cache.items() if p.get("elite")]
+
+
+def _refresh_recent_form_scores():
+    """
+    v10: Refresh recent_pnl_30d / recent_pnl_7d for verified wallets whose
+    recent_ts is older than 6 hours. Called every 50 cycles from the engine.
+    This is additive to the normal wallet cache refresh.
+    """
+    now_t = time.time()
+    stale_threshold = now_t - 6 * 3600
+    refreshed = 0
+    for wallet, profile in list(S.env().wallet_cache.items()):
+        if not profile.get("verified"):
+            continue
+        recent_ts = profile.get("recent_ts", 0)
+        if recent_ts >= stale_threshold:
+            continue
+        try:
+            wr_data = fetch_real_winrate(wallet)
+            profile["recent_pnl_30d"] = wr_data.get("recent_pnl_30d")
+            profile["recent_pnl_7d"]  = wr_data.get("recent_pnl_7d")
+            profile["recent_ts"]      = now_t
+            S.env().wallet_cache[wallet] = profile
+            refreshed += 1
+            time.sleep(0.12)
+        except Exception:
+            pass
+    if refreshed:
+        S._log(f"♻ Recent form refreshed for {refreshed} wallets", "DATA")
 
 
 def discover_new_whales():

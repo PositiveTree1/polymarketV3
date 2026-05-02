@@ -1,17 +1,23 @@
 """
-TITAN — Auto paper trading. Single-wallet edition.
+TITAN — Auto paper trading. Single-wallet edition. v10.
 
-EXIT PHILOSOPHY — FOLLOW THE WHALE:
-  When you enter because a whale bought, you exit when THAT whale sells.
-  That's it. No stop-loss, no profit target kills you early if the whale is
-  still in the trade. The whale has more information than any price algorithm.
+EXIT PHILOSOPHY — FOLLOW THE WHALE (UPDATED v10):
+  1. WHALE_EXIT_SELL=true  → exit immediately when the triggering elite sells
+  2. PROFIT_TARGET_PCT     → take profit even if whale still holds (optional guard)
+  3. Per-signal STOP LOSS  → each signal carries stop_loss_pct from its strategy:
+       recent_form:      None (no stop loss — price ceiling is protection)
+       drift_discount:   None (entered at discount — no stop needed)
+       consensus_basket: -0.35 (soft stop at -35%)
+       Global fallback:  STOP_LOSS_PCT (-0.30) if strategy has no config
+  4. Market resolving       → always exit (it's done)
+  5. Market expiring        → exit when < MIN_HOURS_LEFT
+  6. Catastrophic loss guard → always exit at -70% regardless of strategy
 
-  Rules:
-    1. WHALE_EXIT_SELL=true  → exit immediately when the triggering elite sells
-    2. PROFIT_TARGET_PCT     → take profit even if whale still holds (optional guard)
-    3. STOP_LOSS_ENABLED     → if false, stops are completely disabled
-    4. Market resolving       → always exit (it's done)
-    5. Market expiring        → exit when < MIN_HOURS_LEFT
+v10 CHANGES:
+  - Position dict now stores 'strategy' field from signal
+  - Stop loss uses per-position stop_loss_pct (set at entry from signal)
+  - Open position log shows strategy tag [RF|DD|CB]
+  - Trade history BUY record includes strategy field
 """
 
 import time
@@ -33,8 +39,6 @@ def _get_ws_monitor():
         return None
 
 
-
-
 def _try_fetch_resolution_price(cid: str, asset: str, outcome: str) -> float | None:
     """
     FIX: Phantom profit prevention + stale-price resolution detection.
@@ -44,8 +48,6 @@ def _try_fetch_resolution_price(cid: str, asset: str, outcome: str) -> float | N
     Returns the current outcome price (near 0 or 1 if resolved), or None if unknown.
     """
     try:
-        # Strategy 1: Asset/token ID lookup via clob_token_ids (most reliable)
-        # The token price goes to 1.0 if that outcome won, 0.0 if it lost.
         if asset:
             data = S.safe_get(f"{GAMMA_API}/markets", {
                 "clob_token_ids": f'["{asset}"]', "limit": 1
@@ -72,23 +74,6 @@ def _try_fetch_resolution_price(cid: str, asset: str, outcome: str) -> float | N
                             S._log(f"  📡 Asset price confirmed: {asset[:20]} = {p:.4f}", "DIAG")
                             return p
 
-        # Strategy 2: Data API trades for this conditionId — look for near-0/1 prices
-        # which appear when a market resolves (losing tokens trade near 0.01)
-        #
-        # CRITICAL BUG FIX (was generating phantom profits):
-        # The old code returned hardcoded 0.99 / 0.01 when seeing the OPPOSITE
-        # outcome's trade. This is WRONG because:
-        #   - Polymarket binary markets do NOT always sum to 1.0 at resolution.
-        #   - Seeing "Yes" trade at 0.97 does NOT mean "No" is worth 0.03.
-        #   - The CLOB price for each token is completely independent.
-        #   - Example: US-Iran "No" was held at 0.83 entry. "Yes" traded at 0.97
-        #     during the market's life (not resolution). Old code returned 0.99
-        #     for "No" — a completely fabricated profit of +19%.
-        #
-        # FIX: ONLY use a trade record to price our outcome if:
-        #   a) The asset (token ID) exactly matches ours, OR
-        #   b) The outcome LABEL exactly matches ours.
-        # NEVER infer our outcome's price from the opposite outcome's trade price.
         data = S.safe_get(f"{DATA_API}/trades", {
             "conditionId": cid,
             "limit": 10,
@@ -101,13 +86,11 @@ def _try_fetch_resolution_price(cid: str, asset: str, outcome: str) -> float | N
                 t_asset = t.get("asset") or ""
                 if price <= 0 or price >= 1:
                     continue
-                # Only trust trades that are definitively for OUR outcome token
                 is_our_token = (asset and t_asset == asset)
                 is_our_label = (our_lower and t_outcome == our_lower)
                 if (is_our_token or is_our_label) and (price >= 0.97 or price <= 0.03):
                     return price
 
-        # Strategy 3: Positions endpoint — check our own position's current value
         if asset:
             pos_data = S.safe_get(f"{DATA_API}/positions", {
                 "asset": asset, "limit": 1,
@@ -122,17 +105,10 @@ def _try_fetch_resolution_price(cid: str, asset: str, outcome: str) -> float | N
         S._log(f"  ⚠ Resolution price fetch failed: {e}", "DIAG")
     return None
 
+
 def _get_current_price(pos: dict) -> tuple:
     """
     Two-stage price fetch for open positions.
-
-    Stage 1 (fast — every cycle): fetch_position_price_fast() using:
-      a) Data API /positions endpoint (direct token value)
-      b) Gamma clob_token_ids (bypasses broken conditionId 422s)
-      c) Data API recent trades WITH price inversion for opposite outcomes
-
-    Stage 2 (slow — when fast path fails): full get_market() Gamma refresh.
-
     Returns (price, is_resolving).
     """
     from titan_market import fetch_position_price_fast
@@ -142,14 +118,12 @@ def _get_current_price(pos: dict) -> tuple:
     title   = pos.get("title", "")
     stale_price = pos.get("cur_price", pos.get("entry_price", 0.5))
 
-    # Stage 1: Fast path — runs every cycle, lightweight
     fast_price = fetch_position_price_fast(cid, asset, outcome)
     if fast_price is not None:
         resolving = fast_price <= 0.03 or fast_price >= 0.97
         pos["market_fail_count"] = 0
         return fast_price, resolving
 
-    # Stage 2: Full Gamma refresh (bust stale cache first)
     cached = S.market_cache.get(cid)
     if cached and (time.time() - cached.get("ts", 0)) > C.MARKET_TTL:
         S.market_cache.pop(cid, None)
@@ -172,6 +146,24 @@ def _get_current_price(pos: dict) -> tuple:
 
     cur = get_outcome_price(mkt, outcome, asset=asset)
     return cur, resolving
+
+
+def _get_effective_stop_loss(pos: dict) -> float | None:
+    """
+    v10: Get the effective stop loss percentage for an open position.
+    Priority:
+      1. Per-position stop_loss_pct (set from signal's strategy config at entry)
+      2. Global STOP_LOSS_PCT if STOP_LOSS_ENABLED
+      3. None (no stop)
+    """
+    # Per-position stop loss from signal strategy config
+    pos_sl = pos.get("stop_loss_pct")
+    if pos_sl is not None:
+        return float(pos_sl)
+    # Fall back to global config if enabled
+    if C.STOP_LOSS_ENABLED:
+        return float(C.STOP_LOSS_PCT)
+    return None
 
 
 def auto_trade(signals: list, whale_exits: dict) -> list:
@@ -212,10 +204,7 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
         pnl_pct = (cur - entry) / max(entry, 0.001)
         reason  = None
 
-        # (a0) WebSocket resolution — HIGHEST PRIORITY check.
-        # The WS resolution monitor fires immediately when Polymarket settles a market.
-        # This is faster and more reliable than polling Gamma REST API.
-        # Critically catches sports/football matches that resolve while Gamma 422s.
+        # (a0) WebSocket resolution — HIGHEST PRIORITY
         _ws = _get_ws_monitor()
         if _ws:
             ws_res = _ws.is_resolved_via_ws(cid)
@@ -235,16 +224,13 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
         if not reason and resolving:
             reason = f"MARKET_RESOLVING cur={cur:.3f}"
 
-        # (b) WHALE EXIT — the most important signal.
-        # If the whale who triggered our entry has sold, we follow immediately.
-        # This fires regardless of STOP_LOSS_ENABLED or profit targets.
+        # (b) WHALE EXIT — follow the whale
         elif C.WHALE_EXIT_SELL and whale_exits.get(cid):
             exiting         = set(whale_exits[cid])
             elite_entry_set = set(w.lower() for w in pos.get("elite_wallets", []))
             matched_elite   = list(exiting & elite_entry_set)
 
             if matched_elite:
-                # Filter out HFT/market-maker exits — they sell constantly as part of arb
                 non_hft_exiting = [
                     w for w in matched_elite
                     if not (S.env().wallet_cache.get(w, {}).get("hft") or
@@ -252,7 +238,6 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
                             w in _KNOWN_HEDGE_WALLETS)
                 ]
                 if non_hft_exiting:
-                    # Ignore early noise: if we're barely underwater and have barely held
                     whale_losing = cur < pos.get("entry_price", entry) * 0.92
                     early_noise  = whale_losing and pnl_pct > -0.05 and hold_minutes < 20
                     if not early_noise:
@@ -271,24 +256,32 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
                     hft_names = [S.env().wallet_cache.get(w, {}).get("name", w[:10]) for w in matched_elite[:2]]
                     S._log(f"  ⚡ HFT/market-maker exit ignored: {hft_names} on {pos['title'][:30]}", "DIAG")
 
-        # (c) Profit target — disabled. Let whale decide when to exit.
-        # When the market resolves YES, price hits 0.98+ and MARKET_RESOLVING fires.
-        # elif pnl_pct >= C.PROFIT_TARGET_PCT:  # DISABLED
+        # (c) PROFIT TARGET
+        elif not reason and getattr(C, "PROFIT_TARGET_ENABLED", True) and pnl_pct >= C.PROFIT_TARGET_PCT:
+            reason = f"PROFIT_TARGET {pnl_pct*100:.1f}%"
+            S._log(
+                f"  💰 Profit target: {pos.get('title','?')[:35]} "
+                f"P&L={pnl_pct*100:+.1f}% (target={C.PROFIT_TARGET_PCT*100:.0f}%)",
+                "INFO"
+            )
 
-        # (d) Trailing stop — disabled. Trust the whale.
-        # If they're still in, there's still upside. Price volatility is not an exit signal.
+        # (d) v10 PER-SIGNAL STOP LOSS
+        # Uses strategy-specific stop_loss_pct set at entry time.
+        # recent_form and drift_discount have stop_loss_pct=None → no stop
+        # consensus_basket has stop_loss_pct=-0.35 → soft -35% stop
+        # Global STOP_LOSS_PCT is used if per-signal has no config
+        if not reason:
+            eff_sl = _get_effective_stop_loss(pos)
+            if eff_sl is not None and pnl_pct <= eff_sl:
+                strat_tag = pos.get("strategy", "?")[:2].upper()
+                reason = f"STOP_LOSS[{strat_tag}] {pnl_pct*100:.1f}% (limit={eff_sl*100:.0f}%)"
+                S._log(
+                    f"  🛑 Stop loss [{strat_tag}]: {pos.get('title','?')[:35]} "
+                    f"P&L={pnl_pct*100:+.1f}% (limit={eff_sl*100:.0f}%)",
+                    "INFO"
+                )
 
-        # (e) Dynamic stop loss based on market type.
-        # Sports: tight -25% stop (games resolve fast, no recovery possible).
-        # Crypto: -35% stop (volatile but can recover, whale may still be right).
-        # Politics/Event: -50% stop (or rely on whale exit — slow-moving markets).
-        # STOP_LOSS_ENABLED=true enables this regardless of whale status.
-        # CRITICAL: For sports, always apply stop loss — whale can't exit fast enough.
-        mkt_type_pos = pos.get("mkt_type", "POLITICS")
-        if not reason and C.STOP_LOSS_ENABLED and pnl_pct <= C.STOP_LOSS_PCT:
-            reason = f"STOP_LOSS {pnl_pct*100:.1f}%"
-
-        # (f) Expiring soon
+        # (e) Expiring soon
         if not reason:
             mkt_check, _ = get_market(cid, pos.get("title"), asset=pos.get("asset",""), slug=pos.get("slug",""))
             if mkt_check:
@@ -300,8 +293,6 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
                 pos["market_fail_count"] = pos.get("market_fail_count", 0) + 1
                 fail_count = pos["market_fail_count"]
                 if fail_count >= 3:
-                    # After just 3 failures, try to get resolution price from Data API
-                    # This is cheap and catches resolved markets quickly
                     real_p = _try_fetch_resolution_price(
                         cid, pos.get("asset", ""), pos.get("outcome", "")
                     )
@@ -320,14 +311,6 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
                     if stale_p <= 0.05 or stale_p >= 0.95:
                         reason = "MARKET_RESOLVED_OR_GONE"
                     elif fail_count >= 20:
-                        # FIX: MARKET_GONE phantom profit bug.
-                        # Before triggering exit, try to fetch the real final price
-                        # from the Data API trades endpoint (works even after resolution,
-                        # independent of Gamma API). If we get a real price, use it.
-                        # If not, force exit at entry_price (0% PnL) — conservative
-                        # but honest: we know nothing about the real outcome.
-                        # This prevents the Sweeny-style phantom profit where a stale
-                        # pre-resolution high price was used as the exit price.
                         real_exit_price = _try_fetch_resolution_price(
                             cid, pos.get("asset", ""), pos.get("outcome", "")
                         )
@@ -341,8 +324,6 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
                                 "INFO"
                             )
                         else:
-                            # No reliable price available — exit at entry (0% PnL)
-                            # This is conservative but prevents phantom profits.
                             cur = pos.get("entry_price", entry)
                             pos["cur_price"] = cur
                             pnl_pct = 0.0
@@ -353,13 +334,11 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
                             )
                         reason = "MARKET_GONE"
 
-        # (g) Near-zero price = resolved against us
+        # (f) Near-zero price = resolved against us
         if not reason and cur <= 0.03 and hold_minutes > 10:
             reason = f"RESOLVED_LOSS cur={cur:.3f}"
 
-        # (g2) CATASTROPHIC LOSS GUARD — exit any position down > 70%.
-        # Covers the 0.03-0.10 range that is resolved-but-not-detected.
-        # Sports: games end, prices go to ~0.03, whale can't exit in time.
+        # (g) CATASTROPHIC LOSS GUARD — always fires regardless of strategy
         if not reason and pnl_pct <= -0.70 and hold_minutes > 3:
             reason = f"CATASTROPHIC_LOSS {pnl_pct*100:.1f}% cur={cur:.3f}"
             S._log(
@@ -368,14 +347,24 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
                 "WARN"
             )
 
-        # (h) Stale-price resolution check: position is deep ITM (entry was low,
-        # stale price is still mid-range) AND Gamma API keeps failing.
-        # Example: "Bitcoin $80k April 20-26 [Yes]" — entered at 0.71, market
-        # resolved YES at ~0.99 but Gamma returns 422 so price never updates.
-        # After 5 API failures, try Data API to confirm resolution.
+        # (h) STALE TREND REVERSAL EXIT
+        if not reason and hold_minutes > 45:
+            price_hist = pos.get("price_history", [])
+            if len(price_hist) >= 4:
+                recent_prices = [p for _, p in price_hist[-4:]]
+                if all(recent_prices[i] <= recent_prices[i-1] for i in range(1, 4)):
+                    trend_drop = (recent_prices[0] - recent_prices[-1]) / max(recent_prices[0], 0.01)
+                    if trend_drop > 0.08 and pnl_pct < -0.15:
+                        reason = f"STALE_TREND_REVERSAL drop={trend_drop*100:.0f}% pnl={pnl_pct*100:.0f}%"
+                        S._log(
+                            f"  📉 Stale trend reversal exit: {pos.get('title','?')[:35]} "
+                            f"P&L={pnl_pct*100:+.1f}% price drop={trend_drop*100:.0f}%",
+                            "INFO"
+                        )
+
+        # (i) Stale-price resolution check
         if not reason and pos.get("market_fail_count", 0) >= 5:
             stale_p = pos.get("cur_price", 0.5)
-            # Only probe if price is in ambiguous mid-range (not already near resolved)
             if 0.05 < stale_p < 0.95:
                 real_p = _try_fetch_resolution_price(
                     cid, pos.get("asset", ""), pos.get("outcome", "")
@@ -421,8 +410,9 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             "ts_str":        datetime.now().strftime("%H:%M:%S"),
             "bankroll":      round(S.env().paper_bankroll, 4),
             "tier":          pos.get("tier", "?"),
+            "strategy":      pos.get("strategy", "?"),
             "elite_wallets": pos.get("elite_wallets", []),
-            "whale_buy_cash": pos.get("whale_buy_cash", {}),   # per-whale $ amounts
+            "whale_buy_cash": pos.get("whale_buy_cash", {}),
             "whale_names":   [
                 S.env().wallet_cache.get(w, {}).get("name", w[:10]+"…")
                 for w in pos.get("elite_wallets", [])[:3]
@@ -435,7 +425,6 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
         del S.env().open_positions[key]
         S.env().cooldown_cids[cid_out] = now_t
 
-        # WS: unsubscribe from resolution events for this closed position
         _ws_unsub = _get_ws_monitor()
         if _ws_unsub:
             _ws_unsub.unsubscribe_position(cid_out)
@@ -444,9 +433,10 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
 
         emoji = "✅" if pnl_usdc_net >= 0 else "❌"
         whale_str = ", ".join(trade_record["whale_names"])
+        strat_tag = pos.get("strategy", "?")[:2].upper()
         events.append((
             "CLOSE",
-            f"{emoji} SELL: {pos['title'][:30]} [{pos['outcome']}] "
+            f"{emoji} SELL [{strat_tag}]: {pos['title'][:30]} [{pos['outcome']}] "
             f"@ ${cur:.4f} | P&L ${pnl_usdc_net:+.3f} ({pnl_pct*100:+.1f}%) | {reason} | via {whale_str}",
             "#00ff55" if pnl_usdc_net >= 0 else "#ff5555"
         ))
@@ -476,12 +466,19 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             whale_position_counts[w] = whale_position_counts.get(w, 0) + 1
     opening_whale_counts: dict = {}
 
+    # v10: Track open positions per strategy
+    open_per_strategy: dict = {}
+    for pos in S.env().open_positions.values():
+        strat = pos.get("strategy", "consensus_basket").split("+")[0]
+        open_per_strategy[strat] = open_per_strategy.get(strat, 0) + 1
+
     for sig in signals:
         tier    = sig["tier"]
         cid     = sig["cid"]
         outcome = sig["outcome"]
         key     = (cid, outcome)
         title   = sig["title"]
+        strat   = sig.get("strategy", "consensus_basket").split("+")[0]
 
         if len(S.env().open_positions) + len(opening_this_cycle) >= C.MAX_OPEN_POSITIONS:
             break
@@ -495,7 +492,22 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
         if C.ALLOWED_MARKET_TYPES and mkt_type not in C.ALLOWED_MARKET_TYPES:
             continue
 
-        if sig.get("n_elite", 0) < C.MIN_ELITE_CONFLUENCE:
+        # v10: Per-strategy position limit
+        strat_cfg = getattr(C, f"strategy_{strat}", {})
+        strat_max = int(strat_cfg.get("max_positions", C.MAX_OPEN_POSITIONS))
+        cur_strat_open = open_per_strategy.get(strat, 0)
+        opening_strat  = sum(1 for s in opening_this_cycle
+                             if S.env().open_positions.get(s, {}).get("strategy", "").startswith(strat))
+        if cur_strat_open + opening_strat >= strat_max:
+            S._log(f"  🚫 Strategy [{strat}] at capacity ({strat_max} positions)", "DIAG")
+            continue
+
+        # Consensus basket uses its own min_elite_confluence
+        if strat == "consensus_basket":
+            min_el = int(strat_cfg.get("min_elite_confluence", 1))
+        else:
+            min_el = 1  # recent_form and drift_discount: 1 verified whale is enough
+        if sig.get("n_elite", 0) < min_el:
             continue
 
         exits_here       = sig.get("exits_detected", [])
@@ -535,7 +547,13 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             continue
 
         age_h     = sig.get("age_h", 0)
-        age_limit = HFT_MIRROR_DELAY_MAX_SECONDS / 3600 if tier == "HFT" else MAX_SIGNAL_AGE_H
+        # Drift discount strategy has much longer age window — don't use global MAX_SIGNAL_AGE_H
+        if strat == "drift_discount":
+            age_limit = float(strat_cfg.get("max_signal_age_h", 6.0))
+        elif tier == "HFT":
+            age_limit = HFT_MIRROR_DELAY_MAX_SECONDS / 3600
+        else:
+            age_limit = float(strat_cfg.get("max_signal_age_h", MAX_SIGNAL_AGE_H))
         if age_h > age_limit:
             S._log(f"  ⏰ Signal too old ({age_h:.1f}h): {title[:30]}", "DIAG")
             continue
@@ -549,11 +567,24 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
         cur    = sig["cur"]
         asset  = sig.get("asset", "")
 
+        # Price zone gate (belt-and-suspenders)
+        price_min = float(strat_cfg.get("price_min", C.MIN_ENTRY_PRICE))
+        price_max = float(strat_cfg.get("price_max", C.MAX_ENTRY_PRICE))
+        if cur < price_min or cur > price_max:
+            S._log(
+                f"  🚫 Price zone block [{strat}]: {title[:30]} cur={cur:.3f} "
+                f"zone=[{price_min:.2f},{price_max:.2f}]",
+                "DIAG"
+            )
+            continue
+
         # EV gate — skip for HFT spike signals (momentum, not mispricing)
         liq      = sig.get("mkt", {}).get("liq", 0)
-        ev_info  = estimate_expected_value(cur, sig.get("avg_entry", cur), liq, bet, mkt_type)
+        ev_info  = estimate_expected_value(cur, sig.get("avg_entry", cur), liq, bet, mkt_type, sig.get("avg_wscore", 0.85))
         is_spike = sig.get("is_hft", False) and sig.get("has_large_trade", False)
-        if not ev_info["tradeable"] and not is_spike:
+        # Drift discount: EV may appear slightly negative due to drift, but the discount IS the edge
+        is_dd    = (strat == "drift_discount")
+        if not ev_info["tradeable"] and not is_spike and not is_dd:
             S._log(
                 f"  📊 EV REJECT: {title[:30]} EV={ev_info['ev_pct']:+.1f}% "
                 f"(friction={ev_info['total_friction']:.1f}%)",
@@ -562,7 +593,7 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             continue
         else:
             S._log(
-                f"  ✅ EV OK: {title[:30]} EV={ev_info['ev_pct']:+.1f}% "
+                f"  ✅ EV OK [{strat}]: {title[:30]} EV={ev_info['ev_pct']:+.1f}% "
                 f"fair_prob={ev_info['fair_prob']:.0f}% friction={ev_info['total_friction']:.1f}%",
                 "DIAG"
             )
@@ -581,12 +612,14 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
         mkt_obj       = sig.get("mkt", {})
         resolved_slug = mkt_obj.get("slug") or sig.get("slug", "")
 
-        # Build per-whale buy cash map for exit detection — maps wallet → their buy cash on this market
         elite_ver = sig.get("elite_ver", {})
         whale_buy_cash = {
             w.lower(): t.get("cash", 0)
             for w, t in elite_ver.items()
         }
+
+        # v10: Get stop_loss_pct from signal strategy config
+        sig_stop_loss = sig.get("stop_loss_pct")  # None for RF/DD, -0.35 for CB
 
         pos = {
             "title":             title,
@@ -596,6 +629,8 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             "event_slug":        event_slug,
             "outcome":           outcome,
             "tier":              tier,
+            "strategy":          strat,   # v10: track which strategy opened this position
+            "stop_loss_pct":     sig_stop_loss,  # v10: per-signal stop loss
             "score":             sig["score"],
             "entry_price":       cur,
             "cur_price":         cur,
@@ -606,7 +641,7 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             "whale_wallets":     all_whale_addrs,
             "elite_wallets":     elite_wallet_addrs,
             "elite_names":       elite_names,
-            "whale_buy_cash":    whale_buy_cash,   # per-whale buy cash for exit detection
+            "whale_buy_cash":    whale_buy_cash,
             "n_elite":           sig.get("n_elite", 0),
             "n_confluence":      sig.get("n_confluence", 0),
             "is_hft":            sig.get("is_hft", False),
@@ -627,17 +662,24 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             "hrs_left":          sig["mkt"].get("hrs_left"),
             "end_date":          sig["mkt"].get("end_date", ""),
         }
+
+        # v10: drift_discount strategy — store whale avg entry for reference
+        if strat == "drift_discount":
+            pos["whale_avg_entry"] = sig.get("avg_entry", cur)
+            pos["drift_discount_pct"] = sig.get("drift_discount_pct", 0)
+
+        # v10: recent_form strategy — store source whale recent win rate
+        if strat == "recent_form":
+            pos["source_recent_wr"] = sig.get("source_recent_wr", 0.55)
+
         S.env().open_positions[key]    = pos
         S.env().active_market_cids.add(cid)
         S.env().position_whale_map[cid] = set(all_whale_addrs)
 
-        # WS: subscribe to real-time resolution events for this position.
-        # We subscribe to our specific token ID. The WS monitor will also
-        # try to subscribe to the sibling token from market cache.
+        # WS: subscribe to real-time resolution events
         _ws_sub = _get_ws_monitor()
         if _ws_sub and asset:
             tokens = [asset]
-            # Include sibling tokens from market cache for full resolution coverage
             mkt_cached = S.market_cache.get(cid, {})
             for tid in mkt_cached.get("asset_to_price", {}).keys():
                 if tid != asset and tid not in tokens:
@@ -651,6 +693,7 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             opening_event_slugs[event_slug] = opening_event_slugs.get(event_slug, 0) + 1
         for w in elite_wallet_addrs:
             opening_whale_counts[w] = opening_whale_counts.get(w, 0) + 1
+        open_per_strategy[strat] = open_per_strategy.get(strat, 0) + 1
 
         trade_record = {
             "type":          "BUY",
@@ -667,9 +710,11 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             "ts_str":        datetime.now().strftime("%H:%M:%S"),
             "bankroll":      round(S.env().paper_bankroll, 4),
             "tier":          tier,
+            "strategy":      strat,  # v10
+            "stop_loss_pct": sig_stop_loss,  # v10
             "elite_wallets": elite_wallet_addrs,
             "whale_names":   elite_names,
-            "whale_buy_cash": whale_buy_cash,   # per-whale $ amounts — shown in trade detail popup
+            "whale_buy_cash": whale_buy_cash,
             "avg_entry":     sig.get("avg_entry", cur),
             "score":         sig.get("score", 0),
             "n_confluence":  sig.get("n_confluence", 0),
@@ -682,12 +727,13 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
         conv_tag = "💎CONVICTION " if is_conviction else ""
         conf_str = f" +{n_conf}conf" if n_conf else ""
         age_min  = sig.get("age_h", 0) * 60
+        sl_str   = f" SL:{sig_stop_loss*100:.0f}%" if sig_stop_loss is not None else " SL:none"
 
         events.append((
             "OPEN",
-            f"🛒 BUY: {title[:30]} [{outcome}] @ ${cur:.4f} "
+            f"🛒 BUY [{strat}]: {title[:30]} [{outcome}] @ ${cur:.4f} "
             f"| ${bet:.2f} | {shares:.1f}sh | [{hft_tag}{conv_tag}{tier} {sig['score']:.0f}pts] "
-            f"| {', '.join(elite_names)}{conf_str} | {age_min:.0f}min ago",
+            f"| {', '.join(elite_names)}{conf_str} | {age_min:.0f}min ago{sl_str}",
             "#00ff88"
         ))
         if S.on_position_open:
