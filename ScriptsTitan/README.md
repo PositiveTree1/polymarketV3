@@ -46,7 +46,7 @@ TITAN watches the Polymarket CLOB feed 24/7, identifies wallets with a proven tr
 ```bash
 # 1. Clone the repo
 git clone https://github.com/Alaphilippe/polymarketV3.git
-cd polymarketV3/ScriptsTitan
+cd polymarketV3
 
 # 2. Create a virtual environment
 python -m venv .venv
@@ -58,14 +58,14 @@ python -m venv .venv
 source .venv/bin/activate
 
 # 4. Install dependencies
-pip install -r requirements.txt
+pip install -r ScriptsTitan/requirements.txt
 ```
 
 ### Optional dependencies
 
 | Feature | Package | Install |
 |---|---|---|
-| Telegram bot | *(configure in titan_config.json)* | built-in via `requests` |
+| Telegram bot | *(configure in the repo-root `titan_config.json`)* | built-in via `requests` |
 | Remote web dashboard | `pycloudflared` | `pip install pycloudflared` |
 
 ---
@@ -73,8 +73,8 @@ pip install -r requirements.txt
 ## Quick Start
 
 ```bash
-# From ScriptsTitan/ with venv active:
-python titan_ui.py
+# From the repo root with venv active:
+python ScriptsTitan/titan_ui.py
 ```
 
 A boot screen will appear, then the main dashboard opens automatically.
@@ -85,7 +85,7 @@ A boot screen will appear, then the main dashboard opens automatically.
 
 ## Configuration
 
-All settings live in `titan_config.json` in the same directory. You can edit it:
+All settings live in the repo-root `titan_config.json`. You can edit it:
 - **In-app**: open the **CONFIG** tab, edit the JSON, click **SAVE & RELOAD**
 - **Manually**: edit the file directly — changes are picked up on next hot-reload or restart
 
@@ -165,7 +165,7 @@ TITAN's philosophy: **follow the whale out**.
 
 ## Telegram Bot (Optional)
 
-Set your bot token and chat ID in `titan_config.json`. Once enabled:
+Set your bot token and chat ID in the repo-root `titan_config.json`. Once enabled:
 
 | Message | Response |
 |---|---|
@@ -189,7 +189,7 @@ titan_wallet.py      ← Wallet fetching, scoring, elite discovery.
 titan_market.py      ← Market metadata + CLOB price feeds.
 titan_trader.py      ← Paper trade execution + Kelly sizing.
 titan_state.py       ← Shared singleton state (positions, bankroll, logs).
-titan_config.py      ← Config loader + hot-reload from titan_config.json.
+titan_config.py      ← Config loader + hot-reload from repo-root titan_config.json.
 titan_persistence.py ← Save/load state & whale roster to disk.
 titan_telegram.py    ← Optional Telegram bot.
 ```

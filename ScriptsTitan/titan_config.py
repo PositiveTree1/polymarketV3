@@ -1,6 +1,6 @@
 """
 TITAN — Configuration loader. Single-wallet edition.
-All settings live in titan_config.json.
+All settings live in the repo-root titan_config.json.
 
 v10: Added multi-strategy config blocks (strategy_recent_form, strategy_drift_discount,
      strategy_open_book, strategy_consensus_basket) and ACTIVE_STRATEGIES list.
@@ -8,8 +8,9 @@ v10: Added multi-strategy config blocks (strategy_recent_form, strategy_drift_di
 
 import json, os
 
-_CONFIG_DIR  = os.path.dirname(__file__)
-_CONFIG_FILE = os.path.join(_CONFIG_DIR, "titan_config.json")
+_SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
+_ROOT_DIR    = os.path.dirname(_SCRIPT_DIR)
+_CONFIG_FILE = os.path.join(_ROOT_DIR, "titan_config.json")
 
 def get_config_file():
     return _CONFIG_FILE

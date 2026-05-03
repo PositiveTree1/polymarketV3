@@ -20,14 +20,14 @@ It does **not** place real on-chain orders — it simulates trades against a vir
 | `titan_ui.py` | Tkinter desktop GUI. All 9 tabs. Boot screen. Renders data from engine via callbacks. |
 | `titan_engine.py` | Orchestration. Two loops: main 15s cycle + HFT 3s cycle. Calls all other modules. |
 | `titan_state.py` | Shared mutable state (`_wallet` singleton: open positions, bankroll, trade history, logs). |
-| `titan_config.py` | Config loader. Reads `titan_config.json` at runtime; hot-reload supported. |
+| `titan_config.py` | Config loader. Reads the repo-root `titan_config.json` at runtime; hot-reload supported. |
 | `titan_wallet.py` | Fetches & scores wallet profiles from Polymarket API. Discovers new whales. |
 | `titan_market.py` | Fetches market metadata, trade feeds, CLOB prices. `fetch_position_price_fast()` for live prices. |
 | `titan_signals.py` | Builds, scores and filters trading signals from the trade feed. Multi-strategy. |
 | `titan_trader.py` | Executes paper trades (open/close positions). Kelly sizing, bet caps. |
 | `titan_persistence.py` | Saves/loads state (positions, bankroll, whale roster) to/from disk as JSON. |
 | `titan_telegram.py` | Optional Telegram bot: sends buy/sell/error notifications, responds to commands. |
-| `titan_config.json` | All tunable parameters. Edit via CONFIG tab in UI or directly. |
+| `titan_config.json` | All tunable parameters. Located at the repo root; edit via CONFIG tab in UI or directly. |
 
 ---
 
@@ -166,7 +166,7 @@ TITAN follows an explicit philosophy: **follow the whale out**.
 | ANALYSIS | Cycle summary: signal counts by tier, elite roster, account stats. |
 | DIAG | Rejections (why signals were blocked), cooldowns, failed wallet scores. |
 | LOG | Full system log. "Copy Snapshot for AI" button copies the entire state as text. |
-| CONFIG | JSON editor for `titan_config.json`. Save & hot-reload. Guide panel on right. |
+| CONFIG | JSON editor for the repo-root `titan_config.json`. Save & hot-reload. Guide panel on right. |
 
 ---
 
@@ -232,10 +232,10 @@ This is the fastest way to give an AI full live context about TITAN's current st
 
 ## File Locations
 
-All files live in `C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\`.
+Core Titan code lives in `C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\`.
 
 Persistent data:
-- `titan_config.json` — all configuration
+- `C:\Users\jlala\source\repos\polymarketV3\titan_config.json` — all configuration
 - State file and whale roster paths are configured inside `titan_config.json`
 - Logs saved to `Logs/` directory (configurable via `titan_state.LOG_DIR`)
 
@@ -244,7 +244,7 @@ Persistent data:
 ## Running the App
 
 ```
-cd C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan
+cd C:\Users\jlala\source\repos\polymarketV3
 .\.venv\Scripts\python.exe titan_ui.py
 ```
 

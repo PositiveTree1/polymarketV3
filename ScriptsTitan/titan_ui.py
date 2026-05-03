@@ -1313,14 +1313,14 @@ nb.add(tab_config, text="  ⚙ CONFIG  ")
 cfg_toolbar = tk.Frame(tab_config, bg="#0d1a0d", pady=6)
 cfg_toolbar.pack(fill="x")
 
-cfg_status_var = tk.StringVar(value="  Loaded from titan_config.json")
+cfg_status_var = tk.StringVar(value="  Loaded from repo-root titan_config.json")
 
 
 def _reload_config_from_json():
     try:
         _cfg.reload()
         cfg_status_var.set(f"  ✅ Reloaded at {datetime.now().strftime('%H:%M:%S')} — takes effect next cycle")
-        engine._log("⚙ Config hot-reloaded from titan_config.json", "INFO")
+        engine._log("⚙ Config hot-reloaded from repo-root titan_config.json", "INFO")
     except Exception as e:
         cfg_status_var.set(f"  ❌ Reload failed: {e}")
 
