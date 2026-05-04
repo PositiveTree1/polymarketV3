@@ -650,7 +650,7 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             ],
             "avg_entry":     pos.get("avg_entry", pos.get("entry_price", 0)),
             "market_url":    pos.get("market_url"),
-            "price_history": list(pos.get("price_history", [])),
+            # price_history is stored in titan_state.db (price_history table)
             "entry_audit":   pos.get("entry_audit"),
             "exit_audit":    exit_audit,
         }

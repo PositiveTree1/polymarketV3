@@ -1,27 +1,45 @@
 """
 TITAN — Persistence layer. Single-wallet edition.
-Saves: titan_state.json and titan_whales.json
+Saves: titan_state.json, titan_whales.json, titan_state.db
 """
 
 import os, json, threading, time
 from datetime import datetime
 import titan_state as S
-from titan_config import STATE_FILE, WHALE_FILE, BANKROLL_START, SEED_WATCHLIST
+import titan_db as DB
+from titan_config import STATE_FILE, WHALE_FILE, STATE_DB, BANKROLL_START, SEED_WATCHLIST
 
 
 def save_state():
     try:
         env = S.env()
+
+        # Flush time-series data to SQLite before stripping from positions
+        for (cid, outcome), pos in env.open_positions.items():
+            ph = pos.get("price_history")
+            if ph:
+                DB.upsert_price_history(cid, outcome, ph)
+
+        if env.equity_history:
+            DB.upsert_equity_history(env.equity_history)
+
+        if env.watchlist:
+            DB.upsert_watchlist(env.watchlist)
+
+        # Build a lean copy of open_positions without price_history
+        lean_positions = {}
+        for k, pos in env.open_positions.items():
+            lean_pos = {key: val for key, val in pos.items() if key != "price_history"}
+            lean_positions[f"{k[0]}|||{k[1]}"] = lean_pos
+
         state = {
             "bankroll":           env.paper_bankroll,
             "session_pnl":        env.session_pnl,
             "trade_history":      env.trade_history[-1000:],
-            "open_positions":     {f"{k[0]}|||{k[1]}": v for k, v in env.open_positions.items()},
+            "open_positions":     lean_positions,
             "active_market_cids": list(env.active_market_cids),
             "cooldown_cids":      env.cooldown_cids,
             "position_whale_map": {k: list(v) for k, v in env.position_whale_map.items()},
-            "watchlist":          list(env.watchlist),
-            "equity_history":     env.equity_history[-2000:],
             "saved_at":           datetime.now().isoformat(),
         }
         with open(STATE_FILE, "w") as f:
@@ -60,6 +78,7 @@ def save_whale_roster_async():
 
 
 def load_state():
+    DB.init_db(STATE_DB)
     _load_whale_roster()
     _load_trading_state()
 
@@ -82,9 +101,15 @@ def _load_trading_state():
         env.cooldown_cids      = state.get("cooldown_cids", {})
         env.position_whale_map = {k: set(v) for k, v in state.get("position_whale_map", {}).items()}
 
-        saved_wl = state.get("watchlist", [])
-        if saved_wl:
-            env.watchlist.update(saved_wl)
+        db_wl = DB.load_watchlist()
+        if db_wl:
+            env.watchlist.update(db_wl)
+        else:
+            saved_wl = state.get("watchlist", [])
+            if saved_wl:
+                env.watchlist.update(saved_wl)
+                DB.upsert_watchlist(env.watchlist)
+                S._log(f"📂 Watchlist migrated from JSON: {len(saved_wl)} addresses", "INFO")
 
         raw = state.get("open_positions", {})
         env.open_positions = {}
@@ -96,6 +121,9 @@ def _load_trading_state():
         for key, pos in env.open_positions.items():
             cid = pos.get("cid", key[0])
             env.active_market_cids.add(cid)
+            ph = DB.load_price_history(key[0], key[1])
+            if ph:
+                pos["price_history"] = ph
 
         S._log(
             f"📂 State loaded: bankroll=${env.paper_bankroll:.2f} | "
@@ -104,16 +132,25 @@ def _load_trading_state():
             "INFO"
         )
 
-        saved_equity = state.get("equity_history", [])
-        if saved_equity and len(saved_equity) >= 2:
-            env.equity_history = [tuple(p) for p in saved_equity]
+        db_equity = DB.load_equity_history()
+        if db_equity and len(db_equity) >= 2:
+            env.equity_history = db_equity
             S._log(
-                f"📈 Equity curve restored: {len(env.equity_history)} points "
-                f"(${saved_equity[0][1]:.2f} → ${saved_equity[-1][1]:.2f})",
+                f"📈 Equity curve restored from DB: {len(db_equity)} points "
+                f"(${db_equity[0][1]:.2f} → ${db_equity[-1][1]:.2f})",
                 "INFO"
             )
         else:
-            _rebuild_equity_from_trades(env)
+            saved_equity = state.get("equity_history", [])
+            if saved_equity and len(saved_equity) >= 2:
+                env.equity_history = [tuple(p) for p in saved_equity]
+                DB.upsert_equity_history(env.equity_history)
+                S._log(
+                    f"📈 Equity curve migrated from JSON: {len(env.equity_history)} points",
+                    "INFO"
+                )
+            else:
+                _rebuild_equity_from_trades(env)
 
     except Exception as e:
         S._log(f"⚠ State load failed ({e}) — fresh start", "WARN")

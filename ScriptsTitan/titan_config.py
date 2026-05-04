@@ -58,7 +58,7 @@ PROFIT_TARGET_ENABLED: bool = True
 VERBOSE_HTTP: bool = False
 VIP_WALLETS: list = [];  PRIORITY_WALLETS: list = [];  SEED_WATCHLIST: list = []
 DATA_API: str = "";  GAMMA_API: str = "";  HEADERS: dict = {}
-STATE_FILE: str = "";  WHALE_FILE: str = ""
+STATE_FILE: str = "";  WHALE_FILE: str = "";  STATE_DB: str = ""
 
 # v10: Multi-strategy configuration dicts
 ACTIVE_STRATEGIES: list = ["recent_form", "drift_discount", "consensus_basket"]
@@ -192,6 +192,7 @@ def reload():
     }
     g["STATE_FILE"] = "titan_state.json"
     g["WHALE_FILE"] = "titan_whales.json"
+    g["STATE_DB"]   = "titan_state.db"
 
 
 reload()
