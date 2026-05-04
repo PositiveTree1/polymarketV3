@@ -55,6 +55,7 @@ SPORTS_BOT_MIN_TPH: int = 100
 MIN_ENTRY_PRICE: float = 0.20;  MAX_ENTRY_PRICE: float = 0.72
 IDEAL_PRICE_MIN: float = 0.25;  IDEAL_PRICE_MAX: float = 0.65
 PROFIT_TARGET_ENABLED: bool = True
+VERBOSE_HTTP: bool = False
 VIP_WALLETS: list = [];  PRIORITY_WALLETS: list = [];  SEED_WATCHLIST: list = []
 DATA_API: str = "";  GAMMA_API: str = "";  HEADERS: dict = {}
 STATE_FILE: str = "";  WHALE_FILE: str = ""
