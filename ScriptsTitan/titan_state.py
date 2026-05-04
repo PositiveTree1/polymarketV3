@@ -15,6 +15,7 @@ _local = threading.local()
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_DIR  = os.path.join(os.path.dirname(os.path.dirname(__file__)), "Logs")
 LOG_FILE = os.path.join(LOG_DIR, "titan.log")
+VERBOSE_LOG_FILE = os.path.join(LOG_DIR, "titan_verbose.log")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 def load_logs_from_disk():
@@ -81,6 +82,14 @@ on_cycle_complete = None
 def _log(msg, level="INFO"):
     ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{ts}] [{level:5}] {msg}"
+    if level == "VERB":
+        # Verbose HTTP traffic — separate file only, never pollutes main log or UI
+        try:
+            with open(VERBOSE_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
+        return
     _wallet.SYSTEM_LOGS.append(line)
     if len(_wallet.SYSTEM_LOGS) > 5000:
         del _wallet.SYSTEM_LOGS[:500]
@@ -107,9 +116,60 @@ def safe_get(url, params=None, retries=3, timeout=12, quiet=False):
                 time.sleep(wait)
                 continue
             if r.status_code == 200:
-                return r.json()
+                data = r.json()
+                if VERBOSE_HTTP:
+                    import inspect as _vi
+                    _vskip = {"safe_get", "_gamma_get", "<module>"}
+                    _vchain = []
+                    for _fi in _vi.stack()[1:8]:
+                        if _fi.function not in _vskip:
+                            _vchain.append(
+                                f"{_fi.filename.replace(chr(92),'/').split('/')[-1]}::{_fi.function}"
+                            )
+                        if len(_vchain) >= 3:
+                            break
+                    _vcaller = " → ".join(_vchain) or "?"
+                    _pstr = ", ".join(f"{k}={v}" for k, v in (params or {}).items())
+                    _count = f" | items: {len(data)}" if isinstance(data, list) else ""
+                    _body  = r.text[:300].replace("\n", " ")
+                    _log(
+                        f"📡 HTTP 200 {url} | {_vcaller}"
+                        f" | params: {_pstr}{_count}"
+                        f" | body: {_body}",
+                        "VERB"
+                    )
+                return data
+
             if not quiet:
-                _log(f"⚠ HTTP {r.status_code} from {url[:60]}", "DIAG")
+                import inspect as _inspect
+                # Find the first caller frame outside titan_state and titan_market._gamma_get
+                # Build full call chain so we know exactly what triggered this
+                _skip = {"safe_get", "_gamma_get", "<module>"}
+                chain = []
+                for frame_info in _inspect.stack()[1:12]:
+                    fn  = frame_info.function
+                    mod = frame_info.filename.replace("\\", "/").split("/")[-1]
+                    if fn in _skip:
+                        continue
+                    chain.append(f"{mod}::{fn}")
+                    if len(chain) >= 5:
+                        break
+                caller = " → ".join(chain) if chain else "?"
+                # Full params and body — no truncation (debug log)
+                param_str = ""
+                if params:
+                    parts = [f"{k}={v}" for k, v in params.items()]
+                    param_str = " | params: " + ", ".join(parts)
+                try:
+                    body = r.text.replace("\n", " ")
+                except Exception:
+                    body = ""
+                _log(
+                    f"⚠ HTTP {r.status_code} from {url}"
+                    f" | caller: {caller}{param_str}"
+                    f" | body: {body}",
+                    "DIAG"
+                )
             return None
         except requests.exceptions.Timeout:
             time.sleep(1.5)
@@ -120,6 +180,7 @@ def safe_get(url, params=None, retries=3, timeout=12, quiet=False):
                 _log(f"⚠ Request error: {e}", "DIAG")
             time.sleep(0.5)
     return None
+
 
 
 # ── Cash extraction ───────────────────────────────────────────────────────────

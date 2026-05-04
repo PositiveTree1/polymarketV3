@@ -105,6 +105,23 @@ def _gamma_get(url: str, params: dict) -> dict | list | None:
     return result
 
 
+def _to_decimal_token(asset: str) -> str:
+    """
+    Gamma API stores and queries CLOB token IDs as plain decimal integers.
+    The Data API also returns them as decimals, so usually this is a no-op.
+    If an asset somehow arrives as 0x-prefixed hex, convert it to decimal.
+    """
+    if not asset:
+        return asset
+    a = asset.strip()
+    try:
+        if a.startswith("0x") or a.startswith("0X"):
+            return str(int(a, 16))   # hex → decimal
+        return str(int(a))           # already decimal — normalise to remove any spaces/signs
+    except ValueError:
+        return a                     # not parseable — leave unchanged
+
+
 def _is_cid_blacklisted(cid: str) -> bool:
     """Check if a conditionId is temporarily blacklisted due to repeated failures."""
     entry = _gamma_cid_fails.get(cid)
@@ -165,10 +182,14 @@ def _fetch_market_raw(cid: str, asset: str = "", slug: str = "") -> dict | None:
         rc = (m.get("conditionId") or m.get("condition_id") or "").lower()
         return not rc or rc == cid.lower()
 
-    # ── Stage 1: Gamma clob_token_ids lookup (MOST RELIABLE for known positions)
-    if asset:
+    # ── Stage 1: Gamma clob_token_ids lookup ─────────────────────────────────────────────
+    # Only attempted when NO slug is available. When slug is known, Stage 2
+    # always succeeds and Stage 1 always returns 422 — skip it to save API
+    # calls and avoid false circuit-breaker increments.
+    if asset and not slug:
+        dec_asset = _to_decimal_token(asset)
         data = _gamma_get(f"{GAMMA_API}/markets", {
-            "clob_token_ids": f'["{asset}"]', "limit": 1
+            "clob_token_ids": f'["{dec_asset}"]', "limit": 1
         })
         m = _pick(data)
         if m and _cid_ok(m):
@@ -203,7 +224,7 @@ def _fetch_market_raw(cid: str, asset: str = "", slug: str = "") -> dict | None:
                     return m
             if recovered_asset and recovered_asset != asset:
                 data = _gamma_get(f"{GAMMA_API}/markets", {
-                    "clob_token_ids": json.dumps([recovered_asset]), "limit": 1
+                    "clob_token_ids": json.dumps([_to_decimal_token(recovered_asset)]), "limit": 1
                 })
                 m = _pick(data)
                 if m and _cid_ok(m):
@@ -493,8 +514,9 @@ def fetch_position_price_fast(cid: str, asset: str, outcome: str) -> float | Non
 
         # Strategy 1: Gamma clob_token_ids - works when conditionId fails
         if asset:
+            dec_asset = _to_decimal_token(asset)
             data = S.safe_get(f"{GAMMA_API}/markets", {
-                "clob_token_ids": f'["{asset}"]', "limit": 1
+                "clob_token_ids": f'["{dec_asset}"]', "limit": 1
             }, quiet=True)
             if data and isinstance(data, list) and data:
                 m = data[0]
@@ -511,7 +533,8 @@ def fetch_position_price_fast(cid: str, asset: str, outcome: str) -> float | Non
                 except Exception:
                     clob_tokens = []
                 for i, tok in enumerate(clob_tokens):
-                    if str(tok) == str(asset) and i < len(prices):
+                    # Compare normalised decimal so stored decimal == Gamma decimal
+                    if _to_decimal_token(str(tok)) == dec_asset and i < len(prices):
                         p = prices[i]
                         cached = S.market_cache.get(cid)
                         if cached:

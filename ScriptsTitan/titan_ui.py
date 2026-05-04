@@ -1134,7 +1134,110 @@ log_tool_bar.pack(fill="x")
 copy_btn_var = tk.StringVar(value="📋 COPY FULL SNAPSHOT FOR AI")
 
 
-def build_ai_debug_snapshot() -> str:
+def build_ai_debug_snapshot_compressed() -> str:
+    """Same data as the full snapshot — no raw logs — optimised format to save AI tokens."""
+    import time as _t
+    from datetime import datetime as _dt
+
+    now_str = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = [f"TITAN COMPRESSED SNAPSHOT — {now_str}", ""]
+
+    # ── Account ───────────────────────────────────────────────────────────────
+    br    = _w().paper_bankroll
+    sells = [t for t in _w().trade_history if t.get("type") == "SELL" and t.get("pnl_usdc") is not None]
+    wins  = sum(1 for t in sells if t["pnl_usdc"] >= 0)
+    wr    = wins / max(len(sells), 1) * 100
+    lines += [
+        "[ACCOUNT]",
+        f"  Bank=${br:.4f}  Start=${engine.BANKROLL_START:.2f}  "
+        f"SessionPnL=${_w().session_pnl:+.4f}  TotalPnL=${br - engine.BANKROLL_START:+.4f}",
+        f"  Cycles={_w().cycle_count}  OpenPos={len(_w().open_positions)}  "
+        f"Cooldowns={len(_w().cooldown_cids)}  Watchlist={len(_w().watchlist)}  "
+        f"Elites={sum(1 for p in _w().wallet_cache.values() if p.get('elite'))}",
+        f"  Trades={len(sells)}({wins}W/{len(sells)-wins}L) WR={wr:.0f}%",
+        "",
+    ]
+
+    # ── Open positions (all) ─────────────────────────────────────────────────
+    lines.append("[OPEN POSITIONS]")
+    if _w().open_positions:
+        for key, pos in _w().open_positions.items():
+            cid, outcome = key if isinstance(key, tuple) else (str(key), "?")
+            entry    = pos.get("entry_price", 0)
+            cur      = pos.get("cur_price", entry)
+            pnl_pct  = (cur - entry) / max(entry, 0.001) * 100
+            pnl_abs  = (cur - entry) * pos.get("shares", 0)
+            held_min = (_t.time() - pos.get("entry_ts", _t.time())) / 60
+            whales   = pos.get("elite_names", []) or [w[:10]+"…" for w in pos.get("elite_wallets", [])]
+            lines.append(
+                f"  [{pos.get('tier','?')}|{pos.get('score',0):.0f}pt|{'HFT' if pos.get('is_hft') else '-'}] "
+                f"{pos.get('title','?')[:60]} [{outcome}] "
+                f"WEntry=${pos.get('avg_entry',entry):.4f} Entry=${entry:.4f} Now=${cur:.4f} "
+                f"PnL={pnl_pct:+.1f}%(${pnl_abs:+.3f}) Bet=${pos.get('bet',0):.2f} "
+                f"Shares={pos.get('shares',0):.2f} Held={held_min:.0f}m via={','.join(whales)}"
+            )
+    else:
+        lines.append("  (no open positions)")
+    lines.append("")
+
+    # ── Active signals (all) ──────────────────────────────────────────────────
+    sigs = _last_signals if _last_signals else []
+    lines.append(f"[SIGNALS ({len(sigs)})]")
+    for i, s in enumerate(sigs, 1):
+        lines.append(
+            f"  #{i} [{s.get('tier','?')}|{s.get('score',0):.0f}] {s.get('title','?')[:60]} [{s.get('outcome','')}] "
+            f"Price=${s.get('cur',0):.4f} WEntry=${s.get('avg_entry',0):.4f} Drift={s.get('drift',0)*100:+.1f}% "
+            f"via={','.join(s.get('names', [])[:5])}"
+        )
+    if not sigs:
+        lines.append("  (no signals this cycle)")
+    lines.append("")
+
+    # ── Signal rejections (all) ───────────────────────────────────────────────
+    rejects = _last_rejects if _last_rejects else []
+    lines.append(f"[REJECTIONS ({len(rejects)})]")
+    lines.extend(f"  {r}" for r in rejects) if rejects else lines.append("  (none)")
+    lines.append("")
+
+    # ── Elite roster (all) ────────────────────────────────────────────────────
+    elites = sorted(
+        [(w, p) for w, p in _w().wallet_cache.items() if p.get("elite")],
+        key=lambda x: x[1].get("total_pnl", 0), reverse=True
+    )
+    lines.append(f"[ELITE ROSTER ({len(elites)})]")
+    for w, p in elites:
+        lines.append(
+            f"  {p.get('name', w[:12]):<24} WR={p.get('win_rate',0)*100:.0f}%  "
+            f"PnL=${p.get('total_pnl',0):+,.0f}  Score={p.get('score',0):.2f}  "
+            f"TPH={p.get('trades_per_hour',0):.1f}  {'⚡HFT' if p.get('hft') else ''}"
+        )
+    lines.append("")
+
+    # ── Trade history (last 100) ───────────────────────────────────────────────
+    lines.append("[TRADE HISTORY (last 100)]")
+    for t in _w().trade_history[-100:]:
+        typ     = t.get("type", "?")
+        icon    = "BUY" if typ == "BUY" else ("WIN" if (t.get("pnl_usdc") or 0) >= 0 else "LOSS")
+        pnl_str = f" PnL=${t.get('pnl_usdc',0):+.4f}({t.get('pnl_pct',0):+.1f}%)" if typ == "SELL" else ""
+        whale_str = ",".join(t.get("whale_names", [])[:2]) or "?"
+        lines.append(
+            f"  [{icon}|{t.get('tier','?')}] {t.get('ts_str','?')} "
+            f"{t.get('title','')[:40]} [{t.get('outcome','')}] "
+            f"Entry=${t.get('entry_price',0):.4f} Bet=${t.get('bet',0):.2f}"
+            f"{pnl_str} via={whale_str}"
+        )
+    if not _w().trade_history:
+        lines.append("  (no trades yet)")
+    lines.append("")
+
+    lines.append(f"END — {now_str}")
+    return "\n".join(lines)
+
+
+
+def build_ai_debug_snapshot(compressed: bool = False, log: bool = True) -> str:
+    if compressed:
+        return build_ai_debug_snapshot_compressed()
     import time as _t
     from datetime import datetime as _dt
 
@@ -1231,9 +1334,10 @@ def build_ai_debug_snapshot() -> str:
         lines.append("  (no trades yet)")
     lines += ["└─────────────────────────────────────────────────────────────────────┘", ""]
 
-    lines.append("┌─ RAW SYSTEM LOGS (last 600 lines) ──────────────────────────────────┐")
-    lines.extend(_w().SYSTEM_LOGS[-600:])
-    lines += ["└─────────────────────────────────────────────────────────────────────┘", ""]
+    if log:
+        lines.append("┌─ RAW SYSTEM LOGS (last 600 lines) ──────────────────────────────────┐")
+        lines.extend(_w().SYSTEM_LOGS[-600:])
+        lines += ["└─────────────────────────────────────────────────────────────────────┘", ""]
 
     lines += [sep, f"  END OF SNAPSHOT  —  {now_str}", sep]
     return "\n".join(lines)
@@ -2095,7 +2199,6 @@ def on_boot_complete():
                             return
                     telegram_notifier.send_dashboard_button(_ngrok_url)
                 threading.Thread(target=_start_app_and_send, daemon=True).start()
-
             else:
                 def _ask_groq():
                     import requests, json
@@ -2184,6 +2287,22 @@ def on_boot_complete():
                             self.wfile.write(f.read())
                     except Exception:
                         self.wfile.write(b"Dashboard HTML missing")
+                elif self.path == '/snapshot':
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    try:
+                        snapshot = build_ai_debug_snapshot(compressed=True)
+                        log_dir  = getattr(_TS, "LOG_DIR", "Logs")
+                        os.makedirs(log_dir, exist_ok=True)
+                        fname = os.path.join(log_dir, f"titan_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+                        with open(fname, "w", encoding="utf-8") as f:
+                            f.write(snapshot)
+                        engine._log(f"📄 RAG snapshot saved to {fname}", "INFO")
+                        self.wfile.write(fname.encode("utf-8"))
+                    except Exception as e:
+                        self.wfile.write(f"ERROR: {e}".encode("utf-8"))
                 else:
                     self.send_error(404)
 

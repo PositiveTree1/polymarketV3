@@ -1,5 +1,11 @@
 {
-    "_readme": "TITAN CONFIG v10 — MULTI-STRATEGY EDITION. Three active strategies: recent_form, drift_discount, consensus_basket. Open book disabled until rate limits confirmed safe.",
+    "debug": {
+        "VERBOSE_HTTP": {
+            "value": true,
+            "_description": "When true, logs every HTTP request+response received from Polymarket APIs (url, params, status, body excerpt). Use only for debugging — very noisy."
+        }
+    },
+    "_readme": "TITAN CONFIG v10 - MULTI-STRATEGY EDITION. Three active strategies: recent_form, drift_discount, consensus_basket. Open book disabled until rate limits confirmed safe.",
     "_ANALYSIS": {
         "root_causes_of_losses": [
             "1. BUYING NEAR-CERTAINTIES (entry >0.85): tiny upside (15c max), catastrophic downside (-85%). Clavicular pregnancy 0.94 entry -> -97%. WTI crude 0.70 -> -98%.",
@@ -31,7 +37,7 @@
         },
         "KELLY_FRACTION": {
             "value": 0.20,
-            "_description": "Conservative Kelly — 1/5 Kelly to account for model uncertainty."
+            "_description": "Conservative Kelly - 1/5 Kelly to account for model uncertainty."
         }
     },
     "fees": {

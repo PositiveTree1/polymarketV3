@@ -1,5 +1,5 @@
 """
-TITAN — Configuration loader. Single-wallet edition.
+TITAN - Configuration loader. Single-wallet edition.
 All settings live in the repo-root titan_config.json.
 
 v10: Added multi-strategy config blocks (strategy_recent_form, strategy_drift_discount,
@@ -15,7 +15,7 @@ _CONFIG_FILE = os.path.join(_ROOT_DIR, "titan_config.json")
 def get_config_file():
     return _CONFIG_FILE
 
-# ── Explicit declarations (overwritten at runtime by reload()) ────────────────
+# -- Explicit declarations (overwritten at runtime by reload()) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 BANKROLL_START: float = 0;  MIN_BET: float = 0;  MAX_BET_ABS: float = 0
 MAX_BET_PCT: float = 0;     KELLY_FRACTION: float = 0
 TAKER_FEE_RATE: float = 0;  ROUND_TRIP_FEE: float = 0
@@ -51,7 +51,7 @@ STRATEGY_MODE: str = "multi_strategy";  TRADEABLE_TIERS_LIST: list = ["CONVICTIO
 ALLOWED_MARKET_TYPES: list = ["POLITICS", "EVENT"]
 MIN_ELITE_CONFLUENCE: int = 2;  BLOCK_SPORTS: bool = True
 SPORTS_BOT_MIN_TPH: int = 100
-# v10: Price zone gates — only trade in the meaningful uncertainty zone
+# v10: Price zone gates - only trade in the meaningful uncertainty zone
 MIN_ENTRY_PRICE: float = 0.20;  MAX_ENTRY_PRICE: float = 0.72
 IDEAL_PRICE_MIN: float = 0.25;  IDEAL_PRICE_MAX: float = 0.65
 PROFIT_TARGET_ENABLED: bool = True
@@ -87,7 +87,7 @@ def _extract(cfg):
         if "wallets" in group_val and isinstance(group_val["wallets"], list):
             flat[group_key] = group_val["wallets"]
             continue
-        # v10: strategy config blocks — store as flat dict directly
+        # v10: strategy config blocks - store as flat dict directly
         if group_key.startswith("strategy_"):
             strat_flat = {}
             for key, val in group_val.items():
@@ -122,6 +122,7 @@ def reload():
     g["IDEAL_PRICE_MIN"]       = float(flat.get("IDEAL_PRICE_MIN", 0.25))
     g["IDEAL_PRICE_MAX"]       = float(flat.get("IDEAL_PRICE_MAX", 0.65))
     g["PROFIT_TARGET_ENABLED"] = bool(flat.get("PROFIT_TARGET_ENABLED", True))
+    g["VERBOSE_HTTP"]           = bool(flat.get("VERBOSE_HTTP", False))
 
     # v10: Active strategies and per-strategy config blocks
     g["ACTIVE_STRATEGIES"] = flat.get("ACTIVE_STRATEGIES", ["recent_form", "drift_discount", "consensus_basket"])
@@ -193,3 +194,4 @@ def reload():
 
 
 reload()
+
