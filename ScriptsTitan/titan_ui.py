@@ -16,6 +16,7 @@ import titan_engine as engine
 import titan_state as _TS
 import os
 import webbrowser
+from pathlib import Path
 
 try:
     import pyperclip
@@ -35,6 +36,18 @@ except ImportError:
 
 def _w():
     return _TS._wallet  # always the single wallet
+
+_GUIDE_FILE = Path(__file__).resolve().parent.parent / "docs" / "guide.txt"
+
+
+def _load_guide_text():
+    try:
+        return _GUIDE_FILE.read_text(encoding="utf-8")
+    except Exception as e:
+        return f"Guide unavailable.\n{_GUIDE_FILE}\n{e}"
+
+
+_GUIDE = _load_guide_text()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1479,80 +1492,6 @@ cfg_ref_frame.pack_propagate(False)
 
 tk.Label(cfg_ref_frame, text="TITAN GUIDE", fg="#00ff88", bg="#0d0d1a",
          font=bold_hd, pady=8).pack()
-
-_GUIDE = """EXIT PHILOSOPHY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Follow the whale. You enter
-because a whale bought. You
-exit when THEY sell.
-
-  WHALE_EXIT_SELL=true
-    → Mirror their exit. No
-      questions asked.
-
-  STOP_LOSS_ENABLED=false
-    → No stop fires unless
-      the whale exits first.
-
-  PROFIT_TARGET_PCT=0.20
-    → Take profit even if
-      whale still holds.
-      (protects vs bagholder)
-
-  Trailing stop activates
-  at +15%, trails 10% from peak.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TWO SIGNAL TYPES
-
-  💎 CONVICTION (big trades)
-    Whale commits >= 0.5%
-    portfolio OR >= $1000.
-    These are rare, high-quality
-    calls. Use full Kelly sizing.
-
-  ⚡ HFT SPIKE
-    HFT wallet bets 20-40x
-    their avg in one trade.
-    This is their signal.
-    Fast loop (3s) catches it.
-    Immediate buy, follow exit.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HOW IT WORKS EACH CYCLE
-
-  STEP 1: Poll VIP/elite wallets
-  STEP 2: Poll watchlist wallets
-  STEP 3: Public feed (discovery)
-  STEP 4: Score wallets in feed
-  STEP 5: Build signals (grouped
-          by market+side)
-  STEP 6: Gate & score 0-100
-  STEP 7: Auto-trade ALERT tier+
-  STEP 8: Exit check every cycle
-
-  HFT fast loop (every 3s):
-  Polls only HFT wallets,
-  fires immediately on spike.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TOO FEW SIGNALS?
-  ↓ MIN_SCORE (try 40)
-  ↓ MIN_TRADE_CASH (try 50)
-  ↓ MIN_LIQUIDITY (try 2000)
-  ↑ MAX_SIGNAL_AGE_H (try 1.0)
-  ↑ MAX_BET_ABS (try 10)
-  ↑ MAX_OPEN_POSITIONS (try 8)
-
-SCORE BREAKDOWN (0-100):
-  Wallet quality  /30
-  Confluence      /18
-  Recency         /20
-  Price window    /15
-  Market quality  /10
-  Conviction       /5
-  Exit penalty    -8x
-"""
 
 cfg_ref_scroll = scrolledtext.ScrolledText(
     cfg_ref_frame, bg="#0d0d1a", fg="#778899", font=mono_sm,

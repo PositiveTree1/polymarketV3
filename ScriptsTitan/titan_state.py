@@ -7,6 +7,7 @@ import time
 import requests
 import threading
 import os
+from collections import deque
 from datetime import datetime
 from titan_config import *
 
@@ -57,6 +58,8 @@ _wallet = WalletEnv()
 _shared_wallet_cache = {}
 _wallet.wallet_cache = _shared_wallet_cache
 market_cache = {}
+_http_trace_lock = threading.Lock()
+_recent_http_traces = deque(maxlen=400)
 
 # Compatibility shim: engine code that calls S.wallets[i] or S.env()
 wallets    = [_wallet]   # single-element list — legacy code still works
@@ -69,6 +72,69 @@ def __getattr__(name):
     if hasattr(_wallet, name):
         return getattr(_wallet, name)
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
+
+def _build_http_caller_chain(depth: int = 5) -> str:
+    import inspect as _inspect
+    _skip = {"safe_get", "_gamma_get", "<module>"}
+    chain = []
+    for frame_info in _inspect.stack()[1:12]:
+        fn  = frame_info.function
+        mod = frame_info.filename.replace("\\", "/").split("/")[-1]
+        if fn in _skip:
+            continue
+        chain.append(f"{mod}::{fn}")
+        if len(chain) >= depth:
+            break
+    return " → ".join(chain) if chain else "?"
+
+
+def _store_http_trace(url: str, params: dict | None, status_code: int | None,
+                      body: str, caller: str, ok: bool):
+    entry = {
+        "ts": time.time(),
+        "url": url,
+        "params": dict(params or {}),
+        "status_code": status_code,
+        "ok": ok,
+        "caller": caller,
+        "body": body,
+    }
+    with _http_trace_lock:
+        _recent_http_traces.append(entry)
+
+
+def get_recent_http_traces(*, since_ts: float = 0.0, limit: int = 40,
+                           filters: list[str] | None = None) -> list[dict]:
+    filters = [str(f).lower() for f in (filters or []) if f]
+    with _http_trace_lock:
+        traces = list(_recent_http_traces)
+    out = []
+    for entry in reversed(traces):
+        if entry.get("ts", 0) < since_ts:
+            continue
+        if filters:
+            hay = " ".join([
+                str(entry.get("url", "")),
+                str(entry.get("caller", "")),
+                str(entry.get("params", "")),
+                str(entry.get("body", ""))[:1000],
+            ]).lower()
+            if not any(f in hay for f in filters):
+                continue
+        out.append({
+            "ts": entry.get("ts"),
+            "url": entry.get("url"),
+            "params": entry.get("params"),
+            "status_code": entry.get("status_code"),
+            "ok": entry.get("ok"),
+            "caller": entry.get("caller"),
+            "body": entry.get("body"),
+        })
+        if len(out) >= limit:
+            break
+    out.reverse()
+    return out
 
 
 # UI callbacks
@@ -105,6 +171,82 @@ def _log(msg, level="INFO"):
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────────
+# def safe_get(url, params=None, retries=3, timeout=12, quiet=False):
+#     for i in range(retries):
+#         try:
+#             r = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
+#             if r.status_code == 429:
+#                 wait = 2 ** (i + 1)
+#                 if not quiet:
+#                     _log(f"⚠ Rate limited — sleeping {wait}s", "WARN")
+#                 time.sleep(wait)
+#                 continue
+#             if r.status_code == 200:
+#                 data = r.json()
+#                 if VERBOSE_HTTP:
+#                     import inspect as _vi
+#                     _vskip = {"safe_get", "_gamma_get", "<module>"}
+#                     _vchain = []
+#                     for _fi in _vi.stack()[1:8]:
+#                         if _fi.function not in _vskip:
+#                             _vchain.append(
+#                                 f"{_fi.filename.replace(chr(92),'/').split('/')[-1]}::{_fi.function}"
+#                             )
+#                         if len(_vchain) >= 3:
+#                             break
+#                     _vcaller = " → ".join(_vchain) or "?"
+#                     _pstr = ", ".join(f"{k}={v}" for k, v in (params or {}).items())
+#                     _count = f" | items: {len(data)}" if isinstance(data, list) else ""
+#                     _body  = r.text[:300].replace("\n", " ")
+#                     _log(
+#                         f"📡 HTTP 200 {url} | {_vcaller}"
+#                         f" | params: {_pstr}{_count}"
+#                         f" | body: {_body}",
+#                         "VERB"
+#                     )
+#                 return data
+
+#             if not quiet:
+#                 import inspect as _inspect
+#                 # Find the first caller frame outside titan_state and titan_market._gamma_get
+#                 # Build full call chain so we know exactly what triggered this
+#                 _skip = {"safe_get", "_gamma_get", "<module>"}
+#                 chain = []
+#                 for frame_info in _inspect.stack()[1:12]:
+#                     fn  = frame_info.function
+#                     mod = frame_info.filename.replace("\\", "/").split("/")[-1]
+#                     if fn in _skip:
+#                         continue
+#                     chain.append(f"{mod}::{fn}")
+#                     if len(chain) >= 5:
+#                         break
+#                 caller = " → ".join(chain) if chain else "?"
+#                 # Full params and body — no truncation (debug log)
+#                 param_str = ""
+#                 if params:
+#                     parts = [f"{k}={v}" for k, v in params.items()]
+#                     param_str = " | params: " + ", ".join(parts)
+#                 try:
+#                     body = r.text.replace("\n", " ")
+#                 except Exception:
+#                     body = ""
+#                 _log(
+#                     f"⚠ HTTP {r.status_code} from {url}"
+#                     f" | caller: {caller}{param_str}"
+#                     f" | body: {body}",
+#                     "DIAG"
+#                 )
+#             return None
+#         except requests.exceptions.Timeout:
+#             time.sleep(1.5)
+#         except requests.exceptions.ConnectionError:
+#             time.sleep(2)
+#         except Exception as e:
+#             if not quiet:
+#                 _log(f"⚠ Request error: {e}", "DIAG")
+#             time.sleep(0.5)
+#     return None
+
 def safe_get(url, params=None, retries=3, timeout=12, quiet=False):
     for i in range(retries):
         try:
@@ -112,58 +254,37 @@ def safe_get(url, params=None, retries=3, timeout=12, quiet=False):
             if r.status_code == 429:
                 wait = 2 ** (i + 1)
                 if not quiet:
-                    _log(f"⚠ Rate limited — sleeping {wait}s", "WARN")
+                    _log(f"⚠ Rate limited â€” sleeping {wait}s", "WARN")
                 time.sleep(wait)
                 continue
+
+            caller = _build_http_caller_chain(depth=5)
+            try:
+                body = r.text.replace("\n", " ")
+            except Exception:
+                body = ""
+
             if r.status_code == 200:
                 data = r.json()
+                _store_http_trace(url, params, 200, body[:4000], caller, True)
                 if VERBOSE_HTTP:
-                    import inspect as _vi
-                    _vskip = {"safe_get", "_gamma_get", "<module>"}
-                    _vchain = []
-                    for _fi in _vi.stack()[1:8]:
-                        if _fi.function not in _vskip:
-                            _vchain.append(
-                                f"{_fi.filename.replace(chr(92),'/').split('/')[-1]}::{_fi.function}"
-                            )
-                        if len(_vchain) >= 3:
-                            break
-                    _vcaller = " → ".join(_vchain) or "?"
                     _pstr = ", ".join(f"{k}={v}" for k, v in (params or {}).items())
                     _count = f" | items: {len(data)}" if isinstance(data, list) else ""
-                    _body  = r.text[:300].replace("\n", " ")
+                    _body = body[:300]
                     _log(
-                        f"📡 HTTP 200 {url} | {_vcaller}"
+                        f"⚠ HTTP 200 {url} | {caller}"
                         f" | params: {_pstr}{_count}"
                         f" | body: {_body}",
                         "VERB"
                     )
                 return data
 
+            _store_http_trace(url, params, r.status_code, body[:4000], caller, False)
             if not quiet:
-                import inspect as _inspect
-                # Find the first caller frame outside titan_state and titan_market._gamma_get
-                # Build full call chain so we know exactly what triggered this
-                _skip = {"safe_get", "_gamma_get", "<module>"}
-                chain = []
-                for frame_info in _inspect.stack()[1:12]:
-                    fn  = frame_info.function
-                    mod = frame_info.filename.replace("\\", "/").split("/")[-1]
-                    if fn in _skip:
-                        continue
-                    chain.append(f"{mod}::{fn}")
-                    if len(chain) >= 5:
-                        break
-                caller = " → ".join(chain) if chain else "?"
-                # Full params and body — no truncation (debug log)
                 param_str = ""
                 if params:
                     parts = [f"{k}={v}" for k, v in params.items()]
                     param_str = " | params: " + ", ".join(parts)
-                try:
-                    body = r.text.replace("\n", " ")
-                except Exception:
-                    body = ""
                 _log(
                     f"⚠ HTTP {r.status_code} from {url}"
                     f" | caller: {caller}{param_str}"
@@ -180,8 +301,6 @@ def safe_get(url, params=None, retries=3, timeout=12, quiet=False):
                 _log(f"⚠ Request error: {e}", "DIAG")
             time.sleep(0.5)
     return None
-
-
 
 # ── Cash extraction ───────────────────────────────────────────────────────────
 def extract_cash(t: dict) -> float:

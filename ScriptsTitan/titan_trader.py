@@ -166,6 +166,222 @@ def _get_effective_stop_loss(pos: dict) -> float | None:
     return None
 
 
+def _dt_fields(ts: float) -> dict:
+    dt = datetime.fromtimestamp(ts)
+    return {
+        "ts": ts,
+        "ts_str": dt.strftime("%H:%M:%S"),
+        "ts_iso": dt.isoformat(timespec="seconds"),
+        "date": dt.strftime("%Y-%m-%d"),
+        "time": dt.strftime("%H:%M:%S"),
+    }
+
+
+def _build_market_url(event_slug: str = "", slug: str = "") -> str:
+    if event_slug:
+        return f"https://polymarket.com/event/{event_slug}"
+    if slug:
+        return f"https://polymarket.com/event/{slug}"
+    return "https://polymarket.com"
+
+
+def _compact_market_snapshot(mkt: dict | None, *, fallback_title: str = "", fallback_slug: str = "",
+                             fallback_event_slug: str = "") -> dict:
+    mkt = mkt or {}
+    return {
+        "title": mkt.get("title") or mkt.get("question") or fallback_title,
+        "slug": mkt.get("slug") or fallback_slug,
+        "event_slug": mkt.get("event_slug") or mkt.get("eventSlug") or fallback_event_slug,
+        "yes_price": mkt.get("yes_price"),
+        "no_price": mkt.get("no_price"),
+        "outcome_labels": list(mkt.get("outcome_labels", [])),
+        "outcome_prices": dict(mkt.get("outcome_prices", {})),
+        "asset_to_price": dict(mkt.get("asset_to_price", {})),
+        "liq": mkt.get("liq"),
+        "volume": mkt.get("volume"),
+        "hrs_left": mkt.get("hrs_left"),
+        "end_date": mkt.get("end_date"),
+        "ts": mkt.get("ts"),
+    }
+
+
+def _compact_wallet_snapshot(wallet_addrs: list[str]) -> list[dict]:
+    rows = []
+    for addr in wallet_addrs[:8]:
+        prof = S.env().wallet_cache.get(str(addr).lower(), {})
+        rows.append({
+            "wallet": addr,
+            "name": prof.get("name", str(addr)[:10] + "…"),
+            "score": prof.get("score"),
+            "win_rate": prof.get("win_rate"),
+            "total_pnl": prof.get("total_pnl"),
+            "verified": prof.get("verified"),
+            "elite": prof.get("elite"),
+            "hft": prof.get("hft"),
+        })
+    return rows
+
+
+def _compact_elite_trade_snapshot(elite_ver: dict) -> list[dict]:
+    rows = []
+    for addr, trade in list((elite_ver or {}).items())[:8]:
+        rows.append({
+            "wallet": addr,
+            "name": trade.get("name"),
+            "title": trade.get("title"),
+            "outcome": trade.get("outcome"),
+            "price": trade.get("price"),
+            "size": trade.get("size"),
+            "cash": trade.get("cash"),
+            "asset": trade.get("asset"),
+            "slug": trade.get("slug"),
+            "event_slug": trade.get("event_slug"),
+            "ts": trade.get("ts"),
+            "source": trade.get("source"),
+            "window": trade.get("window"),
+        })
+    return rows
+
+
+def _build_entry_audit(sig: dict, cur: float, shares: float, bet: float, ev_info: dict,
+                       now_t: float, bankroll_after: float) -> dict:
+    dtf = _dt_fields(now_t)
+    market = sig.get("mkt", {}) or {}
+    event_slug = sig.get("event_slug", "") or market.get("event_slug", "")
+    slug = market.get("slug") or sig.get("slug", "")
+    http_traces = _collect_action_http_traces(
+        since_ts=max(0.0, now_t - 60),
+        cid=sig.get("cid", ""),
+        asset=sig.get("asset", ""),
+        slug=slug,
+        event_slug=event_slug,
+        limit=12,
+    )
+    return {
+        "captured_at": dtf,
+        "market_url": _build_market_url(event_slug, slug),
+        "signal_snapshot": {
+            "cid": sig.get("cid"),
+            "title": sig.get("title"),
+            "outcome": sig.get("outcome"),
+            "asset": sig.get("asset"),
+            "strategy": sig.get("strategy"),
+            "tier": sig.get("tier"),
+            "score": sig.get("score"),
+            "score_breakdown": dict(sig.get("bd", {})),
+            "stop_loss_pct": sig.get("stop_loss_pct"),
+            "age_h": sig.get("age_h"),
+            "age_min": sig.get("age_min"),
+            "cur": cur,
+            "avg_entry": sig.get("avg_entry", cur),
+            "drift": sig.get("drift"),
+            "slippage": sig.get("slippage"),
+            "total_flow": sig.get("total_flow"),
+            "ver_flow": sig.get("ver_flow"),
+            "opposing_flow": sig.get("opposing_flow"),
+            "n_ver": sig.get("n_ver"),
+            "n_elite": sig.get("n_elite"),
+            "n_confluence": sig.get("n_confluence"),
+            "max_bet_cash": sig.get("max_bet_cash"),
+            "is_hft": sig.get("is_hft"),
+            "has_large_trade": sig.get("has_large_trade"),
+            "is_conviction": sig.get("has_large_trade", False),
+            "conviction_detail": sig.get("conviction_detail"),
+            "exits_detected": list(sig.get("exits_detected", [])),
+            "elite_wallets": list(sig.get("elite_ver", {}).keys()),
+            "whale_names": list(sig.get("names", [])),
+            "elite_trades": _compact_elite_trade_snapshot(sig.get("elite_ver", {})),
+        },
+        "market_snapshot": _compact_market_snapshot(
+            market,
+            fallback_title=sig.get("title", ""),
+            fallback_slug=slug,
+            fallback_event_slug=event_slug,
+        ),
+        "wallet_snapshot": _compact_wallet_snapshot(list(sig.get("elite_ver", {}).keys())),
+        "pricing_snapshot": {
+            "entry_price": cur,
+            "shares": shares,
+            "bet": bet,
+            "fee_rate": TAKER_FEE_RATE,
+            "avg_whale_entry": sig.get("avg_entry", cur),
+            "bankroll_after_buy": round(bankroll_after, 4),
+        },
+        "ev_snapshot": dict(ev_info or {}),
+        "http_traces": http_traces,
+        "decision_summary": (
+            f"BUY {sig.get('outcome', '')} via {sig.get('strategy', '?')} "
+            f"[{sig.get('tier', '?')}] score={sig.get('score', 0):.0f} "
+            f"cur={cur:.4f} whale_avg={sig.get('avg_entry', cur):.4f}"
+        ),
+    }
+
+
+def _build_exit_audit(pos: dict, cur: float, pnl_pct: float, reason: str, now_t: float,
+                      exit_proceeds: float, pnl_usdc_net: float) -> dict:
+    dtf = _dt_fields(now_t)
+    hold_minutes = (now_t - pos.get("entry_ts", now_t)) / 60
+    http_traces = _collect_action_http_traces(
+        since_ts=max(0.0, now_t - 30),
+        cid=pos.get("cid", ""),
+        asset=pos.get("asset", ""),
+        slug=pos.get("slug", ""),
+        event_slug=pos.get("event_slug", ""),
+        limit=12,
+    )
+    return {
+        "captured_at": dtf,
+        "market_url": pos.get("market_url") or _build_market_url(pos.get("event_slug", ""), pos.get("slug", "")),
+        "exit_reason": reason,
+        "hold_minutes": round(hold_minutes, 2),
+        "pricing_snapshot": {
+            "entry_price": pos.get("entry_price"),
+            "exit_price": cur,
+            "shares": pos.get("shares"),
+            "bet": pos.get("bet"),
+            "gross_exit_value": round(cur * pos.get("shares", 0), 6),
+            "net_exit_proceeds": round(exit_proceeds, 6),
+            "fee_rate": TAKER_FEE_RATE,
+            "pnl_usdc": round(pnl_usdc_net, 4),
+            "pnl_pct": round(pnl_pct * 100, 2),
+            "peak_pnl_pct": pos.get("peak_pnl_pct"),
+        },
+        "market_snapshot": {
+            "liq": pos.get("liq"),
+            "volume": pos.get("volume"),
+            "hrs_left": pos.get("hrs_left"),
+            "end_date": pos.get("end_date"),
+            "cur_price": pos.get("cur_price", cur),
+            "market_fail_count": pos.get("market_fail_count", 0),
+        },
+        "wallet_snapshot": _compact_wallet_snapshot(pos.get("elite_wallets", [])),
+        "price_history_tail": list(pos.get("price_history", [])[-120:]),
+        "http_traces": http_traces,
+        "decision_summary": (
+            f"SELL {pos.get('outcome', '')} via {pos.get('strategy', '?')} "
+            f"reason={reason} exit={cur:.4f} pnl={pnl_pct*100:+.1f}%"
+        ),
+    }
+
+
+def _collect_action_http_traces(*, since_ts: float, cid: str = "", asset: str = "",
+                                slug: str = "", event_slug: str = "", limit: int = 12) -> list[dict]:
+    filters = [cid, asset, slug, event_slug, "/markets", "/trades", "/activity", "/positions"]
+    traces = S.get_recent_http_traces(since_ts=since_ts, limit=limit, filters=filters)
+    compact = []
+    for t in traces:
+        compact.append({
+            "ts": t.get("ts"),
+            "url": t.get("url"),
+            "params": t.get("params"),
+            "status_code": t.get("status_code"),
+            "ok": t.get("ok"),
+            "caller": t.get("caller"),
+            "body": t.get("body"),
+        })
+    return compact
+
+
 def auto_trade(signals: list, whale_exits: dict) -> list:
     now_t = time.time()
 
@@ -391,6 +607,8 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
         bet           = pos["bet"]
         exit_proceeds = cur * shares * (1 - TAKER_FEE_RATE)
         pnl_usdc_net  = exit_proceeds - bet
+        sell_dtf      = _dt_fields(now_t)
+        exit_audit    = _build_exit_audit(pos, cur, pnl_pct, reason, now_t, exit_proceeds, pnl_usdc_net)
 
         S.env().paper_bankroll += bet + pnl_usdc_net
         S.env().session_pnl    += pnl_usdc_net
@@ -407,7 +625,20 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             "pnl_pct":       round(pnl_pct * 100, 2),
             "reason":        reason,
             "ts":            now_t,
-            "ts_str":        datetime.now().strftime("%H:%M:%S"),
+            "ts_str":        sell_dtf["ts_str"],
+            "ts_iso":        sell_dtf["ts_iso"],
+            "date":          sell_dtf["date"],
+            "time":          sell_dtf["time"],
+            "entry_ts":      pos.get("entry_ts"),
+            "entry_ts_str":  pos.get("entry_ts_str"),
+            "entry_ts_iso":  pos.get("entry_ts_iso"),
+            "entry_date":    pos.get("entry_date"),
+            "entry_time":    pos.get("entry_time"),
+            "exit_ts":       now_t,
+            "exit_ts_str":   sell_dtf["ts_str"],
+            "exit_ts_iso":   sell_dtf["ts_iso"],
+            "exit_date":     sell_dtf["date"],
+            "exit_time":     sell_dtf["time"],
             "bankroll":      round(S.env().paper_bankroll, 4),
             "tier":          pos.get("tier", "?"),
             "strategy":      pos.get("strategy", "?"),
@@ -418,6 +649,10 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
                 for w in pos.get("elite_wallets", [])[:3]
             ],
             "avg_entry":     pos.get("avg_entry", pos.get("entry_price", 0)),
+            "market_url":    pos.get("market_url"),
+            "price_history": list(pos.get("price_history", [])),
+            "entry_audit":   pos.get("entry_audit"),
+            "exit_audit":    exit_audit,
         }
         S.env().trade_history.append(trade_record)
         S.env().active_market_cids.discard(cid_out)
@@ -600,6 +835,7 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
 
         shares = (bet / max(cur, 0.01)) * (1 - TAKER_FEE_RATE)
         S.env().paper_bankroll -= bet
+        buy_dtf = _dt_fields(now_t)
 
         elite_wallet_addrs = list(sig.get("elite_ver", {}).keys())
         all_whale_addrs    = list(sig.get("ver", {}).keys())
@@ -620,6 +856,8 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
 
         # v10: Get stop_loss_pct from signal strategy config
         sig_stop_loss = sig.get("stop_loss_pct")  # None for RF/DD, -0.35 for CB
+        market_url = _build_market_url(event_slug, resolved_slug)
+        entry_audit = _build_entry_audit(sig, cur, shares, bet, ev_info, now_t, S.env().paper_bankroll)
 
         pos = {
             "title":             title,
@@ -637,7 +875,10 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             "shares":            shares,
             "bet":               bet,
             "entry_ts":          now_t,
-            "entry_ts_str":      datetime.now().strftime("%H:%M:%S"),
+            "entry_ts_str":      buy_dtf["ts_str"],
+            "entry_ts_iso":      buy_dtf["ts_iso"],
+            "entry_date":        buy_dtf["date"],
+            "entry_time":        buy_dtf["time"],
             "whale_wallets":     all_whale_addrs,
             "elite_wallets":     elite_wallet_addrs,
             "elite_names":       elite_names,
@@ -661,6 +902,8 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             "volume":            sig["mkt"].get("volume", 0),
             "hrs_left":          sig["mkt"].get("hrs_left"),
             "end_date":          sig["mkt"].get("end_date", ""),
+            "market_url":        market_url,
+            "entry_audit":       entry_audit,
         }
 
         # v10: drift_discount strategy — store whale avg entry for reference
@@ -707,7 +950,15 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             "pnl_pct":       None,
             "reason":        f"AUTO_{tier}",
             "ts":            now_t,
-            "ts_str":        datetime.now().strftime("%H:%M:%S"),
+            "ts_str":        buy_dtf["ts_str"],
+            "ts_iso":        buy_dtf["ts_iso"],
+            "date":          buy_dtf["date"],
+            "time":          buy_dtf["time"],
+            "entry_ts":      now_t,
+            "entry_ts_str":  buy_dtf["ts_str"],
+            "entry_ts_iso":  buy_dtf["ts_iso"],
+            "entry_date":    buy_dtf["date"],
+            "entry_time":    buy_dtf["time"],
             "bankroll":      round(S.env().paper_bankroll, 4),
             "tier":          tier,
             "strategy":      strat,  # v10
@@ -719,6 +970,8 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             "score":         sig.get("score", 0),
             "n_confluence":  sig.get("n_confluence", 0),
             "is_conviction": is_conviction,
+            "market_url":    market_url,
+            "entry_audit":   entry_audit,
         }
         S.env().trade_history.append(trade_record)
 

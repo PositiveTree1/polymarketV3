@@ -8,5 +8,3 @@ __pycache__/
 !titan_config_*.json
 !titan_whales_*.json
 !titan_state_*.json
-*.txt
-!requirements.txt
