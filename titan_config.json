@@ -1,7 +1,7 @@
 {
     "debug": {
         "VERBOSE_HTTP": {
-            "value": true,
+            "value": false,
             "_description": "When true, logs every HTTP request+response received from Polymarket APIs (url, params, status, body excerpt). Use only for debugging — very noisy."
         }
     },

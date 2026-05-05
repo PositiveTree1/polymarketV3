@@ -2170,9 +2170,10 @@ def on_boot_complete():
 
         telegram_notifier.start_polling(handle_tg_message)
 
-        # Background server for dashboard
+        # Background server for dashboard + MCP (RAG resources)
         import http.server
         import json
+        import titan_mcp as _mcp
         class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             def log_message(self, format, *args):
                 pass
@@ -2182,14 +2183,14 @@ def on_boot_complete():
                     self.send_header('Content-Type', 'application/json')
                     self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
-                    
+
                     whales = sorted(_w().wallet_cache.values(), key=lambda x: x.get("score", 0), reverse=True)[:10]
                     signals = _last_signals[:15] if _last_signals else []
-                    
+
                     # Calculate equity
                     open_value = sum(pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0) for pos in _w().open_positions.values())
                     total_equity = _w().paper_bankroll + open_value
-                    
+
                     data = {
                         "last_update": int(time.time() * 1000),
                         "stats": {
@@ -2208,7 +2209,7 @@ def on_boot_complete():
                             {"question": s.get("title", ""), "outcome": s.get("outcome", ""), "suggested_bet": s.get("bet", 0), "current_price": s.get("cur", 0), "ev_edge": (s.get("ev_info") or {}).get("ev_pct", 0) / 100, "confluence_count": s.get("n_confluence", 0)} for s in signals
                         ],
                         "open_positions": [
-                            {"title": p.get("title", ""), "outcome": p.get("outcome", ""), "entry": p.get("entry_price", 0), "cur": p.get("cur_price", 0), "shares": p.get("shares", 0), "pnl": (p.get("cur_price",0) - p.get("entry_price",0)) * p.get("shares",0)} 
+                            {"title": p.get("title", ""), "outcome": p.get("outcome", ""), "entry": p.get("entry_price", 0), "cur": p.get("cur_price", 0), "shares": p.get("shares", 0), "pnl": (p.get("cur_price",0) - p.get("entry_price",0)) * p.get("shares",0)}
                             for p in sorted(_w().open_positions.values(), key=lambda x: x.get("entry_ts", 0), reverse=True)
                         ],
                         "history": [
@@ -2226,22 +2227,14 @@ def on_boot_complete():
                             self.wfile.write(f.read())
                     except Exception:
                         self.wfile.write(b"Dashboard HTML missing")
-                elif self.path == '/snapshot':
+                elif self.path.startswith('/mcp'):
+                    body = _mcp.dispatch(self.path).encode("utf-8")
                     self.send_response(200)
                     self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                    self.send_header('Content-Length', str(len(body)))
                     self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
-                    try:
-                        snapshot = build_ai_debug_snapshot(compressed=True)
-                        log_dir  = getattr(_TS, "LOG_DIR", "Logs")
-                        os.makedirs(log_dir, exist_ok=True)
-                        fname = os.path.join(log_dir, f"titan_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
-                        with open(fname, "w", encoding="utf-8") as f:
-                            f.write(snapshot)
-                        engine._log(f"📄 RAG snapshot saved to {fname}", "INFO")
-                        self.wfile.write(fname.encode("utf-8"))
-                    except Exception as e:
-                        self.wfile.write(f"ERROR: {e}".encode("utf-8"))
+                    self.wfile.write(body)
                 else:
                     self.send_error(404)
 
