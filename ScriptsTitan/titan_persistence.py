@@ -113,10 +113,14 @@ def _load_trading_state():
 
         raw = state.get("open_positions", {})
         env.open_positions = {}
+        skipped = 0
         for composite_key, pos in raw.items():
             parts = composite_key.split("|||", 1)
             if len(parts) == 2:
                 env.open_positions[(parts[0], parts[1])] = pos
+            else:
+                skipped += 1
+                S._log(f"📂 Skipped malformed position key: {composite_key!r}", "WARN")
 
         for key, pos in env.open_positions.items():
             cid = pos.get("cid", key[0])
@@ -125,9 +129,16 @@ def _load_trading_state():
             if ph:
                 pos["price_history"] = ph
 
+        n_pos = len(env.open_positions)
+        if n_pos:
+            S._log(f"📂 Loaded {n_pos} open position(s) from {STATE_FILE}", "INFO")
+        else:
+            reason = f" ({skipped} keys had bad format)" if skipped else " (none saved)"
+            S._log(f"📂 No open positions loaded from {STATE_FILE}{reason}", "INFO")
+
         S._log(
             f"📂 State loaded: bankroll=${env.paper_bankroll:.2f} | "
-            f"{len(env.trade_history)} trades | {len(env.open_positions)} open | "
+            f"{len(env.trade_history)} trades | {n_pos} open | "
             f"{len(env.cooldown_cids)} cooldowns | {len(env.watchlist)} watchlist",
             "INFO"
         )
@@ -179,7 +190,7 @@ def _rebuild_equity_from_trades(env):
 
 def _load_whale_roster():
     if not os.path.exists(WHALE_FILE):
-        S._log("📂 No whale roster found — starting fresh discovery", "INFO")
+        S._log(f"📂 No whale roster found at {WHALE_FILE} — starting fresh discovery", "INFO")
         return
     try:
         from titan_wallet import _whale_performance
@@ -191,7 +202,6 @@ def _load_whale_roster():
         hedge_entry = saved.pop("__hedge_wallets__", {})
         if hedge_entry.get("hedge_set"):
             restore_known_hedge_wallets(hedge_entry["hedge_set"])
-            S._log(f"📂 Hedge wallets restored: {len(hedge_entry['hedge_set'])}", "INFO")
 
         loaded = 0
         for addr, profile in saved.items():
@@ -206,6 +216,9 @@ def _load_whale_roster():
                 if profile.get("watchable"):
                     S.env().watchlist.add(addr)
 
-        S._log(f"📂 Whale roster: {loaded} loaded ({len(S.env().wallet_cache)} total)", "INFO")
+        if loaded:
+            S._log(f"📂 Loaded {loaded} whale(s) from {WHALE_FILE} ({len(S.env().wallet_cache)} total in cache)", "INFO")
+        else:
+            S._log(f"📂 No new whales loaded from {WHALE_FILE} (all already cached or file empty)", "INFO")
     except Exception as e:
         S._log(f"⚠ Whale load failed ({e})", "WARN")

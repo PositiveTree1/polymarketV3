@@ -10,39 +10,39 @@
 ### Phase 1 — Extract TitanAPI
 | # | Task | Status | Notes |
 |---|---|---|---|
-| 1.1 | Create `titan_api.py` with `TitanAPI` class skeleton + `@mcp_tool` decorator | ⬜ todo | |
-| 1.2 | Implement all read-only query methods (get_positions, get_signals, get_alerts, get_whales, get_pnl_summary, get_trade_history, get_config, get_logs) | ⬜ todo | Pull from `titan_state` / engine internals |
-| 1.3 | Implement lifecycle methods: `start`, `stop`, `status` | ⬜ todo | Wrap `titan_engine.start()` |
-| 1.4 | Implement action methods: `force_cycle`, `pause`, `resume`, `update_config` | ⬜ todo | |
-| 1.5 | Implement `get_snapshot()` — move `build_ai_debug_snapshot` from `titan_ui.py` | ⬜ todo | Remove from `titan_ui.py` after moving |
-| 1.6 | Implement `subscribe` / `unsubscribe` event bus (in-process callbacks) | ⬜ todo | Replaces `on_log_cb`, `on_cycle_complete_cb`, etc. |
-| 1.7 | Update `titan_mcp.py` to delegate to `TitanAPI` (interim — not deleted yet) | ⬜ todo | Keeps existing `/mcp?r=snapshot` working |
-| 1.8 | Smoke-test: engine starts and runs headlessly via `TitanAPI` with no Tkinter import | ⬜ todo | |
+| 1.1 | Create `titan_api.py` with `TitanAPI` class skeleton + `@mcp_tool` decorator | ✅ done | |
+| 1.2 | Implement all read-only query methods (get_positions, get_signals, get_alerts, get_whales, get_pnl_summary, get_trade_history, get_config, get_logs) | ✅ done | Pull from `titan_state` / engine internals |
+| 1.3 | Implement lifecycle methods: `start`, `stop`, `status` | ✅ done | Wrap `titan_engine.start()` |
+| 1.4 | Implement action methods: `force_cycle`, `pause`, `resume`, `update_config` | ✅ done | `force_cycle`/`pause`/`resume` stub-logged; `update_config` fully wired |
+| 1.5 | Implement `get_snapshot()` — move `build_ai_debug_snapshot` from `titan_ui.py` | ✅ done | Logic moved to `TitanAPI._build_snapshot*`; `titan_ui.py` delegates via `_snapshot_api` |
+| 1.6 | Implement `subscribe` / `unsubscribe` event bus (in-process callbacks) | ✅ done | Replaces `on_log_cb`, `on_cycle_complete_cb`, etc. |
+| 1.7 | Update `titan_mcp.py` to delegate to `TitanAPI` (interim — not deleted yet) | ✅ done | No longer imports `titan_ui`; calls `TitanAPI().get_snapshot()` |
+| 1.8 | Smoke-test: engine starts and runs headlessly via `TitanAPI` with no Tkinter import | ✅ done | Engine started, status() and get_snapshot() both returned correctly |
 
 ### Phase 2 — Decouple UI
 | # | Task | Status | Notes |
 |---|---|---|---|
-| 2.1 | Refactor `titan_ui.py`: accept API object via constructor, remove engine/state imports | ⬜ todo | Keep all `telegram_notifier.*` calls untouched |
-| 2.2 | Replace all direct `_TS.env().*` reads with `api.get_*()` calls | ⬜ todo | |
-| 2.3 | Replace `on_log_cb` / `on_cycle_complete_cb` / `on_position_open_cb` with `api.subscribe(...)` | ⬜ todo | Telegram callbacks rewired here, same calls |
-| 2.4 | Add `run_titan.py` entry point with `--mode ui` | ⬜ todo | |
-| 2.5 | Smoke-test: full UI session, all tabs functional, Telegram notifications firing | ⬜ todo | |
+| 2.1 | Refactor `titan_ui.py`: accept API object via constructor, remove engine/state imports | ✅ done | Wrapped in `run_ui(api: TitanAPI)`; `import titan_engine` and `import titan_state` removed |
+| 2.2 | Replace all direct `_TS.env().*` reads with `api.get_*()` calls | ✅ done | `_w()` helper removed; all state reads go through `api.*`; `fast_price_updater` keeps local `_ts_mut` for in-place mutation |
+| 2.3 | Replace `on_log_cb` / `on_cycle_complete_cb` / `on_position_open_cb` with `api.subscribe(...)` | ✅ done | `engine.start()` removed from `on_boot_complete`; replaced with `api.subscribe(...)` calls |
+| 2.4 | Add `run_titan.py` entry point with `--mode ui` | ✅ done | `run_titan.py` at repo root; calls `api.start()` then `run_ui(api)` |
+| 2.5 | Smoke-test: full UI session, all tabs functional, Telegram notifications firing | ✅ done | |
 
 ### Phase 3 — MCP server (Streamable HTTP)
 | # | Task | Status | Notes |
 |---|---|---|---|
-| 3.1 | Implement `titan_server.py`: `POST /mcp` dispatcher (`initialize`, `tools/list`, `tools/call`) | ⬜ todo | stdlib only |
-| 3.2 | Implement `GET /mcp` SSE stream with `MCP-Session-Id` and `Last-Event-ID` resumption | ⬜ todo | In-memory ring buffer for missed events |
-| 3.3 | Wire `TitanAPI` event bus → SSE broadcast to all connected clients | ⬜ todo | `titan/*` custom notifications |
-| 3.4 | Implement `resources/list` + `resources/read` (config, snapshot, logs, whales) | ⬜ todo | Replaces `titan_mcp.py` resources |
-| 3.5 | Implement `resources/subscribe` + `notifications/resources/updated` | ⬜ todo | |
-| 3.6 | Implement `prompts/list` + `prompts/get` (titan_analysis, titan_signal_review, titan_whale_brief) | ⬜ todo | |
-| 3.7 | Add optional API key bearer token auth (header `Authorization: Bearer <token>`) | ⬜ todo | Off by default for localhost |
-| 3.8 | Implement `titan_client.py`: duck-types `TitanAPI`, speaks MCP over HTTP, consumes SSE stream | ⬜ todo | |
-| 3.9 | Add `--mode server` and `--mode client` to `run_titan.py` | ⬜ todo | |
-| 3.10 | Delete `titan_mcp.py` | ⬜ todo | Only after 3.4 is confirmed working |
-| 3.11 | Smoke-test: Claude Desktop connects, discovers tools, calls `get_positions` and `force_cycle` | ⬜ todo | |
-| 3.12 | Smoke-test: `--mode client` GUI works identically to `--mode ui` | ⬜ todo | |
+| 3.1 | Implement `titan_server.py`: `POST /mcp` dispatcher (`initialize`, `tools/list`, `tools/call`) | ✅ done | stdlib only |
+| 3.2 | Implement `GET /mcp` SSE stream with `MCP-Session-Id` and `Last-Event-ID` resumption | ✅ done | In-memory ring buffer (500 events) |
+| 3.3 | Wire `TitanAPI` event bus → SSE broadcast to all connected clients | ✅ done | `titan/*` + `notifications/*` |
+| 3.4 | Implement `resources/list` + `resources/read` (config, snapshot, logs, whales) | ✅ done | Replaces `titan_mcp.py` resources |
+| 3.5 | Implement `resources/subscribe` + `notifications/resources/updated` | ✅ done | Sent on each cycle_complete |
+| 3.6 | Implement `prompts/list` + `prompts/get` (titan_analysis, titan_signal_review, titan_whale_brief) | ✅ done | |
+| 3.7 | Add optional API key bearer token auth (header `Authorization: Bearer <token>`) | ✅ done | Off by default for localhost |
+| 3.8 | Implement `titan_client.py`: duck-types `TitanAPI`, speaks MCP over HTTP, consumes SSE stream | ✅ done | |
+| 3.9 | Add `--mode server` and `--mode client` to `run_titan.py` | ✅ done | `--mode client` delegates to TitanClient (3.8) |
+| 3.10 | Delete `titan_mcp.py` | ✅ done | Removed legacy `/mcp` route from dashboard handler in `titan_ui.py` |
+| 3.11 | Smoke-test: Claude Desktop connects, discovers tools, calls `get_positions` and `force_cycle` | ✅ done | |
+| 3.12 | Smoke-test: `--mode client` GUI works identically to `--mode ui` | ✅ done | |
 
 ### Phase 4 — Polish
 | # | Task | Status | Notes |
