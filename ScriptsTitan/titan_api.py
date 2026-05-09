@@ -26,25 +26,40 @@ def mcp_tool(
 # ── TitanAPI ──────────────────────────────────────────────────────────────────
 
 class TitanAPI:
-    def __init__(self) -> None:
+    def __init__(self, enable_telegram: bool = False) -> None:
         self._running: bool = False
         self._start_time: float | None = None
         self._subscribers: dict[str, list[Callable]] = defaultdict(list)
         self._last_signals: list[dict] = []
         self._last_rejects: list[str] = []
+        self._telegram = None
+        self._telegram_enabled = False
+        if enable_telegram:
+            try:
+                import titan_telegram as _telegram
+                self._telegram = _telegram.TelegramNotifier()
+                self._telegram_enabled = True
+            except Exception:
+                self._telegram = None
+                self._telegram_enabled = False
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self) -> None:
+        if self._running:
+            return
         import titan_engine as _engine
         _engine.start(
             log_callback=self._on_log,
             position_open_cb=self._on_position_open,
             position_close_cb=self._on_position_close,
             cycle_cb=self._on_cycle,
+            heartbeat_cb=self._on_heartbeat,
         )
         self._running = True
         self._start_time = time.time()
+        self._load_persisted_signals_rejects()
+        self._send_telegram_boot_status()
 
     def stop(self) -> None:
         self._running = False
@@ -148,6 +163,29 @@ class TitanAPI:
     )
     def get_signals(self, min_score: float = 0.0) -> list[dict]:
         return [s for s in self._last_signals if s.get("score", 0) >= min_score]
+
+    @mcp_tool(
+        description=(
+            "Returns historical signal records from the SQLite store. "
+            "Each row includes the cycle snapshot timestamp plus the full signal payload."
+        ),
+        input_schema={
+            "limit": {"type": "integer", "description": "Max number of historical signal rows to return (default 200)"},
+            "min_score": {"type": "number", "description": "Minimum signal score filter."},
+            "cid": {"type": "string", "description": "Optional market CID filter."},
+        },
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def get_signal_history(self, limit: int = 200, min_score: float = 0.0, cid: str | None = None) -> list[dict]:
+        import titan_db as _DB
+        return _DB.load_signal_history(limit=limit, min_score=min_score, cid=cid)
+
+    @mcp_tool(
+        description="Returns recent signal rejection reasons from the last engine cycles.",
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def get_rejects(self) -> list[str]:
+        return list(self._last_rejects)
 
     @mcp_tool(
         description="Returns recent system alert log entries.",
@@ -347,11 +385,55 @@ class TitanAPI:
             except Exception:
                 pass
 
+    def _notify_telegram(self, method: str, *args) -> None:
+        if not self._telegram_enabled or self._telegram is None:
+            return
+        import threading
+        fn = getattr(self._telegram, method, None)
+        if fn is None:
+            return
+        threading.Thread(target=fn, args=args, daemon=True).start()
+
+    def _send_telegram_boot_status(self) -> None:
+        if not self._telegram_enabled or self._telegram is None:
+            return
+        import threading
+        import titan_state as _TS
+
+        def _run() -> None:
+            try:
+                ok = bool(self._telegram.notify_boot())
+            except Exception as exc:
+                _TS._log(f"Telegram boot alert failed: {exc}", "WARN")
+                return
+            if ok:
+                _TS._log("Telegram boot alert sent", "INFO")
+            else:
+                _TS._log("Telegram boot alert failed", "WARN")
+
+        threading.Thread(target=_run, daemon=True).start()
+
     # ── engine callbacks ──────────────────────────────────────────────────────
 
+    def _load_persisted_signals_rejects(self) -> None:
+        try:
+            import titan_db as DB
+            self._last_signals = DB.load_latest_signals(200)
+            self._last_rejects = DB.load_latest_rejects(50)
+            import titan_state as _S
+            _S._log(f"📂 Restored {len(self._last_signals)} signal(s) and {len(self._last_rejects)} reject(s) from DB", "INFO")
+        except Exception as e:
+            import titan_state as _S
+            _S._log(f"⚠ Failed to restore signals/rejects from DB: {e}", "WARN")
+
     def _on_cycle(self, signals, wallets, rejects, trades) -> None:
+        import titan_db as DB
+        ts = time.time()
         self._last_signals = signals or []
+        if signals:
+            DB.save_signals(signals, ts)
         if rejects:
+            DB.save_rejects(rejects, ts)
             for r in reversed(rejects):
                 if r in self._last_rejects:
                     self._last_rejects.remove(r)
@@ -364,14 +446,22 @@ class TitanAPI:
             "trades": trades,
         })
 
+    def _on_heartbeat(self, payload: dict) -> None:
+        self._emit("titan/heartbeat", payload)
+
     def _on_log(self, msg: str, level: str = "INFO") -> None:
         self._emit("notifications/message", {"level": level, "data": msg})
+        if str(level).upper() in {"ERR", "ERROR", "CRITICAL"}:
+            self._notify_telegram("notify_error", msg)
 
     def _on_position_open(self, pos: dict) -> None:
         self._emit("titan/position_open", pos)
+        self._notify_telegram("notify_buy", pos)
 
-    def _on_position_close(self, pos: dict) -> None:
-        self._emit("titan/position_close", pos)
+    def _on_position_close(self, pos: dict, pnl_usdc: float, pnl_pct: float) -> None:
+        payload = {"pos": pos, "pnl_usdc": pnl_usdc, "pnl_pct": pnl_pct}
+        self._emit("titan/position_close", payload)
+        self._notify_telegram("notify_sell", pos, pnl_usdc, pnl_pct)
 
     # ── snapshot builders (moved from titan_ui.py) ────────────────────────────
 

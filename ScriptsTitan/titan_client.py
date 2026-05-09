@@ -28,7 +28,6 @@ class TitanClient:
 
         self._ready = threading.Event()
         threading.Thread(target=self._init_async, daemon=True, name="titan-init").start()
-        self._start_sse()
 
     # ── internal helpers ──────────────────────────────────────────────────────
 
@@ -132,16 +131,25 @@ class TitanClient:
                 time.sleep(3)
 
     def _sse_connect(self) -> None:
+        import http.client, urllib.parse
+        parsed = urllib.parse.urlparse(self._base_url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
         headers = self._headers({"Accept": "text/event-stream"})
         if self._last_event_id:
             headers["Last-Event-ID"] = str(self._last_event_id)
-        req = urllib.request.Request(f"{self._base_url}/mcp", headers=headers, method="GET")
-        with urllib.request.urlopen(req, timeout=None) as resp:
+        conn = http.client.HTTPConnection(host, port, timeout=None)
+        try:
+            conn.request("GET", parsed.path or "/mcp", headers=headers)
+            resp = conn.getresponse()
+            if resp.status != 200:
+                raise RuntimeError(f"SSE HTTP {resp.status}")
             buf = ""
-            for raw in resp:
-                if not self._sse_running:
-                    return
-                line = raw.decode("utf-8", errors="replace").rstrip("\n").rstrip("\r")
+            while self._sse_running:
+                raw = resp.fp.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                 if line.startswith("id:"):
                     try:
                         self._last_event_id = int(line[3:].strip())
@@ -156,6 +164,8 @@ class TitanClient:
                     except json.JSONDecodeError:
                         pass
                     buf = ""
+        finally:
+            conn.close()
 
     def _dispatch_notification(self, msg: dict) -> None:
         method = msg.get("method", "")
@@ -169,7 +179,7 @@ class TitanClient:
     # ── TitanAPI duck-typed interface ─────────────────────────────────────────
 
     def start(self) -> None:
-        pass  # server already running
+        self._start_sse()
 
     def stop(self) -> None:
         self._sse_running = False
@@ -185,6 +195,15 @@ class TitanClient:
 
     def get_signals(self, min_score: float = 0.0) -> list[dict]:
         return self._call_tool("get_signals", {"min_score": min_score})  # type: ignore[return-value]
+
+    def get_signal_history(self, limit: int = 200, min_score: float = 0.0, cid: str | None = None) -> list[dict]:
+        args: dict = {"limit": limit, "min_score": min_score}
+        if cid:
+            args["cid"] = cid
+        return self._call_tool("get_signal_history", args)  # type: ignore[return-value]
+
+    def get_rejects(self) -> list[str]:
+        return self._call_tool("get_rejects")  # type: ignore[return-value]
 
     def get_alerts(self) -> list[dict]:
         return self._call_tool("get_alerts")  # type: ignore[return-value]

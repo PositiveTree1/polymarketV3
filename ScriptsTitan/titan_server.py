@@ -465,6 +465,9 @@ def _wire_events(api: TitanAPI) -> None:
             "method": "titan/cycle_complete",
             "params": {
                 "signals": payload.get("signals", []),
+                "wallets": payload.get("wallets", []),
+                "rejects": payload.get("rejects", []),
+                "trades": payload.get("trades", []),
                 "cycle": None,
                 "elapsed_ms": None,
             },
@@ -478,9 +481,10 @@ def _wire_events(api: TitanAPI) -> None:
             })
 
     api.subscribe("notifications/message", _on_log)
-    api.subscribe("titan/cycle_complete", _on_cycle)
-    api.subscribe("titan/position_open",  _notify("titan/position_open"))
-    api.subscribe("titan/position_close", _notify("titan/position_close"))
+    api.subscribe("titan/cycle_complete",  _on_cycle)
+    api.subscribe("titan/heartbeat",       _notify("titan/heartbeat"))
+    api.subscribe("titan/position_open",   _notify("titan/position_open"))
+    api.subscribe("titan/position_close",  _notify("titan/position_close"))
 
 
 # ── server entry ──────────────────────────────────────────────────────────────
@@ -514,6 +518,6 @@ if __name__ == "__main__":
     p.add_argument("--token", default=None, help="Optional bearer token for auth")
     args = p.parse_args()
 
-    _api = TitanAPI()
+    _api = TitanAPI(enable_telegram=True)
     _api.start()
     run_server(_api, host=args.host, port=args.port, token=args.token)

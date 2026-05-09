@@ -15,6 +15,22 @@ def init_db(db_path: str):
     _DB_PATH = db_path
     with _connect() as cx:
         cx.executescript("""
+            CREATE TABLE IF NOT EXISTS signals (
+                id          INTEGER  PRIMARY KEY AUTOINCREMENT,
+                recorded_at DATETIME NOT NULL,
+                ts          REAL     NOT NULL,
+                data        TEXT     NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals (ts);
+
+            CREATE TABLE IF NOT EXISTS rejects (
+                id          INTEGER  PRIMARY KEY AUTOINCREMENT,
+                recorded_at DATETIME NOT NULL,
+                ts          REAL     NOT NULL,
+                reason      TEXT     NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_rejects_ts ON rejects (ts);
+
             CREATE TABLE IF NOT EXISTS price_history (
                 cid      TEXT    NOT NULL,
                 outcome  TEXT    NOT NULL,
@@ -147,7 +163,6 @@ def load_watchlist() -> set:
 
 
 def remove_from_watchlist(addresses: set):
-    """Remove addresses from the watchlist."""
     if not addresses or not _DB_PATH:
         return
     with _connect() as cx:
@@ -155,3 +170,80 @@ def remove_from_watchlist(addresses: set):
             "DELETE FROM watchlist WHERE address = ?",
             [(addr.lower(),) for addr in addresses],
         )
+
+
+# ── signals ──────────────────────────────────────────────────────────────────
+
+def save_signals(signals: list[dict], ts: float):
+    if not _DB_PATH:
+        return
+    import json
+    now = _ts_to_dt(ts)
+    with _connect() as cx:
+        cx.executemany(
+            "INSERT INTO signals (recorded_at, ts, data) VALUES (?, ?, ?)",
+            [(now, ts, json.dumps(s, default=str)) for s in signals],
+        )
+
+
+def save_rejects(rejects: list[str], ts: float):
+    if not _DB_PATH:
+        return
+    now = _ts_to_dt(ts)
+    with _connect() as cx:
+        cx.executemany(
+            "INSERT INTO rejects (recorded_at, ts, reason) VALUES (?, ?, ?)",
+            [(now, ts, r) for r in rejects],
+        )
+
+
+def load_latest_signals(limit: int = 200) -> list[dict]:
+    if not _DB_PATH:
+        return []
+    import json
+    with _connect() as cx:
+        latest_ts_row = cx.execute("SELECT MAX(ts) FROM signals").fetchone()
+        latest_ts = latest_ts_row[0] if latest_ts_row else None
+        if latest_ts is None:
+            return []
+        rows = cx.execute(
+            "SELECT data FROM signals WHERE ts = ? ORDER BY id ASC LIMIT ?",
+            (latest_ts, limit),
+        ).fetchall()
+    return [json.loads(r[0]) for r in rows]
+
+
+def load_signal_history(limit: int = 200, min_score: float = 0.0, cid: str | None = None) -> list[dict]:
+    if not _DB_PATH:
+        return []
+    import json
+    query = (
+        "SELECT recorded_at, ts, data FROM signals "
+        "ORDER BY id DESC LIMIT ?"
+    )
+    with _connect() as cx:
+        rows = cx.execute(query, (limit,)).fetchall()
+
+    out: list[dict] = []
+    for recorded_at, snapshot_ts, data in reversed(rows):
+        sig = json.loads(data)
+        if sig.get("score", 0) < min_score:
+            continue
+        if cid and sig.get("cid") != cid:
+            continue
+        out.append({
+            "recorded_at": recorded_at,
+            "snapshot_ts": snapshot_ts,
+            "signal": sig,
+        })
+    return out
+
+
+def load_latest_rejects(limit: int = 200) -> list[str]:
+    if not _DB_PATH:
+        return []
+    with _connect() as cx:
+        rows = cx.execute(
+            "SELECT reason FROM rejects ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [r[0] for r in reversed(rows)]

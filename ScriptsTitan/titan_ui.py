@@ -184,21 +184,29 @@ def run_ui(api: TitanBackend) -> None:
     title_f = font.Font(family="Courier", size=12, weight="bold")
     mono_xs = font.Font(family="Courier", size=7)
     
-    # ── Header ────────────────────────────────────────────────────────────────────
-    hdr = tk.Frame(root, bg="#0a0a1a", pady=5)
-    hdr.pack(fill="x")
-    
+    # ── Header row 1: title + subtitle ───────────────────────────────────────────
+    hdr1 = tk.Frame(root, bg="#0a0a1a", pady=3)
+    hdr1.pack(fill="x")
+
     app_title_var    = tk.StringVar(value="🐳 TITAN — Whale Mirror Engine")
     app_subtitle_var = tk.StringVar(value="v10 CONVICTION-ONLY | 2+ Elites | 20-72¢ Zone | -30% Stop | ENGINE ACTIVE")
-    
-    tk.Label(hdr, textvariable=app_title_var,
+
+    tk.Label(hdr1, textvariable=app_title_var,
              fg="#00ff88", bg="#0a0a1a", font=title_f).pack(side="left", padx=12)
-    tk.Label(hdr, textvariable=app_subtitle_var,
-             fg="#1a3a2a", bg="#0a0a1a", font=mono).pack(side="left")
-    
-    sf = tk.Frame(hdr, bg="#0a0a1a")
-    sf.pack(side="right", padx=12)
-    
+    tk.Label(hdr1, textvariable=app_subtitle_var,
+             fg="#2a5a3a", bg="#0a0a1a", font=mono).pack(side="left")
+
+    # ── Header row 2: stats bar ───────────────────────────────────────────────────
+    hdr2 = tk.Frame(root, bg="#0a0a1a", pady=2)
+    hdr2.pack(fill="x")
+
+    sf = tk.Frame(hdr2, bg="#0a0a1a")
+    sf.pack(side="left", padx=6)
+
+    hb_var   = tk.StringVar(value="⬤ waiting…")
+    hb_label = tk.Label(sf, textvariable=hb_var, fg="#667788", bg="#0a0a1a", font=mono, padx=6)
+    hb_label.pack(side="left")
+
     cycle_var    = tk.StringVar(value="Cycle: 0")
     ver_var      = tk.StringVar(value="Verified: —")
     elite_var    = tk.StringVar(value="Elite: 0")
@@ -208,7 +216,7 @@ def run_ui(api: TitanBackend) -> None:
     pos_var      = tk.StringVar(value="Pos: —")
     status_var   = tk.StringVar(value="⏳ Booting…")
     cooldown_var = tk.StringVar(value="CD: 0")
-    
+
     for v, c in [
         (cycle_var,    "#556677"),
         (ver_var,      "#00cc77"),
@@ -424,6 +432,23 @@ def run_ui(api: TitanBackend) -> None:
     _live_subtitle_var = tk.StringVar(value="Follow The Whale: BUY when whale buys, SELL when whale sells | connecting...")
     tk.Label(tab_live, textvariable=_live_subtitle_var,
              fg="#335544", bg="#080810", font=mono, pady=2).pack()
+
+    sig_btn_bar = tk.Frame(tab_live, bg="#080810")
+    sig_btn_bar.pack(fill="x", padx=4, pady=(0,4))
+
+    _sig_hist_btn_var = tk.StringVar(value="📜 SHOW HISTORY")
+
+    def _toggle_signal_history():
+        _show_signal_history[0] = not _show_signal_history[0]
+        _sig_hist_btn_var.set("📂 SHOW LIVE" if _show_signal_history[0] else "📜 SHOW HISTORY")
+        if not _show_signal_history[0]:
+            _signal_history_cache[0] = []
+        _pending_update[0] = True
+
+    tk.Button(sig_btn_bar, textvariable=_sig_hist_btn_var, bg="#1a1a00", fg="#ffcc44",
+              font=mono_sm, command=_toggle_signal_history).pack(side="left", padx=4, pady=2)
+    tk.Label(sig_btn_bar, text="Current cycle or recent DB history", fg="#334455",
+             bg="#080810", font=mono_sm).pack(side="left", padx=8)
     
     
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -1412,34 +1437,70 @@ def run_ui(api: TitanBackend) -> None:
     # ═══════════════════════════════════════════════════════════════════════════════
     #  RENDERERS
     # ═══════════════════════════════════════════════════════════════════════════════
-    _last_signals   = []
-    _last_wallets   = {}
-    _last_rejects   = []
-    _last_trades    = []
-    _cycle_num      = [0]
-    _pending_update = [False]
+    _last_signals        = []
+    _last_wallets        = {}
+    _last_rejects        = []
+    _last_trades         = []
+    _cycle_num           = [0]
+    _pending_update      = [False]
+    _show_signal_history = [False]
+    _signal_history_cache = [[]]
+    _last_hb_ts          = [0.0]
+    _HB_DEAD_SECS = 60
+    _HB_BLINK_MS  = 600
+
+    def _hb_tick():
+        try:
+            elapsed = time.time() - _last_hb_ts[0]
+            if _last_hb_ts[0] == 0.0:
+                hb_var.set("⬤")
+                hb_label.configure(fg="#667788")
+            elif elapsed > _HB_DEAD_SECS:
+                hb_var.set("⬤")
+                hb_label.configure(fg="#ff2222")
+            else:
+                hb_var.set("⬤")
+                hb_label.configure(fg="#00ff88")
+        except Exception:
+            pass
+        root.after(_HB_BLINK_MS, _hb_tick)
+    def _on_hb(_p):
+        _last_hb_ts[0] = time.time()
+    api.subscribe("titan/heartbeat", _on_hb)
+    api.start()
+    root.after(_HB_BLINK_MS, _hb_tick)
     _show_closed    = [False]
     
     
     def render_signals(signals):
         sig_tree.delete(*sig_tree.get_children())
-        for s in signals:
-            hft_tag  = "⚡" if s.get("is_hft") else ""
-            exit_tag = " ⚠EXIT" if s.get("exits_detected") else ""
-            mode_str = f"{hft_tag}{s['window'].upper()}{exit_tag}"
-            full_title = f"{s['title']}  [{s['outcome']}]"
-            sig_tree.insert("", "end", values=(
-                f"{s['score']:.0f}",
-                full_title[:90],
-                s["outcome"],
-                f"${s['avg_entry']:.4f}",
-                f"${s['cur']:.4f}",
-                f"{s['drift']*100:+.1f}%",
-                f"{s['age_min']:.0f}m",
-                f"${s['total_flow']:,.0f}",
-                f"{s['n_ver']}/{s['n_total']}",
-                mode_str,
-            ), tags=(s["tier"],))
+        for row in signals:
+            try:
+                if isinstance(row, dict) and "signal" in row:
+                    s = row.get("signal") or {}
+                    recorded_at = row.get("recorded_at", "")
+                    hist_suffix = f" HIST {recorded_at[11:16]}" if isinstance(recorded_at, str) and len(recorded_at) >= 16 else " HIST"
+                else:
+                    s = row
+                    hist_suffix = ""
+                hft_tag  = "⚡" if s.get("is_hft") else ""
+                exit_tag = " ⚠EXIT" if s.get("exits_detected") else ""
+                mode_str = f"{hft_tag}{s.get('window','?').upper()}{exit_tag}{hist_suffix}"
+                full_title = f"{s.get('title','?')}  [{s.get('outcome','')}]"
+                sig_tree.insert("", "end", values=(
+                    f"{s.get('score',0):.0f}",
+                    full_title[:90],
+                    s.get("outcome", ""),
+                    f"${s.get('avg_entry',0):.4f}",
+                    f"${s.get('cur',0):.4f}",
+                    f"{(s.get('drift') or 0)*100:+.1f}%",
+                    f"{s.get('age_min',0):.0f}m",
+                    f"${s.get('total_flow',0):,.0f}",
+                    f"{s.get('n_ver',0)}/{s.get('n_total',0)}",
+                    mode_str,
+                ), tags=(s.get("tier", ""),))
+            except Exception:
+                pass
     
     
     def render_alerts(signals, wallets):
@@ -1855,38 +1916,67 @@ def run_ui(api: TitanBackend) -> None:
         try:
             data: dict = {}
             try: data["pnl"]      = api.get_pnl_summary()
-            except Exception: data["pnl"] = {}
+            except Exception as e: data["pnl"] = {}; log(f"[fetch pnl] {e}", "ERR")
             try: data["logs"]     = api.get_logs(lines=600)
-            except Exception: data["logs"] = ""
+            except Exception as e: data["logs"] = ""; log(f"[fetch logs] {e}", "ERR")
             try: data["pos"]      = _open_pos_dict()
-            except Exception: data["pos"] = {}
+            except Exception as e: data["pos"] = {}; log(f"[fetch pos] {e}", "ERR")
             try: data["wallets"]  = _wallet_cache()
-            except Exception: data["wallets"] = {}
+            except Exception as e: data["wallets"] = {}; log(f"[fetch wallets] {e}", "ERR")
+            if not _show_signal_history[0]:
+                try:
+                    data["signals_live"] = api.get_signals()
+                except Exception as e: data["signals_live"] = []; log(f"[fetch live signals] {e}", "ERR")
+            if _show_signal_history[0] and (_pending_update[0] or not _signal_history_cache[0]):
+                try:
+                    data["signal_history"] = api.get_signal_history(limit=200)
+                except Exception as e: data["signal_history"] = []; log(f"[fetch signal history] {e}", "ERR")
             if _show_closed[0]:
                 try: data["closed"] = api.get_closed_positions(limit=200)
-                except Exception: data["closed"] = []
+                except Exception as e: data["closed"] = []; log(f"[fetch closed] {e}", "ERR")
             root.after(0, lambda: _ui_apply(data))
         finally:
             _fetch_running[0] = False
 
     def _ui_apply(data: dict):
+        try:
+            _ui_apply_inner(data)
+        except Exception as e:
+            import traceback
+            log(f"[_ui_apply crash] {e}\n{traceback.format_exc()[:400]}", "ERR")
+
+    def _ui_apply_inner(data: dict):
         pnl     = data.get("pnl", {})
         logs    = data.get("logs", "")
         pos     = data.get("pos", {})
         wallets = data.get("wallets", {})
         closed  = data.get("closed", [])
+        signals_live = data.get("signals_live")
+        signal_history = data.get("signal_history", [])
+        if signals_live is not None:
+            _last_signals[:] = signals_live
+        if signal_history:
+            _signal_history_cache[0] = signal_history
+
+        signals = signals_live if (not _show_signal_history[0] and signals_live is not None) else _last_signals
+        signal_rows = _signal_history_cache[0] if _show_signal_history[0] else signals
+
+        try:
+            render_signals(signal_rows)
+        except Exception as _e:
+            log(f"[render_signals error] {_e}", "ERR")
+
+        sig_var.set(f"Sigs: {len(signal_rows)}")
 
         if _pending_update[0]:
             _pending_update[0] = False
             _cycle_num[0] += 1
-            signals = _last_signals
             _wallets_from_cycle = _last_wallets
             rejects = _last_rejects
             trades  = _last_trades
             n_ver   = sum(1 for p in _wallets_from_cycle.values() if p.get("verified"))
             n_elite = sum(1 for p in wallets.values() if p.get("elite"))
             for fn in (
-                lambda: render_signals(signals),
                 lambda: render_alerts(signals, _wallets_from_cycle),
                 lambda: render_analysis(signals, trades, _wallets_from_cycle),
                 lambda: render_diagnostics(rejects, trades, _wallets_from_cycle),
@@ -1895,7 +1985,6 @@ def run_ui(api: TitanBackend) -> None:
                 except Exception: pass
             ver_var.set(f"Ver: {n_ver}")
             elite_var.set(f"Elite: {n_elite}")
-            sig_var.set(f"Sigs: {len(signals)}")
 
         try: render_open_positions()
         except Exception as _e: log(f"[render_open_positions error] {_e}", "ERR")
@@ -2025,6 +2114,23 @@ def run_ui(api: TitanBackend) -> None:
 
         def _boot_log():
             try:
+                global _last_signals, _last_rejects, _last_wallets
+                try:
+                    _last_signals = api.get_signals() or []
+                except Exception:
+                    pass
+                try:
+                    _last_rejects = api.get_rejects() or []
+                except Exception:
+                    pass
+                try:
+                    whales = api.get_whales() or []
+                    _last_wallets = {w["wallet"]: {k: v for k, v in w.items() if k != "wallet"} for w in whales}
+                except Exception:
+                    pass
+                root.after(0, lambda: log(f"📂 Boot signals: {len(_last_signals)} signal(s), {len(_last_rejects)} reject(s), {len(_last_wallets)} whale(s)", "INFO"))
+                if _last_signals or _last_rejects:
+                    _pending_update[0] = True
                 n_pos   = len(api.get_positions())
                 n_whale = len(api.get_whales())
                 eq_hist = api.get_pnl_summary().get("equity_history", [])

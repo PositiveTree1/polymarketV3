@@ -627,6 +627,9 @@ def _normalise_trade(t: dict, wallet: str, hot_cutoff: float, warm_cutoff: float
 # ─────────────────────────────────────────────────────────────────────────────
 #  PER-WALLET POLLING
 # ─────────────────────────────────────────────────────────────────────────────
+_poll_limit_warned: set[str] = set()
+
+
 def _poll_wallet_trades(wallet: str, limit: int, min_cash: float,
                         hot_cutoff: float, warm_cutoff: float,
                         source: str, is_elite: bool = False,
@@ -642,7 +645,11 @@ def _poll_wallet_trades(wallet: str, limit: int, min_cash: float,
     if not data or not isinstance(data, list):
         return []
     if len(data) >= limit:
-        S._log(f"⚠ Poll limit hit for {wallet[:14]}… ({len(data)}/{limit})", "DIAG")
+        if wallet not in _poll_limit_warned:
+            _poll_limit_warned.add(wallet)
+            S._log(f"⚠ Poll limit hit for {wallet[:14]}… ({len(data)}/{limit}) — trades may be truncated", "WARN")
+    else:
+        _poll_limit_warned.discard(wallet)
 
     prof    = S.env().wallet_cache.get(wallet, {})
     name    = prof.get("name", wallet[:10] + "…")

@@ -142,6 +142,7 @@ on_log            = None
 on_position_open  = None
 on_position_close = None
 on_cycle_complete = None
+on_heartbeat      = None
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────

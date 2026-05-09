@@ -25,6 +25,7 @@ TITAN watches the Polymarket CLOB feed 24/7, identifies wallets with a proven tr
 - **Hot-reload config** — Edit parameters in-app and they take effect on the next cycle, no restart needed
 - **Telegram bot** — Optional remote monitoring: get P&L screenshots, open a web dashboard, or ask questions in plain text
 - **Web dashboard** — JSON API + HTML page served locally, tunnelable via Cloudflare
+- **MCP server** — Exposes the full engine as a standard [Model Context Protocol](https://modelcontextprotocol.io) server so any MCP-aware LLM client (Claude Desktop, Cursor, custom agents) can query and control TITAN natively
 
 ---
 
@@ -72,14 +73,50 @@ pip install -r ScriptsTitan/requirements.txt
 
 ## Quick Start
 
+TITAN has three run modes, all launched from the repo root via `run_titan.py`:
+
+### Mode 1 — Desktop UI (in-process)
+
 ```bash
-# From the repo root with venv active:
-python ScriptsTitan/titan_ui.py
+python run_titan.py --mode ui
 ```
 
-A boot screen will appear, then the main dashboard opens automatically.
+Starts the engine and opens the Tkinter dashboard in the same process. The UI talks to the engine via a direct Python reference — zero latency, no network.
 
-> On first run, TITAN starts with an empty whale roster and will discover wallets over the first few cycles. Give it 5–10 minutes to build up its elite list before expecting signals.
+### Mode 2 — Headless MCP server
+
+```bash
+python run_titan.py --mode server
+# Optional:
+python run_titan.py --mode server --port 8080 --token mysecrettoken
+```
+
+Starts the engine without any UI and exposes it as a standard MCP server on `http://127.0.0.1:8765`. Any MCP client (Claude Desktop, Cursor, a custom agent) can connect, discover tools, and call them:
+
+```
+POST /mcp   ← JSON-RPC 2.0 requests (tools/list, tools/call, resources/read, …)
+GET  /mcp   ← SSE stream for server-initiated notifications (price ticks, cycle events, …)
+```
+
+**To add TITAN to Claude Desktop**, add this to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "titan": {
+      "url": "http://127.0.0.1:8765/mcp"
+    }
+  }
+}
+```
+
+### Mode 3 — Remote UI (client mode)
+
+```bash
+python run_titan.py --mode client --url http://127.0.0.1:8765
+```
+
+Opens the full Tkinter dashboard but connects to a **remote** `--mode server` process over HTTP instead of running the engine locally. The UI is identical to `--mode ui`; only the data source changes. Useful for running the engine on a headless server and viewing it from your desktop.
 
 ---
 
@@ -88,6 +125,7 @@ A boot screen will appear, then the main dashboard opens automatically.
 All settings live in the repo-root `titan_config.json`. You can edit it:
 - **In-app**: open the **CONFIG** tab, edit the JSON, click **SAVE & RELOAD**
 - **Manually**: edit the file directly — changes are picked up on next hot-reload or restart
+- **Via MCP**: call the `update_config` tool with a patch dict (unknown keys and nested values are rejected for safety)
 
 ### Key parameters
 
@@ -121,6 +159,31 @@ All settings live in the repo-root `titan_config.json`. You can edit it:
 | 🔍 DIAG | Why signals were rejected, active cooldowns, failed wallet scores |
 | 📜 LOG | Full system log + **"Copy Snapshot for AI"** button |
 | ⚙ CONFIG | In-app JSON editor with parameter guide panel |
+
+---
+
+## MCP Tools
+
+When running in `--mode server`, the following tools are available to any MCP client:
+
+| Tool | Read/Write | Description |
+|---|---|---|
+| `get_status` | read | Engine health, uptime, cycle count, error count |
+| `get_portfolio_overview` | read | Equity, bankroll, session P&L, position count — best first call |
+| `get_positions` | read | Open positions. `brief=true` (default) returns clean summary; `brief=false` returns full dict |
+| `get_signals` | read | Whale-triggered signals. Filter by `min_score` (typical range 0–100) |
+| `get_alerts` | read | Recent WARN/ERROR/ALERT log entries |
+| `get_whales` | read | Elite whale roster with performance metrics |
+| `get_pnl_summary` | read | Bankroll, P&L, equity curve tail, cooldown/watchlist state |
+| `get_trade_history` | read | Full buy/sell history |
+| `get_closed_positions` | read | Closed positions enriched with price history |
+| `get_recent_errors` | read | Structured ERROR/CRITICAL log events |
+| `get_config` | read | Current live config |
+| `get_logs` | read | Raw log tail |
+| `get_snapshot` | read | Full engine state snapshot (AI-digestible, compressed by default) |
+| `update_config` | write | Patch config. Rejects unknown keys and nested values. Supports `dry_run=true`. |
+
+Push notifications are streamed over SSE (`GET /mcp`): price ticks, cycle completions, position opens/closes, alerts.
 
 ---
 
@@ -179,20 +242,25 @@ The bot also pushes notifications on boot, every buy, every sell, and on errors.
 
 ## Architecture
 
-> Full context document for AI sessions and onboarding: [TITAN_CONTEXT.md](TITAN_CONTEXT.md)
+```
+run_titan.py              ← Entry point. --mode ui | server | client
+ScriptsTitan/
+  titan_api.py            ← Single public interface to all engine functionality
+  titan_server.py         ← MCP Streamable HTTP server (POST+GET /mcp, SSE)
+  titan_client.py         ← MCP client shim — duck-types TitanAPI, speaks HTTP
+  titan_ui.py             ← Tkinter dashboard. Accepts TitanAPI or TitanClient.
+  titan_engine.py         ← Main orchestration. 15s loop + 3s HFT loop.
+  titan_signals.py        ← Signal building + multi-strategy scoring.
+  titan_wallet.py         ← Wallet fetching, scoring, elite discovery.
+  titan_market.py         ← Market metadata + CLOB price feeds.
+  titan_trader.py         ← Paper trade execution + Kelly sizing.
+  titan_state.py          ← Shared singleton state (positions, bankroll, logs).
+  titan_config.py         ← Config loader + hot-reload.
+  titan_persistence.py    ← Save/load state & whale roster to disk.
+  titan_telegram.py       ← Optional Telegram bot.
+```
 
-```
-titan_ui.py          ← Entry point. Tkinter GUI + boot screen.
-titan_engine.py      ← Main orchestration. 15s loop + 3s HFT loop.
-titan_signals.py     ← Signal building + multi-strategy scoring.
-titan_wallet.py      ← Wallet fetching, scoring, elite discovery.
-titan_market.py      ← Market metadata + CLOB price feeds.
-titan_trader.py      ← Paper trade execution + Kelly sizing.
-titan_state.py       ← Shared singleton state (positions, bankroll, logs).
-titan_config.py      ← Config loader + hot-reload from repo-root titan_config.json.
-titan_persistence.py ← Save/load state & whale roster to disk.
-titan_telegram.py    ← Optional Telegram bot.
-```
+The UI has no direct knowledge of the engine. It only calls `TitanAPI` methods. In `--mode ui` it holds a direct Python reference; in `--mode client` it holds a `TitanClient` that proxies every call over HTTP to a running server. Both implement the same interface.
 
 ---
 
@@ -207,6 +275,8 @@ The **LOG tab** has a "Copy Full Snapshot for AI" button. It copies a structured
 - Last 600 system log lines
 
 Paste it directly into any AI chat for instant context-aware debugging.
+
+In `--mode server`, any connected MCP client (e.g. Claude Desktop) can call `get_snapshot` directly and has access to all live tools without copy-pasting anything.
 
 ---
 

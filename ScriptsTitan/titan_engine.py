@@ -222,6 +222,16 @@ def analyse(trades, is_hft_loop=False):
         S.on_cycle_complete(signals, wallets, rejects, trades)
 
 
+def _heartbeat_loop():
+    while True:
+        try:
+            if S.on_heartbeat:
+                S.on_heartbeat({"ts": time.time(), "cycle": S.env().cycle_count})
+        except Exception:
+            pass
+        time.sleep(10)
+
+
 def run_loop():
     while True:
         try:
@@ -273,11 +283,12 @@ def _hft_fast_loop():
         time.sleep(_HFT_FAST_CYCLE)
 
 
-def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycle_cb=None):
+def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycle_cb=None, heartbeat_cb=None):
     S.on_log            = log_callback
     S.on_position_open  = position_open_cb
     S.on_position_close = position_close_cb
     S.on_cycle_complete = cycle_cb
+    S.on_heartbeat      = heartbeat_cb
 
     load_state()
     C.reload()
@@ -347,8 +358,10 @@ def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycl
 
     t_main = threading.Thread(target=run_loop, daemon=True)
     t_hft  = threading.Thread(target=_hft_fast_loop, daemon=True)
+    t_hb   = threading.Thread(target=_heartbeat_loop, daemon=True)
     t_main.start()
     t_hft.start()
+    t_hb.start()
     return t_main
 
 

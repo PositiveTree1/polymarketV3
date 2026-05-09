@@ -16,7 +16,7 @@ def main() -> None:
 
     if args.mode == "server":
         from titan_api import TitanAPI
-        api = TitanAPI()
+        api = TitanAPI(enable_telegram=True)
         api.start()
         from titan_server import run_server
         run_server(api, host=args.host, port=args.port, token=args.token)
@@ -32,7 +32,7 @@ def main() -> None:
         from titan_client import TitanClient
         api = TitanClient(base_url=args.url, token=args.token)
         from titan_ui import run_ui
-        run_ui(api)
+        run_ui(api)  # run_ui calls api.start() after wiring subscriptions internally
 
 
 if __name__ == "__main__":
