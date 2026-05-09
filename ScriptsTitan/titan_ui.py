@@ -32,6 +32,13 @@ except ImportError:
     telegram_notifier = None
     HAS_TELEGRAM = False
 
+try:
+    from titan_ai import AIPanel
+    HAS_AI = True
+except ImportError:
+    AIPanel = None
+    HAS_AI = False
+
 
 _GUIDE_FILE = Path(__file__).resolve().parent.parent / "docs" / "guide.txt"
 
@@ -236,8 +243,13 @@ def run_ui(api: TitanBackend) -> None:
     body_pw.pack(fill="both", expand=True, padx=6, pady=4)
     
     nb_frame = tk.Frame(body_pw, bg="#080810")
-    body_pw.add(nb_frame, minsize=1100, stretch="always")
-    
+    body_pw.add(nb_frame, minsize=860, stretch="always")
+
+    # ── AI side panel (right pane) ────────────────────────────────────────────────
+    ai_frame = tk.Frame(body_pw, bg="#080810")
+    if HAS_AI:
+        body_pw.add(ai_frame, minsize=360, stretch="never")
+
     nb = ttk.Notebook(nb_frame)
     nb.pack(fill="both", expand=True)
     
@@ -2111,6 +2123,64 @@ def run_ui(api: TitanBackend) -> None:
         api.subscribe("titan/cycle_complete",  lambda p: on_cycle_complete_cb(p["signals"], p["wallets"], p["rejects"], p["trades"]))
         root.after(1000, ui_refresh)
         status_var.set("🟢 LIVE — Follow The Whale | HFT Spike + Conviction")
+
+        # ── Attach AI panel ───────────────────────────────────────────────────────
+        if HAS_AI:
+            def _get_system_snapshot():
+                """Build a live context snapshot for the AI from available API data."""
+                try:
+                    pnl       = api.get_pnl_summary()
+                    positions = list(_open_pos_dict().values())
+                    signals   = _last_signals[:20] if _last_signals else []
+                    whales    = api.get_whales()[:10]
+                    history   = [t for t in api.get_trade_history()[-20:]
+                                 if t.get("type") == "SELL"]
+
+                    lines = [
+                        "[STATISTICS]",
+                        f"  Bankroll      : ${pnl.get('bankroll', 0):.4f}",
+                        f"  Session P&L   : ${pnl.get('session_pnl', 0):+.4f}",
+                        f"  Win Rate      : {pnl.get('win_rate', 0)*100:.1f}%",
+                        f"  Open Positions: {len(positions)}",
+                        "",
+                        "[OPEN POSITIONS]",
+                    ]
+                    for p in positions:
+                        ep  = p.get("entry_price", 0)
+                        cp  = p.get("cur_price", ep)
+                        pct = (cp - ep) / max(ep, 0.001) * 100
+                        lines.append(
+                            f"  {p.get('title','')[:50]} | {p.get('outcome','')} "
+                            f"| Entry:{ep:.4f} Cur:{cp:.4f} P&L:{pct:+.1f}%"
+                        )
+
+                    lines += ["", "[ACTIVE SIGNALS (top 20)]"]
+                    for s in signals:
+                        lines.append(
+                            f"  {s.get('title','')[:50]} | {s.get('outcome','')} "
+                            f"| Now:{s.get('cur',0):.4f} Score:{s.get('score',0):.0f}"
+                        )
+
+                    lines += ["", "[TOP WHALES]"]
+                    for w in whales:
+                        lines.append(
+                            f"  {w.get('name','?'):<22} WR:{w.get('win_rate',0)*100:.0f}% "
+                            f"PnL:${w.get('total_pnl',0):+,.0f} Score:{w.get('score',0):.2f}"
+                        )
+
+                    lines += ["", "[RECENT CLOSED TRADES (last 20 sells)]"]
+                    for t in history:
+                        lines.append(
+                            f"  {t.get('title','')[:45]} | {t.get('outcome','')} "
+                            f"| P&L:${t.get('pnl_usdc',0):+.3f} ({t.get('pnl_pct',0):+.1f}%)"
+                        )
+
+                    return "\n".join(lines)
+                except Exception as e:
+                    return f"(snapshot error: {e})"
+
+            api.get_system_snapshot = _get_system_snapshot
+            AIPanel(ai_frame, engine_module=api)
 
         def _boot_log():
             try:
