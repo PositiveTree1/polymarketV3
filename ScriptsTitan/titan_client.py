@@ -80,6 +80,18 @@ class TitanClient:
         except (json.JSONDecodeError, TypeError):
             return text
 
+    def _list_tools_raw(self) -> list[dict]:
+        response = self._post({
+            "jsonrpc": "2.0",
+            "id": self._next_id(),
+            "method": "tools/list",
+            "params": {},
+        })
+        if "error" in response:
+            raise RuntimeError(response["error"]["message"])
+        result = response.get("result", {})
+        return result.get("tools", []) or []
+
     def _init_async(self) -> None:
         try:
             self._initialize()
@@ -189,6 +201,12 @@ class TitanClient:
 
     def get_positions(self, brief: bool = True) -> list[dict]:
         return self._call_tool("get_positions", {"brief": brief})  # type: ignore[return-value]
+
+    def list_tools(self) -> list[dict]:
+        return self._list_tools_raw()
+
+    def call_tool(self, name: str, arguments: dict | None = None) -> object:
+        return self._call_tool(name, arguments)  # type: ignore[return-value]
 
     def get_closed_positions(self, limit: int = 200) -> list[dict]:
         return self._call_tool("get_closed_positions", {"limit": limit})  # type: ignore[return-value]

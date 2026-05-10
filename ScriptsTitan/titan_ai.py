@@ -6,6 +6,7 @@ import json
 import requests
 import os
 from datetime import datetime
+from titan_client import TitanClient
 
 # ── backends ──────────────────────────────────────────────────────────────────
 ACTIVE_BACKEND = "ollama"   # "ollama" | "groq" | "openai" | "gemini" | "local"
@@ -14,24 +15,24 @@ BACKENDS: dict[str, dict] = {
     "groq": {
         "type":     "openai_compat",
         "base_url": "https://api.groq.com/openai/v1",
-        "api_key":  "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",
+        "api_key":  os.environ.get("LLM_KEY_GROQ"),
         "model":    "llama-3.3-70b-versatile",
     },
     "local": {
         "type":     "openai_compat",
         "base_url": "http://localhost:8000/v1",
         "api_key":  "not-needed",
-        "model":    "gemma3:4b",
+        "model":    "gemma4:4b",
     },
     "openai": {
         "type":     "openai_compat",
         "base_url": "https://api.openai.com/v1",
-        "api_key":  os.environ.get("OPENAI_API_KEY", ""),
+        "api_key":  os.environ.get("LLM_KEY_OPENAI"),
         "model":    "gpt-4o-mini",
     },
     "gemini": {
         "type":    "gemini",
-        "api_key": "AIzaSyBKWsmSrn7DRP2qusxpI142WJc8VbwAArg",
+        "api_key": os.environ.get("LLM_KEY_GEMINI"),
         "model":   "gemini-2.5-flash",
     },
     "ollama": {
@@ -44,6 +45,8 @@ BACKENDS: dict[str, dict] = {
 _backend    = BACKENDS[ACTIVE_BACKEND]
 _btype      = _backend["type"]
 MODEL       = _backend["model"]
+TITAN_MCP_URL = os.environ.get("TITAN_MCP_URL", "http://127.0.0.1:8765")
+TOOL_LOOP_MAX_STEPS = 6
 
 # ── design tokens ─────────────────────────────────────────────────────────────
 BG_DARK  = "#080810"; BG_MID   = "#0d0d1a"; BG_LIGHT  = "#13132a"
@@ -92,6 +95,57 @@ def _save_ai_request_snapshot(messages: list[dict]) -> None:
         f.write("\n".join(lines).rstrip() + "\n")
 
 
+def _json_dump(value) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+
+
+def _coerce_tool_schema(tool: dict) -> dict:
+    schema = dict(tool.get("inputSchema") or {})
+    if schema.get("type") != "object":
+        schema = {"type": "object", "properties": {}, "required": []}
+    schema.setdefault("properties", {})
+    schema.setdefault("required", [])
+    return schema
+
+
+class TitanMCPBridge:
+    def __init__(self, base_url: str = TITAN_MCP_URL):
+        self._client = TitanClient(base_url=base_url)
+        self._tools_cache: list[dict] | None = None
+        self._lock = threading.Lock()
+
+    def available_tools(self) -> list[dict]:
+        with self._lock:
+            if self._tools_cache is None:
+                tools = self._client.list_tools()
+                safe_tools = []
+                for tool in tools:
+                    annotations = tool.get("annotations") or {}
+                    if annotations.get("readOnlyHint", False):
+                        safe_tools.append(tool)
+                self._tools_cache = safe_tools
+            return list(self._tools_cache)
+
+    def openai_tools(self) -> list[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": _coerce_tool_schema(tool),
+                },
+            }
+            for tool in self.available_tools()
+        ]
+
+    def call(self, name: str, arguments: dict | None = None) -> object:
+        allowed = {tool["name"] for tool in self.available_tools()}
+        if name not in allowed:
+            raise RuntimeError(f"Tool not allowed: {name}")
+        return self._client.call_tool(name, arguments or {})
+
+
 # ── unified ask function ──────────────────────────────────────────────────────
 
 def _ask_openai_compat(messages: list[dict], on_token, on_done, on_error) -> None:
@@ -118,6 +172,138 @@ def _ask_openai_compat(messages: list[dict], on_token, on_done, on_error) -> Non
         on_done(full)
     except Exception as e:
         on_error(str(e))
+
+
+def _openai_chat_once(messages: list[dict], tools: list[dict] | None = None) -> dict:
+    url = _backend["base_url"].rstrip("/") + "/chat/completions"
+    headers = {"Authorization": f"Bearer {_backend['api_key']}", "Content-Type": "application/json"}
+    payload = {"model": MODEL, "messages": messages, "stream": False, "temperature": 0.2}
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    resp = requests.post(url, headers=headers, json=payload, timeout=120)
+    if resp.status_code != 200:
+        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:400]}")
+    body = resp.json()
+    choices = body.get("choices") or []
+    if not choices:
+        raise RuntimeError("No choices returned by model")
+    return choices[0].get("message") or {}
+
+
+def _ollama_chat_once(messages: list[dict], tools: list[dict] | None = None) -> dict:
+    payload = {
+        "model": MODEL,
+        "messages": messages,
+        "stream": False,
+        "think": False,
+        "keep_alive": -1,
+        "options": {"num_ctx": 8192, "temperature": 0.2, "top_k": 20, "num_predict": 1024},
+    }
+    if tools:
+        payload["tools"] = tools
+    resp = requests.post(_backend["base_url"], json=payload, timeout=120)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Ollama HTTP {resp.status_code}: {resp.text[:400]}")
+    body = resp.json()
+    return body.get("message") or {}
+
+
+def _message_tool_calls(msg: dict) -> list[dict]:
+    tool_calls = msg.get("tool_calls") or []
+    return [tc for tc in tool_calls if isinstance(tc, dict)]
+
+
+def _tool_call_name(tc: dict) -> str:
+    fn = tc.get("function") or {}
+    return str(fn.get("name") or tc.get("name") or "")
+
+
+def _tool_call_args(tc: dict) -> dict:
+    fn = tc.get("function") or {}
+    args = fn.get("arguments")
+    if isinstance(args, dict):
+        return args
+    if isinstance(args, str) and args.strip():
+        return json.loads(args)
+    return {}
+
+
+def _tool_call_id(tc: dict, idx: int) -> str:
+    return str(tc.get("id") or f"toolcall_{idx}")
+
+
+def _append_openai_tool_roundtrip(messages: list[dict], assistant_msg: dict, tool_calls: list[dict], bridge: TitanMCPBridge) -> None:
+    messages.append({
+        "role": "assistant",
+        "content": assistant_msg.get("content", "") or "",
+        "tool_calls": tool_calls,
+    })
+    for idx, tool_call in enumerate(tool_calls, start=1):
+        name = _tool_call_name(tool_call)
+        args = _tool_call_args(tool_call)
+        result = bridge.call(name, args)
+        messages.append({
+            "role": "tool",
+            "tool_call_id": _tool_call_id(tool_call, idx),
+            "name": name,
+            "content": _json_dump(result),
+        })
+
+
+def _append_ollama_tool_roundtrip(messages: list[dict], assistant_msg: dict, tool_calls: list[dict], bridge: TitanMCPBridge) -> None:
+    messages.append({
+        "role": "assistant",
+        "content": assistant_msg.get("content", "") or "",
+        "tool_calls": tool_calls,
+    })
+    for idx, tool_call in enumerate(tool_calls, start=1):
+        name = _tool_call_name(tool_call)
+        args = _tool_call_args(tool_call)
+        result = bridge.call(name, args)
+        messages.append({
+            "role": "tool",
+            "tool_call_id": _tool_call_id(tool_call, idx),
+            "name": name,
+            "content": _json_dump(result),
+        })
+
+
+def _dispatch_with_titan_tools(messages: list[dict], bridge: TitanMCPBridge, on_token, on_done, on_error) -> bool:
+    if _btype not in {"openai_compat", "ollama"}:
+        return False
+
+    try:
+        tool_messages = [dict(m) for m in messages]
+        tools = bridge.openai_tools()
+        if not tools:
+            raise RuntimeError("No read-only Titan MCP tools are available")
+
+        final_text = ""
+        for _ in range(TOOL_LOOP_MAX_STEPS):
+            if _btype == "ollama":
+                assistant_msg = _ollama_chat_once(tool_messages, tools)
+                tool_calls = _message_tool_calls(assistant_msg)
+                if tool_calls:
+                    _append_ollama_tool_roundtrip(tool_messages, assistant_msg, tool_calls, bridge)
+                    continue
+            else:
+                assistant_msg = _openai_chat_once(tool_messages, tools)
+                tool_calls = _message_tool_calls(assistant_msg)
+                if tool_calls:
+                    _append_openai_tool_roundtrip(tool_messages, assistant_msg, tool_calls, bridge)
+                    continue
+
+            final_text = assistant_msg.get("content", "") or ""
+            break
+
+        if not final_text:
+            raise RuntimeError("Tool loop finished without a final assistant response")
+        on_token(final_text)
+        on_done(final_text)
+        return True
+    except Exception:
+        return False
 
 
 def _ask_gemini(messages: list[dict], on_token, on_done, on_error) -> None:
@@ -206,6 +392,7 @@ class TitanAIClient:
     def __init__(self):
         self._messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
         self._lock = threading.Lock()
+        self._mcp = TitanMCPBridge()
 
     def ask(self, user_msg: str, snapshot: str, on_token, on_done, on_error) -> None:
         full_msg = f"[LIVE SYSTEM SNAPSHOT]\n{snapshot}\n\n[USER QUESTION]\n{user_msg}"
@@ -237,6 +424,8 @@ class TitanAIClient:
                         self._messages.pop()
                 on_error(msg)
 
+            if _dispatch_with_titan_tools(snapshot_messages, self._mcp, on_token, _done, _err):
+                return
             _dispatch(snapshot_messages, on_token, _done, _err)
 
         threading.Thread(target=_run, daemon=True).start()
