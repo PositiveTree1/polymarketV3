@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 .env
 *.json
+*.db
 !titan_config.json
 !titan_config_*.json
 !titan_whales_*.json
