@@ -145,15 +145,18 @@ class TitanAPI:
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
     def get_closed_positions(self, limit: int = 200) -> list[dict]:
-        import titan_state as _TS
         import titan_db as _DB
-        sells = [t for t in _TS.env().trade_history if t.get("type") == "SELL"][-limit:]
+        sells = [t for t in _DB.load_trade_history(limit=limit) if t.get("type") == "SELL"]
         result = []
         for t in reversed(sells):
-            cid     = t.get("cid") or (t.get("entry_audit") or {}).get("cid", "")
-            outcome = t.get("outcome", "")
-            ph      = _DB.load_price_history(cid, outcome) if cid else []
-            result.append({**t, "price_history": ph})
+            cid = str(t.get("cid") or "")
+            outcome = str(t.get("outcome") or "")
+            ph = _DB.load_price_history(cid, outcome) if cid and outcome else []
+            result.append({
+                **t,
+                "price_history": ph,
+                "price_history_error": "old trade, no cid" if not cid else None,
+            })
         return result
 
     @mcp_tool(
@@ -227,6 +230,23 @@ class TitanAPI:
             "cooldown_cids": dict(env.cooldown_cids),
             "active_market_cids": list(env.active_market_cids),
             "watchlist_size": len(env.watchlist),
+        }
+
+    @mcp_tool("Return aggregated trade statistics (win rate, PnL, etc.)")
+    def get_trade_stats(self) -> dict:
+        import titan_state as _TS
+        st = _TS.env().trade_stats
+        return {
+            "sell_count":  st.sell_count,
+            "win_count":   st.win_count,
+            "loss_count":  st.loss_count,
+            "sum_pnl":     st.sum_pnl,
+            "best":        st.best,
+            "worst":       st.worst,
+            "win_rate":    st.win_rate,
+            "avg_win":     st.avg_win,
+            "avg_loss":    st.avg_loss,
+            "expectancy":  st.expectancy,
         }
 
     @mcp_tool(
@@ -307,8 +327,8 @@ class TitanAPI:
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
     def get_trade_history(self) -> list[dict]:
-        import titan_state as _TS
-        return list(_TS.env().trade_history)
+        import titan_db as _DB
+        return _DB.load_trade_history()
 
     @mcp_tool(
         description="Returns the current live engine configuration.",
@@ -505,10 +525,8 @@ class TitanAPI:
         now_str = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
         lines = [f"TITAN COMPRESSED SNAPSHOT — {now_str}", ""]
 
-        br    = _w().paper_bankroll
-        sells = [t for t in _w().trade_history if t.get("type") == "SELL" and t.get("pnl_usdc") is not None]
-        wins  = sum(1 for t in sells if t["pnl_usdc"] >= 0)
-        wr    = wins / max(len(sells), 1) * 100
+        br = _w().paper_bankroll
+        st = _w().trade_stats
         lines += [
             "[ACCOUNT]",
             f"  Bank=${br:.4f}  Start=${BANKROLL_START:.2f}  "
@@ -516,7 +534,7 @@ class TitanAPI:
             f"  Cycles={_w().cycle_count}  OpenPos={len(_w().open_positions)}  "
             f"Cooldowns={len(_w().cooldown_cids)}  Watchlist={len(_w().watchlist)}  "
             f"Elites={sum(1 for p in _w().wallet_cache.values() if p.get('elite'))}",
-            f"  Trades={len(sells)}({wins}W/{len(sells)-wins}L) WR={wr:.0f}%",
+            f"  Trades={st.sell_count}({st.win_count}W/{st.loss_count}L) WR={st.win_rate*100:.0f}%",
             "",
         ]
 
@@ -571,8 +589,10 @@ class TitanAPI:
             )
         lines.append("")
 
+        import titan_db as _DB
+        recent_trades = _DB.load_trade_history(limit=100)
         lines.append("[TRADE HISTORY (last 100)]")
-        for t in _w().trade_history[-100:]:
+        for t in recent_trades:
             typ     = t.get("type", "?")
             icon    = "BUY" if typ == "BUY" else ("WIN" if (t.get("pnl_usdc") or 0) >= 0 else "LOSS")
             pnl_str = f" PnL=${t.get('pnl_usdc',0):+.4f}({t.get('pnl_pct',0):+.1f}%)" if typ == "SELL" else ""
@@ -583,7 +603,7 @@ class TitanAPI:
                 f"Entry=${t.get('entry_price',0):.4f} Bet=${t.get('bet',0):.2f}"
                 f"{pnl_str} via={whale_str}"
             )
-        if not _w().trade_history:
+        if not recent_trades:
             lines.append("  (no trades yet)")
         lines.append("")
 
@@ -675,8 +695,10 @@ class TitanAPI:
             )
         lines += ["└─────────────────────────────────────────────────────────────────────┘", ""]
 
+        import titan_db as _DB2
+        recent_trades2 = _DB2.load_trade_history(limit=100)
         lines.append("┌─ TRADE HISTORY (last 100) ──────────────────────────────────────────┐")
-        for t in _w().trade_history[-100:]:
+        for t in recent_trades2:
             typ  = t.get("type", "?")
             icon = "🛒" if typ == "BUY" else ("✅" if (t.get("pnl_usdc") or 0) >= 0 else "❌")
             pnl_str = f"P&L ${t.get('pnl_usdc',0):+.4f} ({t.get('pnl_pct',0):+.1f}%)" if typ == "SELL" else ""
@@ -687,7 +709,7 @@ class TitanAPI:
                 f"  Entry:${t.get('entry_price',0):.4f}  Bet:${t.get('bet',0):.2f}"
                 f"  {pnl_str}  via:{whale_str}"
             )
-        if not _w().trade_history:
+        if not recent_trades2:
             lines.append("  (no trades yet)")
         lines += ["└─────────────────────────────────────────────────────────────────────┘", ""]
 

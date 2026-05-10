@@ -279,6 +279,7 @@ def run_ui(api: TitanBackend) -> None:
             self._history     = []
             self._title       = ""
             self._entry_price = 0.0
+            self._empty_message = "Select a position to view its live price chart"
             self._zoom_start  = 0
             self._dirty       = False
             self._last_len    = 0
@@ -289,13 +290,15 @@ def run_ui(api: TitanBackend) -> None:
     
         def _mark_dirty(self): self._dirty = True
     
-        def load(self, history, title, entry_price):
+        def load(self, history, title, entry_price, empty_message=None):
             new_len = len(history) if history else 0
             if (history != self._history or title != self._title or
-                    entry_price != self._entry_price or new_len != self._last_len):
+                    entry_price != self._entry_price or new_len != self._last_len or
+                    empty_message != self._empty_message):
                 self._history     = list(history) if history else []
                 self._title       = title
                 self._entry_price = entry_price
+                self._empty_message = empty_message or "Select a position to view its live price chart"
                 self._last_len    = new_len
                 self._zoom_start  = 0
                 self._dirty       = True
@@ -347,7 +350,7 @@ def run_ui(api: TitanBackend) -> None:
             visible = self._history[self._zoom_start:]
             if not visible:
                 self.create_text(w//2, h//2,
-                    text="Select a position to view its live price chart",
+                    text=self._empty_message,
                     fill="#334455", font=mono, tags="chart")
                 return
             prices = [p[1] for p in visible]
@@ -788,34 +791,100 @@ def run_ui(api: TitanBackend) -> None:
     
     
     
+    def _clean_tree_market_title(value: object) -> str:
+        raw = str(value).strip()
+        parts = raw.split(" ", 1)
+        if len(parts) == 2 and parts[0] and not parts[0][0].isalnum():
+            return parts[1].strip()
+        return raw
+
+    _closed_tree_items: dict[str, dict] = {}
+
+    def _load_selected_position_chart() -> None:
+        sel = pos_tree.selection()
+        if not sel:
+            pos_graph.load([], "", 0.0)
+            return
+
+        vals = pos_tree.item(sel[0])["values"]
+        if not vals:
+            pos_graph.load([], "", 0.0)
+            return
+
+        mkt_name = str(vals[0]).replace("ðŸ’Ž", "").replace("âš¡", "")
+        mkt_name = _clean_tree_market_title(vals[0])
+        outcome = str(vals[1])
+
+        if _show_closed[0]:
+            pos = _find_selected_closed_position()
+            if pos is None:
+                msg = f"Closed position match not found for {mkt_name[:48]} [{outcome}]."
+                pos_graph.load([], mkt_name, 0.0, msg)
+                if _last_chart_warn[0] != msg:
+                    pos_log_write(msg, "WARN")
+                    _last_chart_warn[0] = msg
+                return
+
+            history = pos.get("price_history", [])
+            entry_price = float(pos.get("entry_price") or 0.0)
+            title = str(pos.get("title", mkt_name))
+            if history:
+                _last_chart_warn[0] = ""
+                pos_graph.load(history, title, entry_price)
+                return
+
+            detail = str(pos.get("price_history_error") or "Closed position has no chart history.")
+            pos_graph.load([], title, entry_price, detail)
+            warn_msg = f"Closed chart empty: {title[:80]} [{outcome}] | {detail}"
+            if _last_chart_warn[0] != warn_msg:
+                pos_log_write(warn_msg, "WARN")
+                _last_chart_warn[0] = warn_msg
+            return
+
+        for _, pos in _open_pos_dict().items():
+            title = str(pos.get("title", ""))
+            if title[:48] in mkt_name or mkt_name[:30] in title:
+                if str(pos.get("outcome", "")) == outcome:
+                    _last_chart_warn[0] = ""
+                    pos_graph.load(pos.get("price_history", []), title, pos.get("entry_price", 0))
+                    return
+
+        _last_chart_warn[0] = ""
+        pos_graph.load([], mkt_name, 0.0, f"Open position match not found for {mkt_name[:48]} [{outcome}].")
+    
+    def _find_selected_closed_position() -> dict | None:
+        sel = pos_tree.selection()
+        if not sel:
+            return None
+        return _closed_tree_items.get(str(sel[0]))
+
     def _on_pos_double_click(event):
         sel = pos_tree.selection()
         if not sel:
             return
-        vals = pos_tree.item(sel[0])['values']
+        vals = pos_tree.item(sel[0])["values"]
         if not vals:
             return
-        mkt_name = str(vals[0]).replace('💎', '').replace('⚡', '')
-        outcome  = str(vals[1])
+        mkt_name = _clean_tree_market_title(vals[0])
+        outcome = str(vals[1])
         if _show_closed[0]:
-            for pos in api.get_closed_positions(limit=200):
-                title_cmp = pos.get('title', '')
-                if (title_cmp[:48] in mkt_name or mkt_name[:30] in title_cmp) and pos.get('outcome', '') == outcome:
-                    show_trade_history_detail(pos)
-                    return
-        else:
-            for key, pos in _open_pos_dict().items():
-                title_cmp = pos.get('title', '')
-                if title_cmp[:48] in mkt_name or mkt_name[:30] in title_cmp:
-                    if pos.get('outcome', '') == outcome or outcome in pos.get('outcome', ''):
-                        show_position_detail(key, pos)
-                        return
-            for key, pos in _open_pos_dict().items():
-                if mkt_name[:20] in pos.get('title', ''):
+            pos = _find_selected_closed_position()
+            if pos:
+                show_trade_history_detail(pos)
+            return
+        for key, pos in _open_pos_dict().items():
+            title_cmp = pos.get("title", "")
+            if title_cmp[:48] in mkt_name or mkt_name[:30] in title_cmp:
+                if pos.get("outcome", "") == outcome or outcome in pos.get("outcome", ""):
                     show_position_detail(key, pos)
                     return
-    
+        for key, pos in _open_pos_dict().items():
+            if mkt_name[:20] in pos.get("title", ""):
+                show_position_detail(key, pos)
+                return
+
     pos_tree.bind("<Double-1>", _on_pos_double_click)
+    pos_tree.bind("<<TreeviewSelect>>", lambda event: _load_selected_position_chart())
     
     pos_split = tk.Frame(tab_positions, bg="#080810")
     pos_split.pack(fill="both", expand=True, padx=4)
@@ -825,6 +894,7 @@ def run_ui(api: TitanBackend) -> None:
     
     pos_graph = PositionChart(pos_chart_frame, height=240)
     pos_graph.pack(fill="both", expand=True, padx=2, pady=2)
+    _last_chart_warn = [""]
     
     pos_btn_bar = tk.Frame(pos_chart_frame, bg="#080810")
     pos_btn_bar.pack(fill="x")
@@ -989,22 +1059,14 @@ def run_ui(api: TitanBackend) -> None:
         h = graph_canvas.winfo_height()
         if w < 10 or h < 10: return
 
-        _pnl    = api.get_pnl_summary()
-        eq_hist = _pnl["equity_history"]
-        if len(eq_hist) >= 2:
-            timestamps = [ts for ts, _ in eq_hist]
-            points     = [v  for _,  v in eq_hist]
-        else:
-            sells = [t for t in api.get_trade_history()
-                     if t.get("type") == "SELL" and t.get("bankroll") is not None]
-            if not sells:
-                graph_canvas.create_text(w//2, h//2,
-                    text="No trades yet — graph appears after first trade",
-                    fill="#334433", font=("Courier", 10), anchor="center")
-                return
-            timestamps = [s["ts"] for s in sells]
-            points     = [api.get_pnl_summary()["bankroll_start"]] + [float(t["bankroll"]) for t in sells]
-            timestamps = [timestamps[0] - 1] + timestamps
+        eq_hist = api.get_pnl_summary()["equity_history"]
+        if len(eq_hist) < 2:
+            graph_canvas.create_text(w//2, h//2,
+                text="No data yet — graph appears after first equity point",
+                fill="#334433", font=("Courier", 10), anchor="center")
+            return
+        timestamps = [ts for ts, _ in eq_hist]
+        points     = [v  for _,  v in eq_hist]
 
         if len(points) < 2: return
 
@@ -1030,6 +1092,7 @@ def run_ui(api: TitanBackend) -> None:
             graph_canvas.create_text(pad_l-4, y, text=f"${val:.3f}",
                                       fill="#335544", font=("Courier", 8), anchor="e")
 
+        _pnl = api.get_pnl_summary()
         # bankroll-start baseline
         y0 = to_y(_pnl["bankroll_start"])
         graph_canvas.create_line(pad_l, y0, w-pad_r, y0, fill="#2a4a2a", dash=(4,3))
@@ -1084,40 +1147,33 @@ def run_ui(api: TitanBackend) -> None:
     
     
     def refresh_pnl_tab():
-        history = api.get_trade_history()
-        sells   = [t for t in history if t.get("type") == "SELL" and t.get("pnl_usdc") is not None]
-    
-        realised_pnl = sum(t["pnl_usdc"] for t in sells)
+        st   = api.get_trade_stats()
+        pnl  = api.get_pnl_summary()
         unrealised_pnl = sum(
             (pos.get("cur_price", pos.get("entry_price", 0)) - pos.get("entry_price", 0))
             * pos.get("shares", 0)
             for pos in _open_pos_dict().values()
         )
-        total_pnl = realised_pnl + unrealised_pnl
-        wins      = [t for t in sells if t["pnl_usdc"] >= 0]
-        losses    = [t for t in sells if t["pnl_usdc"] < 0]
-        win_rate  = len(wins) / max(len(sells), 1) * 100
-        avg_pnl   = total_pnl / max(len(sells), 1)
-        best      = max((t["pnl_usdc"] for t in sells), default=0)
-        worst     = min((t["pnl_usdc"] for t in sells), default=0)
-        avg_win   = sum(t["pnl_usdc"] for t in wins)   / max(len(wins),   1)
-        avg_loss  = sum(abs(t["pnl_usdc"]) for t in losses) / max(len(losses), 1)
-        expectancy = (win_rate/100 * avg_win) - ((1-win_rate/100) * avg_loss) if sells else 0
-    
-        stat_vars["total_pnl"].set(f"${total_pnl:+.4f}  (R:{realised_pnl:+.2f} U:{unrealised_pnl:+.2f})")
-        stat_vars["session_pnl"].set(f"${api.get_pnl_summary()['session_pnl']:+.4f}")
-        stat_vars["win_rate"].set(f"{win_rate:.0f}%  ({len(wins)}W/{len(losses)}L)")
-        stat_vars["avg_pnl"].set(f"${avg_pnl:+.4f}")
-        stat_vars["best"].set(f"${best:+.4f}")
-        stat_vars["worst"].set(f"${worst:+.4f}")
-        stat_vars["n_trades"].set(str(len(sells)))
-        open_val = sum(
+        realised_pnl = st["sum_pnl"]
+        total_pnl    = realised_pnl + unrealised_pnl
+        win_rate     = st["win_rate"] * 100
+        avg_pnl      = total_pnl / max(st["sell_count"], 1)
+        open_val     = sum(
             pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0)
             for pos in _open_pos_dict().values()
         )
-        stat_vars["bankroll"].set(f"${api.get_pnl_summary()["bankroll"] + open_val:.4f}")
-        stat_vars["expectancy"].set(f"${expectancy:+.4f}")
-    
+
+        stat_vars["total_pnl"].set(f"${total_pnl:+.4f}  (R:{realised_pnl:+.2f} U:{unrealised_pnl:+.2f})")
+        stat_vars["session_pnl"].set(f"${pnl['session_pnl']:+.4f}")
+        stat_vars["win_rate"].set(f"{win_rate:.0f}%  ({st['win_count']}W/{st['loss_count']}L)")
+        stat_vars["avg_pnl"].set(f"${avg_pnl:+.4f}")
+        stat_vars["best"].set(f"${st['best']:+.4f}")
+        stat_vars["worst"].set(f"${st['worst']:+.4f}")
+        stat_vars["n_trades"].set(str(st["sell_count"]))
+        stat_vars["bankroll"].set(f"${pnl['bankroll'] + open_val:.4f}")
+        stat_vars["expectancy"].set(f"${st['expectancy']:+.4f}")
+
+        history = api.get_trade_history()
         hist_tree.delete(*hist_tree.get_children())
         for t in reversed(history[-200:]):
             whale_str = ", ".join(t.get("whale_names", [])[:2]) or "—"
@@ -1639,10 +1695,11 @@ def run_ui(api: TitanBackend) -> None:
         new_item_map = {}
 
         if _show_closed[0]:
+            _closed_tree_items.clear()
             closed = api.get_closed_positions(limit=200)
             for pos in closed:
-                entry   = pos.get("entry_price", 0)
-                w_entry = pos.get("avg_entry", entry)
+                entry   = pos.get("entry_price") or 0
+                w_entry = pos.get("avg_entry") or entry
                 exit_p  = pos.get("exit_price") or entry
                 pnl_usd = pos.get("pnl_usdc") or 0
                 pnl_pct = pos.get("pnl_pct") or ((exit_p - entry) / max(entry, 0.001) * 100)
@@ -1662,15 +1719,17 @@ def run_ui(api: TitanBackend) -> None:
                     f"${exit_p:.4f}",
                     f"{pnl_pct:+.1f}%",
                     f"${pnl_usd:+.3f}",
-                    f"${pos.get('bet', 0):.2f}",
+                    f"${pos.get('bet') or 0:.2f}",
                     f"{hold_min:.0f}m",
                     whale_str[:30],
-                    f"{pos.get('score', 0):.0f}",
+                    f"{pos.get('score') or 0:.0f}",
                     reason[:18],
                 ), tags=(tag,))
+                _closed_tree_items[iid] = pos
                 new_item_map[(title_str[:30], outcome_str)] = iid
             pos_var.set(f"Pos: {len(closed)} closed")
         else:
+            _closed_tree_items.clear()
             for key, pos in sorted(_open_pos_dict().items(),
                                    key=lambda x: x[1].get("entry_ts", 0), reverse=True):
                 entry    = pos.get("entry_price", 0)
@@ -1784,18 +1843,19 @@ def run_ui(api: TitanBackend) -> None:
         elites = {w["wallet"]: w for w in api.get_whales()}
         hot_t  = sum(1 for t in trades if t.get("window") == "hot")
         hft_t  = sum(1 for t in trades if t.get("source") in ("hft_spike_poll",))
-        sells     = [t for t in api.get_trade_history() if t.get("type") == "SELL" and t.get("pnl_usdc") is not None]
-        total_pnl = sum(t["pnl_usdc"] for t in sells)
-        wins_n    = len([t for t in sells if t["pnl_usdc"] >= 0])
-        wr_pct    = wins_n / max(len(sells), 1) * 100
-    
+        st        = api.get_trade_stats()
+        total_pnl = st["sum_pnl"]
+        wins_n    = st["win_count"]
+        wr_pct    = st["win_rate"] * 100
+        n_sells   = st["sell_count"]
+
         analysis_txt.insert(tk.END,
             f"{'═'*78}\n  ANALYSIS  —  {ts}\n{'═'*78}\n\n"
             f"PAPER TRADING ACCOUNT\n{'─'*50}\n"
             f"  Bankroll:     ${api.get_pnl_summary()["bankroll"]:.4f}  (start ${api.get_pnl_summary()["bankroll_start"]:.2f})\n"
             f"  Session P&L:  ${api.get_pnl_summary()["session_pnl"]:+.4f}\n"
             f"  Total P&L:    ${total_pnl:+.4f}\n"
-            f"  Trades:       {len(sells)} closed  WR:{wr_pct:.0f}% ({wins_n}W/{len(sells)-wins_n}L)\n"
+            f"  Trades:       {n_sells} closed  WR:{wr_pct:.0f}% ({wins_n}W/{n_sells - wins_n}L)\n"
             f"  Open:         {len(_open_pos_dict())} positions\n\n"
             f"TRADE FEED (this cycle)\n{'─'*50}\n"
             f"  Total: {len(trades)}  hot:{hot_t}  hft_spikes:{hft_t}\n"
@@ -2044,6 +2104,9 @@ def run_ui(api: TitanBackend) -> None:
                 pos_tree.selection_set(children[0])
                 sel = pos_tree.selection()
         if sel:
+            _load_selected_position_chart()
+            return
+        if sel:
             vals = pos_tree.item(sel[0])['values']
             if vals:
                 mkt_name = str(vals[0]).replace('💎', '').replace('⚡', '')
@@ -2277,7 +2340,7 @@ def run_ui(api: TitanBackend) -> None:
                                 "start_bankroll": api.get_pnl_summary()["bankroll_start"],
                                 "session_pnl": api.get_pnl_summary()["session_pnl"],
                                 "open_pos_count": len(_open_pos_dict()),
-                                "total_trades": len(api.get_trade_history())
+                                "total_trades": api.get_trade_stats()["sell_count"]
                             },
                             "pnl_history": [round(v, 4) for _, v in (api.get_pnl_summary()["equity_history"][-200:] if api.get_pnl_summary()["equity_history"] else [])],
                             "whales": [
@@ -2292,7 +2355,7 @@ def run_ui(api: TitanBackend) -> None:
                             ],
                             "history": [
                                 {"title": p.get("title", ""), "outcome": p.get("outcome", ""), "pnl": p.get("pnl_usdc", 0), "pct": (p.get("pnl_pct") or 0) / 100}
-                                for p in api.get_trade_history()[::-1][:10] if p.get("type") == "SELL"
+                                for p in api.get_closed_positions(limit=10)
                             ]
                         }
                         self.wfile.write(json.dumps(data).encode('utf-8'))

@@ -235,6 +235,9 @@ class TitanClient:
     def get_trade_history(self) -> list[dict]:
         return self._call_tool("get_trade_history")  # type: ignore[return-value]
 
+    def get_trade_stats(self) -> dict:
+        return self._call_tool("get_trade_stats")  # type: ignore[return-value]
+
     def get_config(self) -> dict:
         return self._call_tool("get_config")  # type: ignore[return-value]
 

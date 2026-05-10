@@ -29,6 +29,7 @@ from titan_market  import get_market, get_outcome_price, is_market_resolving
 from titan_signals import classify_market, estimate_expected_value, _KNOWN_HEDGE_WALLETS
 from titan_wallet  import is_hft_wallet, record_whale_trade_performance
 from titan_persistence import save_state, save_whale_roster_async
+import titan_db as DB
 
 # Optional: resolution monitor (lazy import to avoid circular)
 def _get_ws_monitor():
@@ -614,6 +615,7 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
         S.env().session_pnl    += pnl_usdc_net
 
         trade_record = {
+            "cid":           pos.get("cid", key[0]),
             "type":          "SELL",
             "title":         pos["title"],
             "outcome":       pos["outcome"],
@@ -654,7 +656,9 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             "entry_audit":   pos.get("entry_audit"),
             "exit_audit":    exit_audit,
         }
-        S.env().trade_history.append(trade_record)
+        DB.append_trade(trade_record)
+        S.env().trade_stats.record_sell(pnl_usdc_net)
+        DB.upsert_trade_stats(S.env().trade_stats)
         S.env().active_market_cids.discard(cid_out)
         S.env().position_whale_map.pop(cid_out, None)
         del S.env().open_positions[key]
@@ -973,7 +977,7 @@ def auto_trade(signals: list, whale_exits: dict) -> list:
             "market_url":    market_url,
             "entry_audit":   entry_audit,
         }
-        S.env().trade_history.append(trade_record)
+        DB.append_trade(trade_record)
 
         n_conf   = sig.get("n_confluence", 0)
         hft_tag  = "⚡HFT " if sig.get("is_hft") else ""

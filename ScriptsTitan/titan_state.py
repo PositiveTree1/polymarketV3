@@ -30,6 +30,47 @@ def load_logs_from_disk():
 
 
 # ── Single Wallet Environment ─────────────────────────────────────────────────
+class TradeStats:
+    """Running totals updated on every trade — no iteration over history needed."""
+    def __init__(self):
+        self.sell_count:  int   = 0
+        self.win_count:   int   = 0
+        self.loss_count:  int   = 0
+        self.sum_pnl:     float = 0.0
+        self.sum_wins:    float = 0.0
+        self.sum_losses:  float = 0.0  # absolute value
+        self.best:        float = 0.0
+        self.worst:       float = 0.0
+
+    @property
+    def win_rate(self) -> float:
+        return self.win_count / self.sell_count if self.sell_count else 0.0
+
+    @property
+    def avg_win(self) -> float:
+        return self.sum_wins / self.win_count if self.win_count else 0.0
+
+    @property
+    def avg_loss(self) -> float:
+        return self.sum_losses / self.loss_count if self.loss_count else 0.0
+
+    @property
+    def expectancy(self) -> float:
+        return (self.win_rate * self.avg_win) - ((1 - self.win_rate) * self.avg_loss)
+
+    def record_sell(self, pnl: float) -> None:
+        self.sell_count += 1
+        self.sum_pnl    += pnl
+        if pnl >= 0:
+            self.win_count += 1
+            self.sum_wins  += pnl
+            self.best       = max(self.best, pnl)
+        else:
+            self.loss_count += 1
+            self.sum_losses += abs(pnl)
+            self.worst       = min(self.worst, pnl)
+
+
 class WalletEnv:
     def __init__(self):
         self.index        = 0
@@ -44,7 +85,7 @@ class WalletEnv:
         self.WHALE_EXIT_HISTORY = []
         self.paper_bankroll     = BANKROLL_START
         self.open_positions     = {}
-        self.trade_history      = []
+        self.trade_stats        = TradeStats()
         self.session_pnl        = 0.0
         self.active_market_cids = set()
         self.cooldown_cids      = {}

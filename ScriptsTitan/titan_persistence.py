@@ -36,17 +36,8 @@ def save_state():
             if ph:
                 DB.upsert_price_history(cid, outcome, ph)
 
-        if env.equity_history:
-            DB.upsert_equity_history(env.equity_history)
-
         if env.watchlist:
             DB.upsert_watchlist(env.watchlist)
-
-        db_count = DB.get_trade_count()
-        if len(env.trade_history) > db_count:
-            new_trades = env.trade_history[db_count:]
-            for trade in new_trades:
-                DB.append_trade(trade)
 
         # Build a lean copy of open_positions without price_history
         lean_positions = {}
@@ -132,15 +123,17 @@ def _load_trading_state():
                 DB.upsert_watchlist(env.watchlist)
                 S._log(f"📂 Watchlist migrated from JSON: {len(saved_wl)} addresses", "INFO")
 
-        db_trades = DB.load_trade_history()
-        if db_trades:
-            env.trade_history = db_trades
+        json_trades = state.get("trade_history", [])
+        if json_trades and DB.get_trade_count() == 0:
+            DB.bulk_insert_trades(json_trades)
+            S._log(f"📂 Trade history migrated from JSON: {len(json_trades)} records", "INFO")
+
+        loaded_stats = DB.load_trade_stats()
+        if loaded_stats is not None:
+            env.trade_stats = loaded_stats
         else:
-            json_trades = state.get("trade_history", [])
-            if json_trades:
-                DB.bulk_insert_trades(json_trades)
-                env.trade_history = DB.load_trade_history()
-                S._log(f"📂 Trade history migrated from JSON: {len(json_trades)} records", "INFO")
+            _rebuild_trade_stats(env)
+            DB.upsert_trade_stats(env.trade_stats)
 
         raw = state.get("open_positions", {})
         env.open_positions = {}
@@ -169,7 +162,7 @@ def _load_trading_state():
 
         S._log(
             f"📂 State loaded: bankroll=${env.paper_bankroll:.2f} | "
-            f"{len(env.trade_history)} trades | {n_pos} open | "
+            f"{env.trade_stats.sell_count} closed trades | {n_pos} open | "
             f"{len(env.cooldown_cids)} cooldowns | {len(env.watchlist)} watchlist",
             "INFO"
         )
@@ -198,9 +191,18 @@ def _load_trading_state():
         S._log(f"⚠ State load failed ({e}) — fresh start", "WARN")
 
 
+def _rebuild_trade_stats(env) -> None:
+    from titan_state import TradeStats
+    stats = TradeStats()
+    for t in DB.load_trade_history():
+        if t.get("type") == "SELL" and t.get("pnl_usdc") is not None:
+            stats.record_sell(float(t["pnl_usdc"]))
+    env.trade_stats = stats
+
+
 def _rebuild_equity_from_trades(env):
     trades_with_br = [
-        t for t in env.trade_history
+        t for t in DB.load_trade_history()
         if t.get("bankroll") and t.get("ts")
     ]
     if not trades_with_br:

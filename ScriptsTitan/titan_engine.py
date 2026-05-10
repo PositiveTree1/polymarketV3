@@ -28,6 +28,7 @@ import titan_config as C
 import titan_state as S
 from titan_state import _log, safe_get
 
+import titan_db as DB
 from titan_persistence import load_state, save_state, save_whale_roster, save_whale_roster_async
 from titan_wallet  import (fetch_wallet, get_elite_wallets, discover_new_whales,
                            scan_top_market_holders, get_whale_performance_summary,
@@ -185,8 +186,11 @@ def analyse(trades, is_hft_loop=False):
     )
     current_equity = S.env().paper_bankroll + open_value
     _eq = S.env().equity_history
-    if not _eq or abs(current_equity - _eq[-1][1]) > 0.001 or (time.time() - _eq[-1][0]) > 30:
-        _eq.append((time.time(), current_equity))
+    _now = time.time()
+    if not _eq or abs(current_equity - _eq[-1][1]) > 0.001:
+        point = (_now, current_equity)
+        _eq.append(point)
+        DB.upsert_equity_history([point])
     if len(_eq) > 5000:
         del _eq[:500]
 
@@ -206,12 +210,11 @@ def analyse(trades, is_hft_loop=False):
 
     # Session stats every 100 cycles
     if S.env().cycle_count % 100 == 0 and S.env().cycle_count > 0:
-        sells_all = [t for t in S.env().trade_history if t.get("type") == "SELL"]
-        wins_all  = [t for t in sells_all if (t.get("pnl_usdc") or 0) >= 0]
+        st = S.env().trade_stats
         _log(
-            f"📊 SESSION [{S.env().cycle_count} cycles]: {len(sells_all)} closed | "
-            f"{len(wins_all)}W/{len(sells_all)-len(wins_all)}L | "
-            f"WR:{len(wins_all)/max(len(sells_all),1)*100:.0f}%",
+            f"📊 SESSION [{S.env().cycle_count} cycles]: {st.sell_count} closed | "
+            f"{st.win_count}W/{st.loss_count}L | "
+            f"WR:{st.win_rate*100:.0f}%",
             "INFO"
         )
 
@@ -368,10 +371,9 @@ def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycl
 def get_system_snapshot() -> str:
     from datetime import datetime as _dt
     now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
-    sells     = [t for t in S.env().trade_history if t.get("type") == "SELL"]
-    wins      = [t for t in sells if (t.get("pnl_usdc") or 0) >= 0]
+    st        = S.env().trade_stats
     total_pnl = S.env().paper_bankroll - BANKROLL_START
-    win_rate  = (len(wins) / len(sells) * 100) if sells else 0
+    win_rate  = st.win_rate * 100
     open_value = sum(
         pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0)
         for pos in S.env().open_positions.values()
@@ -388,7 +390,7 @@ def get_system_snapshot() -> str:
         f"Open Value: ${open_value:.2f}",
         f"Bankroll  : ${S.env().paper_bankroll:.2f}  (start ${BANKROLL_START:.2f})",
         f"Total PnL : ${total_pnl:+.4f}",
-        f"Win Rate  : {win_rate:.1f}%  ({len(wins)}W/{len(sells)-len(wins)}L)",
+        f"Win Rate  : {win_rate:.1f}%  ({st.win_count}W/{st.loss_count}L)",
         f"Open      : {len(S.env().open_positions)}  Cycle: {S.env().cycle_count}",
         "", "[OPEN POSITIONS]",
     ]

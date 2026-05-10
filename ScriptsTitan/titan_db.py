@@ -97,6 +97,19 @@ def init_db(db_path: str) -> None:
                 audit_type  TEXT     NOT NULL,
                 data        TEXT     NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS trade_stats (
+                id          INTEGER PRIMARY KEY CHECK (id = 1),
+                sell_count  INTEGER NOT NULL DEFAULT 0,
+                win_count   INTEGER NOT NULL DEFAULT 0,
+                loss_count  INTEGER NOT NULL DEFAULT 0,
+                sum_pnl     REAL    NOT NULL DEFAULT 0.0,
+                sum_wins    REAL    NOT NULL DEFAULT 0.0,
+                sum_losses  REAL    NOT NULL DEFAULT 0.0,
+                best        REAL    NOT NULL DEFAULT 0.0,
+                worst       REAL    NOT NULL DEFAULT 0.0,
+                updated_at  DATETIME NOT NULL
+            );
         """)
         _migrate_ts_columns(cx)
 
@@ -546,6 +559,45 @@ def load_trade_history(limit: int = 5000) -> list[dict]:
         _row_to_trade(r, wallets_by_id.get(r["id"], []), audits_by_id.get(r["id"], []))
         for r in rows
     ]
+
+
+def upsert_trade_stats(stats: object) -> None:
+    if not _DB_PATH:
+        return
+    now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    with _connect() as cx:
+        cx.execute(
+            """INSERT INTO trade_stats (id, sell_count, win_count, loss_count,
+               sum_pnl, sum_wins, sum_losses, best, worst, updated_at)
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+               sell_count=excluded.sell_count, win_count=excluded.win_count,
+               loss_count=excluded.loss_count, sum_pnl=excluded.sum_pnl,
+               sum_wins=excluded.sum_wins, sum_losses=excluded.sum_losses,
+               best=excluded.best, worst=excluded.worst, updated_at=excluded.updated_at""",
+            (stats.sell_count, stats.win_count, stats.loss_count,  # type: ignore[attr-defined]
+             stats.sum_pnl, stats.sum_wins, stats.sum_losses,      # type: ignore[attr-defined]
+             stats.best, stats.worst, now),                        # type: ignore[attr-defined]
+        )
+
+
+def load_trade_stats() -> object | None:
+    """Return a TradeStats populated from DB, or None if no row exists."""
+    if not _DB_PATH:
+        return None
+    with _connect() as cx:
+        row = cx.execute(
+            "SELECT sell_count, win_count, loss_count, sum_pnl, sum_wins, sum_losses, best, worst "
+            "FROM trade_stats WHERE id = 1"
+        ).fetchone()
+    if row is None:
+        return None
+    from titan_state import TradeStats
+    s = TradeStats()
+    s.sell_count, s.win_count, s.loss_count = int(row[0]), int(row[1]), int(row[2])
+    s.sum_pnl, s.sum_wins, s.sum_losses = float(row[3]), float(row[4]), float(row[5])
+    s.best, s.worst = float(row[6]), float(row[7])
+    return s
 
 
 def get_trade_count() -> int:
