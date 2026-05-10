@@ -170,7 +170,7 @@ def _dt_fields(ts: float) -> dict:
     dt = datetime.fromtimestamp(ts)
     return {
         "ts": ts,
-        "ts_str": dt.strftime("%H:%M:%S"),
+        "ts_str": dt.strftime("%Y-%m-%d %H:%M:%S"),
         "ts_iso": dt.isoformat(timespec="seconds"),
         "date": dt.strftime("%Y-%m-%d"),
         "time": dt.strftime("%H:%M:%S"),

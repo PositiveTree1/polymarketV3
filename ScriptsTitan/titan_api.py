@@ -275,6 +275,34 @@ class TitanAPI:
         return result
 
     @mcp_tool(
+        description=(
+            "Execute a read-only SELECT query against titan_state.db. "
+            "Only SELECT statements are accepted — any other statement raises an error. "
+            "The schema is injected at runtime via get_db_schema. "
+            "Use get_db_schema first to discover available tables and columns before querying."
+        ),
+        input_schema={
+            "sql": {"type": "string", "description": "A SELECT SQL statement to run against titan_state.db"},
+        },
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def query_db(self, sql: str) -> list[dict]:
+        import titan_db as _DB
+        return _DB.query_db(sql)
+
+    @mcp_tool(
+        description=(
+            "Returns the current titan_state.db schema as a compact string. "
+            "Call this before query_db to discover available tables and their columns. "
+            "The schema is built dynamically from sqlite_master so it always reflects the live DB."
+        ),
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def get_db_schema(self) -> str:
+        import titan_db as _DB
+        return _DB.get_schema_description()
+
+    @mcp_tool(
         description="Returns the full trade history (buys and sells).",
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )

@@ -107,6 +107,13 @@ def _build_tool_list(api: TitanAPI) -> list[dict]:
             meta = method._mcp_tool.copy()
             if "required" not in meta.get("inputSchema", {}):
                 meta["inputSchema"]["required"] = []
+            if name == "query_db":
+                try:
+                    import titan_db as _DB
+                    schema = _DB.get_schema_description()
+                    meta = {**meta, "description": meta["description"] + f" Schema: {schema}"}
+                except Exception:
+                    pass
             tools.append(meta)
     return tools
 

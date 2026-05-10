@@ -10,6 +10,22 @@ import titan_db as DB
 from titan_config import STATE_FILE, WHALE_FILE, STATE_DB, BANKROLL_START, SEED_WATCHLIST
 
 
+def _format_ts_str(ts_value: object) -> str | None:
+    try:
+        return datetime.fromtimestamp(float(ts_value)).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def _normalize_ts_fields(record: dict, field_pairs: list[tuple[str, str]]) -> dict:
+    normalized = dict(record)
+    for ts_field, ts_str_field in field_pairs:
+        formatted = _format_ts_str(normalized.get(ts_field))
+        if formatted is not None:
+            normalized[ts_str_field] = formatted
+    return normalized
+
+
 def save_state():
     try:
         env = S.env()
@@ -26,16 +42,22 @@ def save_state():
         if env.watchlist:
             DB.upsert_watchlist(env.watchlist)
 
+        db_count = DB.get_trade_count()
+        if len(env.trade_history) > db_count:
+            new_trades = env.trade_history[db_count:]
+            for trade in new_trades:
+                DB.append_trade(trade)
+
         # Build a lean copy of open_positions without price_history
         lean_positions = {}
         for k, pos in env.open_positions.items():
             lean_pos = {key: val for key, val in pos.items() if key != "price_history"}
+            lean_pos = _normalize_ts_fields(lean_pos, [("entry_ts", "entry_ts_str")])
             lean_positions[f"{k[0]}|||{k[1]}"] = lean_pos
 
         state = {
             "bankroll":           env.paper_bankroll,
             "session_pnl":        env.session_pnl,
-            "trade_history":      env.trade_history[-1000:],
             "open_positions":     lean_positions,
             "active_market_cids": list(env.active_market_cids),
             "cooldown_cids":      env.cooldown_cids,
@@ -96,7 +118,6 @@ def _load_trading_state():
         if env.paper_bankroll <= 0:
             env.paper_bankroll = BANKROLL_START
         env.session_pnl        = float(state.get("session_pnl", 0.0))
-        env.trade_history      = state.get("trade_history", [])
         env.active_market_cids = set(state.get("active_market_cids", []))
         env.cooldown_cids      = state.get("cooldown_cids", {})
         env.position_whale_map = {k: set(v) for k, v in state.get("position_whale_map", {}).items()}
@@ -110,6 +131,16 @@ def _load_trading_state():
                 env.watchlist.update(saved_wl)
                 DB.upsert_watchlist(env.watchlist)
                 S._log(f"📂 Watchlist migrated from JSON: {len(saved_wl)} addresses", "INFO")
+
+        db_trades = DB.load_trade_history()
+        if db_trades:
+            env.trade_history = db_trades
+        else:
+            json_trades = state.get("trade_history", [])
+            if json_trades:
+                DB.bulk_insert_trades(json_trades)
+                env.trade_history = DB.load_trade_history()
+                S._log(f"📂 Trade history migrated from JSON: {len(json_trades)} records", "INFO")
 
         raw = state.get("open_positions", {})
         env.open_positions = {}

@@ -7,9 +7,10 @@ import requests
 import os
 from datetime import datetime
 from titan_client import TitanClient
+from titan_protocol import TitanBackend
 
 # ── backends ──────────────────────────────────────────────────────────────────
-ACTIVE_BACKEND = "ollama"   # "ollama" | "groq" | "openai" | "gemini" | "local"
+ACTIVE_BACKEND = "local"   # "ollama" | "groq" | "openai" | "gemini" | "local"
 
 BACKENDS: dict[str, dict] = {
     "groq": {
@@ -233,7 +234,7 @@ def _tool_call_id(tc: dict, idx: int) -> str:
     return str(tc.get("id") or f"toolcall_{idx}")
 
 
-def _append_openai_tool_roundtrip(messages: list[dict], assistant_msg: dict, tool_calls: list[dict], bridge: TitanMCPBridge) -> None:
+def _append_openai_tool_roundtrip(messages: list[dict], assistant_msg: dict, tool_calls: list[dict], bridge: TitanMCPBridge, on_tool_call=None) -> None:
     messages.append({
         "role": "assistant",
         "content": assistant_msg.get("content", "") or "",
@@ -242,6 +243,8 @@ def _append_openai_tool_roundtrip(messages: list[dict], assistant_msg: dict, too
     for idx, tool_call in enumerate(tool_calls, start=1):
         name = _tool_call_name(tool_call)
         args = _tool_call_args(tool_call)
+        if on_tool_call:
+            on_tool_call(name, args)
         result = bridge.call(name, args)
         messages.append({
             "role": "tool",
@@ -251,7 +254,7 @@ def _append_openai_tool_roundtrip(messages: list[dict], assistant_msg: dict, too
         })
 
 
-def _append_ollama_tool_roundtrip(messages: list[dict], assistant_msg: dict, tool_calls: list[dict], bridge: TitanMCPBridge) -> None:
+def _append_ollama_tool_roundtrip(messages: list[dict], assistant_msg: dict, tool_calls: list[dict], bridge: TitanMCPBridge, on_tool_call=None) -> None:
     messages.append({
         "role": "assistant",
         "content": assistant_msg.get("content", "") or "",
@@ -260,6 +263,8 @@ def _append_ollama_tool_roundtrip(messages: list[dict], assistant_msg: dict, too
     for idx, tool_call in enumerate(tool_calls, start=1):
         name = _tool_call_name(tool_call)
         args = _tool_call_args(tool_call)
+        if on_tool_call:
+            on_tool_call(name, args)
         result = bridge.call(name, args)
         messages.append({
             "role": "tool",
@@ -269,8 +274,8 @@ def _append_ollama_tool_roundtrip(messages: list[dict], assistant_msg: dict, too
         })
 
 
-def _dispatch_with_titan_tools(messages: list[dict], bridge: TitanMCPBridge, on_token, on_done, on_error) -> bool:
-    if _btype not in {"openai_compat", "ollama"}:
+def _dispatch_with_titan_tools(messages: list[dict], bridge: TitanMCPBridge, on_token, on_done, on_error, on_tool_call=None) -> bool:
+    if _btype not in {"openai_compat", "ollama", "local"}:
         return False
 
     try:
@@ -285,13 +290,13 @@ def _dispatch_with_titan_tools(messages: list[dict], bridge: TitanMCPBridge, on_
                 assistant_msg = _ollama_chat_once(tool_messages, tools)
                 tool_calls = _message_tool_calls(assistant_msg)
                 if tool_calls:
-                    _append_ollama_tool_roundtrip(tool_messages, assistant_msg, tool_calls, bridge)
+                    _append_ollama_tool_roundtrip(tool_messages, assistant_msg, tool_calls, bridge, on_tool_call)
                     continue
             else:
                 assistant_msg = _openai_chat_once(tool_messages, tools)
                 tool_calls = _message_tool_calls(assistant_msg)
                 if tool_calls:
-                    _append_openai_tool_roundtrip(tool_messages, assistant_msg, tool_calls, bridge)
+                    _append_openai_tool_roundtrip(tool_messages, assistant_msg, tool_calls, bridge, on_tool_call)
                     continue
 
             final_text = assistant_msg.get("content", "") or ""
@@ -389,23 +394,35 @@ def _dispatch(messages: list[dict], on_token, on_done, on_error) -> None:
 # ── AI client ─────────────────────────────────────────────────────────────────
 
 class TitanAIClient:
-    def __init__(self):
+    def __init__(self, engine_module: TitanBackend | None = None):
+        self._engine: TitanBackend | None = engine_module
         self._messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
         self._lock = threading.Lock()
         self._mcp = TitanMCPBridge()
 
-    def ask(self, user_msg: str, snapshot: str, on_token, on_done, on_error) -> None:
+    def _build_request_messages(self, full_msg: str) -> list[dict]:
+        history: list[dict] = []
+        for message in self._messages:
+            if message.get("role") == "system":
+                continue
+            history.append(dict(message))
+        return [{"role": "system", "content": SYSTEM_PROMPT}, *history, {"role": "user", "content": full_msg}]
+
+
+    def ask(self, user_msg: str, on_token, on_done, on_error, on_tool_call=None) -> None:
+        snapshot = ""
+        if self._engine is not None:
+            try:
+                snapshot = self._engine.get_snapshot(compressed=True)
+            except Exception as exc:
+                snapshot = f"(snapshot error: {exc})"
+
         full_msg = f"[LIVE SYSTEM SNAPSHOT]\n{snapshot}\n\n[USER QUESTION]\n{user_msg}"
+
         with self._lock:
-            for m in self._messages:
-                if m["role"] == "user" and "[LIVE SYSTEM SNAPSHOT]" in m["content"]:
-                    parts = m["content"].split("[USER QUESTION]")
-                    if len(parts) > 1:
-                        m["content"] = "[LIVE SYSTEM SNAPSHOT]\n(truncated)\n\n[USER QUESTION]" + parts[1]
             if len(self._messages) > 21:
                 self._messages = [self._messages[0]] + self._messages[-10:]
-            self._messages.append({"role": "user", "content": full_msg})
-            snapshot_messages = list(self._messages)
+            snapshot_messages = self._build_request_messages(full_msg)
 
         def _run():
             try:
@@ -415,16 +432,14 @@ class TitanAIClient:
 
             def _done(full: str):
                 with self._lock:
+                    self._messages.append({"role": "user", "content": user_msg})
                     self._messages.append({"role": "assistant", "content": full})
                 on_done()
 
             def _err(msg: str):
-                with self._lock:
-                    if self._messages and self._messages[-1]["role"] == "user":
-                        self._messages.pop()
                 on_error(msg)
 
-            if _dispatch_with_titan_tools(snapshot_messages, self._mcp, on_token, _done, _err):
+            if _dispatch_with_titan_tools(snapshot_messages, self._mcp, on_token, _done, _err, on_tool_call):
                 return
             _dispatch(snapshot_messages, on_token, _done, _err)
 
@@ -438,9 +453,9 @@ class TitanAIClient:
 # ── UI panel ──────────────────────────────────────────────────────────────────
 
 class AIPanel:
-    def __init__(self, parent: tk.Widget, engine_module=None):
-        self._engine = engine_module
-        self._client = TitanAIClient()
+    def __init__(self, parent: tk.Widget, engine_module: TitanBackend | None = None):
+        self._engine: TitanBackend | None = engine_module
+        self._client = TitanAIClient(engine_module=engine_module)
         self._busy   = False
 
         mono    = tkfont.Font(family="Courier", size=9)
@@ -495,6 +510,7 @@ class AIPanel:
         self._chat.tag_configure("ts",     foreground="#334455")
         self._chat.tag_configure("bold",   foreground="#ffffff", font=bold_hd)
         self._chat.tag_configure("bullet", foreground=FG_ACCENT)
+        self._chat.tag_configure("tool",   foreground=FG_WARN,  font=mono_sm)
 
         inp_frame = tk.Frame(frame, bg=BG_MID, pady=4)
         inp_frame.pack(fill="x", padx=4, pady=4)
@@ -558,19 +574,20 @@ class AIPanel:
         self._write(f"\n[{ts}] ", "ts")
         self._write(f"You: {text}\n", "user")
 
-        snapshot = ""
-        if self._engine and hasattr(self._engine, "get_system_snapshot"):
-            try:
-                snapshot = self._engine.get_system_snapshot()
-            except Exception as e:
-                snapshot = f"(snapshot error: {e})"
-
         self._write(f"[{datetime.now().strftime('%H:%M:%S')}] ", "ts")
         self._write("TITAN AI: ", "user")
 
         def on_token(tok: str) -> None:
             self._chat.configure(state="normal")
             self._chat.insert(tk.END, tok, "ai")
+            self._chat.see(tk.END)
+            self._chat.configure(state="disabled")
+
+        def on_tool_call(name: str, args: dict) -> None:
+            args_str = ", ".join(f"{k}={v!r}" for k, v in args.items()) if args else ""
+            label = f"{name}({args_str})" if args_str else name
+            self._chat.configure(state="normal")
+            self._chat.insert(tk.END, f"\n  ⚙ MCP → {label}\n", "tool")
             self._chat.see(tk.END)
             self._chat.configure(state="disabled")
 
@@ -587,7 +604,7 @@ class AIPanel:
             self._set_controls("normal")
             self._status_var.set("⬤ error")
 
-        self._client.ask(text, snapshot, on_token, on_done, on_error)
+        self._client.ask(text, on_token, on_done, on_error, on_tool_call)
 
     def _set_controls(self, state: str) -> None:
         try:
@@ -642,7 +659,7 @@ class AIPanel:
 
 # ── public API ────────────────────────────────────────────────────────────────
 
-def attach_ai_panel(root: tk.Tk, engine_module=None) -> tuple[AIPanel, tk.Frame]:
+def attach_ai_panel(root: tk.Tk, engine_module: TitanBackend | None = None) -> tuple[AIPanel, tk.Frame]:
     pw = tk.PanedWindow(root, orient="horizontal", bg="#080810",
                         sashwidth=5, sashrelief="flat", sashpad=0, handlesize=0)
     pw.pack(fill="both", expand=True)
