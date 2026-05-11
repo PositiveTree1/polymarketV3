@@ -14,6 +14,8 @@ import threading
 import time
 import math
 import importlib
+import json
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, cast
 from titan_protocol import TitanBackend
@@ -185,12 +187,14 @@ def run_ui(api: TitanBackend) -> None:
     def _open_pos_dict() -> dict:
         try:
             return {_ast.literal_eval(p["key"]): p for p in api.get_positions(brief=False)}
-        except Exception:
+        except Exception as e:
+            _log_ui_error("open positions cache", e)
             return {}
     def _wallet_cache() -> dict:
         try:
             return {w["wallet"]: w for w in api.get_whales()}
-        except Exception:
+        except Exception as e:
+            _log_ui_error("wallet cache", e)
             return {}
 
 
@@ -409,6 +413,7 @@ def run_ui(api: TitanBackend) -> None:
     sig_tree.configure(yscrollcommand=sig_vsb.set)
     sig_vsb.pack(side="right", fill="y")
     sig_tree.pack(fill="x", padx=4, pady=(4,2))
+    _signal_tree_items: dict[str, SignalDict] = {}
     
     lf = tk.Frame(tab_live, bg="#080810")
     lf.pack(fill="both", expand=True, padx=4)
@@ -580,13 +585,18 @@ def run_ui(api: TitanBackend) -> None:
                 win.clipboard_clear()
                 win.clipboard_append(title)
                 win.update()
-            except Exception:
-                pass
+            except Exception as e:
+                _log_ui_error("copy position title", e, "WARN")
+
+        def inspect_raw_data() -> None:
+            show_properties_popup(pos, title=f"Position Properties - {title}", subtitle="Double-click nested rows to inspect them.")
     
         tk.Button(lf, text="🌐 Open on Polymarket", bg="#0a1a3a", fg="#00aaff",
                   font=mono9, padx=10, command=open_polymarket).pack(side="left", padx=4)
         tk.Button(lf, text="📋 Copy Title", bg="#1a2a1a", fg="#00ff88",
                   font=mono9, padx=10, command=copy_title).pack(side="left", padx=4)
+        tk.Button(lf, text="🔎 Inspect Raw", bg="#201a2a", fg="#d0b0ff",
+                  font=mono9, padx=10, command=inspect_raw_data).pack(side="left", padx=4)
     
         url_lbl = tk.Label(lf, text=market_url[:80], fg="#334455", bg="#060615", font=mono9)
         url_lbl.pack(side="left", padx=8)
@@ -745,13 +755,18 @@ def run_ui(api: TitanBackend) -> None:
                 win.clipboard_clear()
                 win.clipboard_append(title)
                 win.update()
-            except Exception:
-                pass
+            except Exception as e:
+                _log_ui_error("copy trade title", e, "WARN")
+
+        def inspect_raw_data() -> None:
+            show_properties_popup(trade, title=f"Trade Properties - {title}", subtitle="Double-click nested rows to inspect them.")
     
         tk.Button(lf, text="🌐 Open on Polymarket", bg="#0a1a3a", fg="#00aaff",
                   font=mono9, padx=10, command=open_polymarket).pack(side="left", padx=4)
         tk.Button(lf, text="📋 Copy Title", bg="#1a2a1a", fg="#00ff88",
                   font=mono9, padx=10, command=copy_title).pack(side="left", padx=4)
+        tk.Button(lf, text="🔎 Inspect Raw", bg="#201a2a", fg="#d0b0ff",
+                  font=mono9, padx=10, command=inspect_raw_data).pack(side="left", padx=4)
     
         # Full raw data
         raw_f = tk.Frame(win, bg="#060615")
@@ -925,8 +940,8 @@ def run_ui(api: TitanBackend) -> None:
                             root.clipboard_clear()
                             root.clipboard_append(pos.get('title', mkt_name))
                             root.update()
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            _log_ui_error("copy selected position title", e, "WARN")
                         return
     
     tk.Button(pos_btn_bar, text="🌐 POLYMARKET", bg="#0a1a3a", fg="#00aaff",
@@ -1205,6 +1220,9 @@ def run_ui(api: TitanBackend) -> None:
             sig_log.configure(state="disabled")
         except Exception:
             pass
+
+    def _log_ui_error(context: str, error: Exception, level: str = "ERR") -> None:
+        log(f"[{context}] {error}", level)
     
     
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -1245,8 +1263,8 @@ def run_ui(api: TitanBackend) -> None:
             try:
                 pyperclip.copy(snapshot)
                 copied = True
-            except Exception:
-                pass
+            except Exception as e:
+                _log_ui_error("copy debug snapshot via pyperclip", e, "WARN")
     
         # Fallback: tkinter clipboard
         if not copied:
@@ -1255,8 +1273,8 @@ def run_ui(api: TitanBackend) -> None:
                 root.clipboard_append(snapshot)
                 root.update()   # flush so the clipboard is actually set
                 copied = True
-            except Exception:
-                pass
+            except Exception as e:
+                _log_ui_error("copy debug snapshot via tkinter clipboard", e, "WARN")
     
         if copied:
             n_lines = snapshot.count("\n")
@@ -1458,6 +1476,180 @@ def run_ui(api: TitanBackend) -> None:
                 return float(ev_pct)
         return 0.0
 
+    def _signal_age_minutes(signal: SignalDict) -> float:
+        age_min = signal.get("age_min")
+        if isinstance(age_min, (int, float)):
+            return float(age_min)
+        age_h = signal.get("age_h")
+        if isinstance(age_h, (int, float)):
+            return float(age_h) * 60.0
+        return 0.0
+
+    @dataclass(frozen=True)
+    class _InspectorRow:
+        name: str
+        value_text: str
+        child_value: object | None
+
+    def _format_property_value(value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, float):
+            return f"{value:.6f}"
+        if isinstance(value, (int, bool, str)):
+            return str(value)
+        return str(value)
+
+    def _describe_property_value(value: object) -> tuple[str, object | None]:
+        if isinstance(value, dict):
+            if not value:
+                return "{}", None
+            return f"{len(value)} field(s) - double-click", value
+        if isinstance(value, list):
+            if not value:
+                return "[]", None
+            return f"{len(value)} item(s) - double-click", value
+        if isinstance(value, tuple):
+            if not value:
+                return "()", None
+            return f"{len(value)} item(s) - double-click", list(value)
+        if isinstance(value, set):
+            if not value:
+                return "set()", None
+            return f"{len(value)} item(s) - double-click", sorted(value, key=str)
+        if is_dataclass(value) and not isinstance(value, type):
+            return f"{type(value).__name__} - double-click", value
+        return _format_property_value(value), None
+
+    def _build_property_rows(value: object) -> list[_InspectorRow]:
+        rows: list[_InspectorRow] = []
+        if isinstance(value, dict):
+            for key in sorted(value.keys(), key=str):
+                text, child_value = _describe_property_value(value[key])
+                rows.append(_InspectorRow(str(key), text, child_value))
+            return rows
+        if isinstance(value, list):
+            for idx, item in enumerate(value):
+                text, child_value = _describe_property_value(item)
+                rows.append(_InspectorRow(f"[{idx}]", text, child_value))
+            return rows
+        if isinstance(value, tuple):
+            for idx, item in enumerate(value):
+                text, child_value = _describe_property_value(item)
+                rows.append(_InspectorRow(f"[{idx}]", text, child_value))
+            return rows
+        if is_dataclass(value) and not isinstance(value, type):
+            for field_info in fields(value):
+                field_value = getattr(value, field_info.name)
+                text, child_value = _describe_property_value(field_value)
+                rows.append(_InspectorRow(field_info.name, text, child_value))
+            return rows
+        text, child_value = _describe_property_value(value)
+        rows.append(_InspectorRow("value", text, child_value))
+        return rows
+
+    def show_properties_popup(value: object, title: str = "Properties", subtitle: str = "") -> None:
+        detail_win = tk.Toplevel(root)
+        detail_win.title(title[:80] if title else "Properties")
+        detail_win.configure(bg="#080810")
+        detail_win.geometry("980x680")
+
+        tk.Label(detail_win, text=title or "Properties", fg="#00ff88", bg="#080810",
+                 font=bold_hd, anchor="w", justify="left").pack(fill="x", padx=10, pady=(10, 4))
+        if subtitle:
+            tk.Label(detail_win, text=subtitle, fg="#556677", bg="#080810",
+                     font=mono_sm, anchor="w", justify="left").pack(fill="x", padx=10, pady=(0, 6))
+
+        table_wrap = tk.Frame(detail_win, bg="#080810")
+        table_wrap.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        prop_cols = ("Property", "Value")
+        prop_tree = ttk.Treeview(table_wrap, columns=prop_cols, show="headings")
+        prop_tree.heading("Property", text="Property")
+        prop_tree.heading("Value", text="Value")
+        prop_tree.column("Property", width=300, anchor="w", stretch=False)
+        prop_tree.column("Value", width=640, anchor="w", stretch=True)
+
+        prop_vsb = tk.Scrollbar(table_wrap, command=prop_tree.yview)
+        prop_hsb = tk.Scrollbar(table_wrap, orient="horizontal", command=prop_tree.xview)
+        prop_tree.configure(yscrollcommand=prop_vsb.set, xscrollcommand=prop_hsb.set)
+
+        prop_vsb.pack(side="right", fill="y")
+        prop_hsb.pack(side="bottom", fill="x")
+        prop_tree.pack(fill="both", expand=True)
+
+        detail_items: dict[str, object] = {}
+        for row in _build_property_rows(value):
+            item_id = prop_tree.insert("", "end", values=(row.name, row.value_text))
+            if row.child_value is not None:
+                detail_items[str(item_id)] = row.child_value
+
+        help_var = tk.StringVar(value="Double-click a row to inspect nested values.")
+        tk.Label(detail_win, textvariable=help_var, fg="#445566", bg="#080810",
+                 font=mono_sm, anchor="w").pack(fill="x", padx=10, pady=(0, 10))
+
+        def _open_selected_property(event: tk.Event[tk.Misc]) -> None:
+            item_id = prop_tree.identify_row(event.y)
+            if not item_id:
+                selection = prop_tree.selection()
+                if not selection:
+                    return
+                item_id = str(selection[0])
+            else:
+                prop_tree.selection_set(item_id)
+                prop_tree.focus(item_id)
+            child_value = detail_items.get(str(item_id))
+            if child_value is None:
+                help_var.set("Selected property is a scalar value.")
+                return
+            values = prop_tree.item(item_id).get("values", [])
+            prop_name = str(values[0]) if values else "Property"
+            show_properties_popup(child_value, title=f"{title} / {prop_name}", subtitle=prop_name)
+
+        prop_tree.bind("<Double-1>", _open_selected_property)
+
+        detail_win.transient(root)
+        detail_win.grab_set()
+
+    def _show_signal_detail(signal: SignalDict) -> None:
+        signal_title = str(signal.get("title", "Signal"))
+        signal_outcome = str(signal.get("outcome", ""))
+        popup_title = signal_title if not signal_outcome else f"{signal_title} [{signal_outcome}]"
+        show_properties_popup(signal, title=f"Signal Properties - {popup_title}", subtitle="Double-click nested rows to inspect them.")
+
+    def _on_signal_double_click(event: tk.Event[tk.Misc]) -> None:
+        log(
+            f"[signal dblclick] x={event.x} y={event.y} "
+            f"selection={list(sig_tree.selection())} "
+            f"children={len(sig_tree.get_children())}",
+            "SIG",
+        )
+        item_id = sig_tree.identify_row(event.y)
+        if not item_id:
+            log("[signal dblclick] no row from identify_row, falling back to selection", "SIG")
+            selection = sig_tree.selection()
+            if not selection:
+                log("[signal dblclick] no selection available", "WARN")
+                return
+            item_id = str(selection[0])
+        else:
+            sig_tree.selection_set(item_id)
+            sig_tree.focus(item_id)
+        log(f"[signal dblclick] resolved item_id={item_id}", "SIG")
+        signal = _signal_tree_items.get(str(item_id))
+        if signal is None:
+            log(f"[signal dblclick] no backing signal found for item_id={item_id}", "WARN")
+            return
+        log(
+            f"[signal dblclick] opening detail for "
+            f"title={signal.get('title', '?')} outcome={signal.get('outcome', '')}",
+            "SIG",
+        )
+        try:
+            _show_signal_detail(signal)
+        except Exception as e:
+            log(f"[signal dblclick] popup failed: {e}", "ERR")
+
     def _build_wallet_cache(value: object) -> dict[str, dict[str, object]]:
         if not isinstance(value, list):
             raise TypeError(f"whales must be a list, got {type(value).__name__}")
@@ -1496,6 +1688,7 @@ def run_ui(api: TitanBackend) -> None:
     
     def render_signals(signals):
         sig_tree.delete(*sig_tree.get_children())
+        _signal_tree_items.clear()
         for row in signals:
             try:
                 if isinstance(row, dict) and "signal" in row:
@@ -1509,20 +1702,28 @@ def run_ui(api: TitanBackend) -> None:
                 exit_tag = " ⚠EXIT" if s.get("exits_detected") else ""
                 mode_str = f"{hft_tag}{s.get('window','?').upper()}{exit_tag}{hist_suffix}"
                 full_title = f"{s.get('title','?')}  [{s.get('outcome','')}]"
-                sig_tree.insert("", "end", values=(
+                item_id = sig_tree.insert("", "end", values=(
                     f"{s.get('score',0):.0f}",
                     full_title[:90],
                     s.get("outcome", ""),
                     f"${s.get('avg_entry',0):.4f}",
                     f"${s.get('cur',0):.4f}",
                     f"{(s.get('drift') or 0)*100:+.1f}%",
-                    f"{s.get('age_min',0):.0f}m",
+                    f"{_signal_age_minutes(cast('SignalDict', s)):.0f}m",
                     f"${s.get('total_flow',0):,.0f}",
                     f"{s.get('n_ver',0)}/{s.get('n_total',0)}",
                     mode_str,
                 ), tags=(s.get("tier", ""),))
-            except Exception:
-                pass
+                _signal_tree_items[str(item_id)] = cast("SignalDict", s)
+            except Exception as e:
+                log(f"[render_signals row error] {e}", "ERR")
+        log(
+            f"[render_signals] tree_rows={len(sig_tree.get_children())} "
+            f"backing_rows={len(_signal_tree_items)} history_mode={_show_signal_history[0]}",
+            "SIG",
+        )
+
+    sig_tree.bind("<Double-1>", _on_signal_double_click)
     
     
     def render_alerts(signals, wallets):
@@ -1620,7 +1821,7 @@ def run_ui(api: TitanBackend) -> None:
             alert_txt.insert(tk.END,
                 f"\n  Total verified flow: ${s['ver_flow']:,.0f}  "
                 f"Largest single: ${s.get('max_bet_cash',0):,.0f}\n"
-                f"  Age: {s['age_min']:.0f}min ago\n\n"
+                f"  Age: {_signal_age_minutes(s):.0f}min ago\n\n"
                 f"  SCORE BREAKDOWN\n  {'─'*50}\n"
                 f"  Wallet quality   {bd.get('wallet',0):>5.1f}/30\n"
                 f"  Confluence       {bd.get('conf',0):>5}/18\n"
@@ -2012,8 +2213,10 @@ def run_ui(api: TitanBackend) -> None:
                 lambda: render_analysis(signals, trades, _wallets_from_cycle),
                 lambda: render_diagnostics(rejects, trades, _wallets_from_cycle),
             ):
-                try: fn()
-                except Exception: pass
+                try:
+                    fn()
+                except Exception as e:
+                    _log_ui_error("secondary renderer", e)
             ver_var.set(f"Ver: {n_ver}")
             elite_var.set(f"Elite: {n_elite}")
 
@@ -2130,8 +2333,8 @@ def run_ui(api: TitanBackend) -> None:
                         hist.append((now, eq))
                         if len(hist) > 10000:
                             del hist[:1000]
-            except Exception:
-                pass
+            except Exception as e:
+                root.after(0, lambda err=e: _log_ui_error("fast price updater", err))
             time.sleep(3.0)
     
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -2156,16 +2359,16 @@ def run_ui(api: TitanBackend) -> None:
                 nonlocal _last_signals, _last_rejects, _last_wallets
                 try:
                     _last_signals = _require_signal_rows(api.get_signals())
-                except Exception:
-                    pass
+                except Exception as e:
+                    root.after(0, lambda err=e: _log_ui_error("boot load signals", err, "WARN"))
                 try:
                     _last_rejects = api.get_rejects() or []
-                except Exception:
-                    pass
+                except Exception as e:
+                    root.after(0, lambda err=e: _log_ui_error("boot load rejects", err, "WARN"))
                 try:
                     _last_wallets = _build_wallet_cache(api.get_whales())
-                except Exception:
-                    pass
+                except Exception as e:
+                    root.after(0, lambda err=e: _log_ui_error("boot load whales", err, "WARN"))
                 root.after(0, lambda: log(f"📂 Boot signals: {len(_last_signals)} signal(s), {len(_last_rejects)} reject(s), {len(_last_wallets)} whale(s)", "INFO"))
                 if _last_signals or _last_rejects:
                     _pending_update[0] = True
