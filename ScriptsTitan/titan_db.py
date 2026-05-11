@@ -38,14 +38,12 @@ def init_db(db_path: str) -> None:
             CREATE INDEX IF NOT EXISTS idx_rejects_ts ON rejects (ts);
 
             CREATE TABLE IF NOT EXISTS price_history (
-                cid      TEXT    NOT NULL,
-                outcome  TEXT    NOT NULL,
+                asset    TEXT    NOT NULL,
                 ts       DATETIME NOT NULL,
                 recorded_at DATETIME NOT NULL,
                 price    REAL    NOT NULL,
-                PRIMARY KEY (cid, outcome, ts)
+                PRIMARY KEY (asset, ts)
             );
-            CREATE INDEX IF NOT EXISTS idx_ph_cid_outcome ON price_history (cid, outcome);
 
             CREATE TABLE IF NOT EXISTS equity_history (
                 ts          DATETIME NOT NULL PRIMARY KEY,
@@ -118,6 +116,7 @@ def init_db(db_path: str) -> None:
         """)
         _migrate_ts_columns(cx)
         _migrate_add_columns(cx)
+        _migrate_price_history_table(cx)
         _migrate_strip_signal_wallets(cx)
 
 
@@ -185,22 +184,6 @@ def _migrate_ts_columns(cx: sqlite3.Connection) -> None:
             ("CREATE INDEX idx_rejects_ts ON rejects (ts)",),
         ),
         (
-            "price_history",
-            """
-            CREATE TABLE price_history__new (
-                cid         TEXT     NOT NULL,
-                outcome     TEXT     NOT NULL,
-                ts          DATETIME NOT NULL,
-                recorded_at DATETIME NOT NULL,
-                price       REAL     NOT NULL,
-                PRIMARY KEY (cid, outcome, ts)
-            )
-            """,
-            "INSERT OR IGNORE INTO price_history__new (cid, outcome, ts, recorded_at, price) VALUES (?, ?, ?, ?, ?)",
-            "SELECT cid, outcome, ts, recorded_at, price FROM price_history ORDER BY cid ASC, outcome ASC, ts ASC",
-            ("CREATE INDEX idx_ph_cid_outcome ON price_history (cid, outcome)",),
-        ),
-        (
             "equity_history",
             """
             CREATE TABLE equity_history__new (
@@ -223,7 +206,7 @@ def _migrate_ts_columns(cx: sqlite3.Connection) -> None:
         if table_name in {"signals", "rejects"}:
             payload = [(row[0], row[1], _normalize_db_ts(row[2]), row[3]) for row in rows]
         elif table_name == "price_history":
-            payload = [(row[0], row[1], _normalize_db_ts(row[2]), row[3], row[4]) for row in rows]
+            payload = [(row[0], _normalize_db_ts(row[1]), row[2], row[3]) for row in rows]
         else:
             payload = [(_normalize_db_ts(row[0]), row[1], row[2]) for row in rows]
         cx.executemany(insert_sql, payload)
@@ -237,6 +220,103 @@ def _migrate_add_columns(cx: sqlite3.Connection) -> None:
     existing = {row[1] for row in cx.execute("PRAGMA table_info(trade_history)").fetchall()}
     if "asset" not in existing:
         cx.execute("ALTER TABLE trade_history ADD COLUMN asset TEXT")
+
+
+def _price_history_uses_asset_key(cx: sqlite3.Connection) -> bool:
+    columns = {row[1] for row in cx.execute("PRAGMA table_info(price_history)").fetchall()}
+    return "asset" in columns and "cid" not in columns and "outcome" not in columns
+
+
+def _migrate_price_history_table(cx: sqlite3.Connection) -> None:
+    columns = cx.execute("PRAGMA table_info(price_history)").fetchall()
+    if not columns:
+        return
+
+    column_names = {str(row[1]) for row in columns}
+    ts_type = next((str(row[2]).upper() for row in columns if row[1] == "ts"), None)
+    if _price_history_uses_asset_key(cx) and ts_type == "DATETIME":
+        cx.execute("CREATE INDEX IF NOT EXISTS idx_ph_asset ON price_history (asset)")
+        return
+
+    uses_asset_key = "asset" in column_names
+    if uses_asset_key:
+        rows = cx.execute(
+            """
+            SELECT asset, ts, recorded_at, price
+            FROM price_history
+            ORDER BY asset ASC, ts ASC
+            """
+        ).fetchall()
+    else:
+        rows = cx.execute(
+            """
+            SELECT ph.cid, ph.outcome, ph.ts, ph.recorded_at, ph.price
+            FROM price_history ph
+            ORDER BY ph.cid ASC, ph.outcome ASC, ph.ts ASC
+            """
+        ).fetchall()
+
+    trade_asset_rows = cx.execute(
+        """
+        SELECT cid, outcome, asset
+        FROM trade_history
+        WHERE asset IS NOT NULL AND asset != ''
+        ORDER BY id ASC
+        """
+    ).fetchall()
+
+    asset_by_position: dict[tuple[str, str], str] = {}
+    for cid, outcome, asset in trade_asset_rows:
+        key = (str(cid or ""), str(outcome or ""))
+        asset_str = str(asset or "")
+        if key[0] and key[1] and asset_str and key not in asset_by_position:
+            asset_by_position[key] = asset_str
+
+    cx.execute("DROP TABLE IF EXISTS price_history__asset_new")
+    cx.execute(
+        """
+        CREATE TABLE price_history__asset_new (
+            asset       TEXT     NOT NULL,
+            ts          DATETIME NOT NULL,
+            recorded_at DATETIME NOT NULL,
+            price       REAL     NOT NULL,
+            PRIMARY KEY (asset, ts)
+        )
+        """
+    )
+
+    migrated_rows: list[tuple[str, str, str, float]] = []
+    if uses_asset_key:
+        for asset, ts, recorded_at, price in rows:
+            asset_str = str(asset or "")
+            if not asset_str:
+                continue
+            migrated_rows.append((
+                asset_str,
+                _normalize_db_ts(ts),
+                _normalize_db_ts(recorded_at),
+                float(price),
+            ))
+    else:
+        for cid, outcome, ts, recorded_at, price in rows:
+            asset = asset_by_position.get((str(cid or ""), str(outcome or "")), "")
+            if asset:
+                migrated_rows.append((
+                    asset,
+                    _normalize_db_ts(ts),
+                    _normalize_db_ts(recorded_at),
+                    float(price),
+                ))
+
+    if migrated_rows:
+        cx.executemany(
+            "INSERT OR IGNORE INTO price_history__asset_new (asset, ts, recorded_at, price) VALUES (?, ?, ?, ?)",
+            migrated_rows,
+        )
+
+    cx.execute("DROP TABLE price_history")
+    cx.execute("ALTER TABLE price_history__asset_new RENAME TO price_history")
+    cx.execute("CREATE INDEX idx_ph_asset ON price_history (asset)")
 
 
 def _sanitize_signal_payload(payload: object) -> dict[str, object] | None:
@@ -277,42 +357,45 @@ def _ts_column_type(cx: sqlite3.Connection, table_name: str) -> str | None:
 
 # ── price_history ────────────────────────────────────────────────────────────
 
-def upsert_price_history(cid: str, outcome: str, points: list[tuple[float, float]]) -> None:
-    """Write (ts, price) pairs for a position. Ignores duplicates."""
-    if not points or not _DB_PATH:
+def upsert_price_history(asset: str, points: list[tuple[float, float]]) -> None:
+    """Write (ts, price) pairs for an asset. Ignores duplicates."""
+    asset_id = str(asset).strip()
+    if not asset_id or not points or not _DB_PATH:
         return
-    rows = [(cid, outcome, _ts_to_dt(float(ts)), _ts_to_dt(float(ts)), float(p))
+    rows = [(asset_id, _ts_to_dt(float(ts)), _ts_to_dt(float(ts)), float(p))
             for ts, p in points]
     with _connect() as cx:
         cx.executemany(
-            "INSERT OR IGNORE INTO price_history (cid, outcome, ts, recorded_at, price) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO price_history (asset, ts, recorded_at, price) "
+            "VALUES (?, ?, ?, ?)",
             rows,
         )
 
 
-def load_price_history(cid: str, outcome: str, limit: int = 2880) -> list[tuple[float, float]]:
+def load_price_history(asset: str, limit: int = 2880) -> list[tuple[float, float]]:
     """Return [(ts, price), ...] ordered oldest-first, capped at limit."""
-    if not _DB_PATH:
+    asset_id = str(asset).strip()
+    if not asset_id or not _DB_PATH:
         return []
     with _connect() as cx:
         rows = cx.execute(
             "SELECT ts, price FROM price_history "
-            "WHERE cid = ? AND outcome = ? "
+            "WHERE asset = ? "
             "ORDER BY ts DESC LIMIT ?",
-            (cid, outcome, limit),
+            (asset_id, limit),
         ).fetchall()
     return [(_dt_to_ts(str(r[0])), float(r[1])) for r in reversed(rows)]
 
 
-def delete_price_history(cid: str, outcome: str) -> None:
-    """Remove all price history for a closed position."""
-    if not _DB_PATH:
+def delete_price_history(asset: str) -> None:
+    """Remove all price history for an asset."""
+    asset_id = str(asset).strip()
+    if not asset_id or not _DB_PATH:
         return
     with _connect() as cx:
         cx.execute(
-            "DELETE FROM price_history WHERE cid = ? AND outcome = ?",
-            (cid, outcome),
+            "DELETE FROM price_history WHERE asset = ?",
+            (asset_id,),
         )
 
 

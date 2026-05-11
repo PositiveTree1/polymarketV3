@@ -145,4 +145,5 @@ class TradeRecordDict(_TradeRecordRequired, total=False):
     exit_audit:     dict
     # get_closed_positions extras
     price_history:          list[tuple[float, float]]
+    price_history_source:   str
     price_history_error:    str | None

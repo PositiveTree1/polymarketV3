@@ -526,6 +526,10 @@ def run_ui(api: TitanBackend) -> None:
         outcome  = pos.get("outcome", key[1] if isinstance(key, tuple) else "")
         cid      = pos.get("cid", key[0] if isinstance(key, tuple) else "")
         slug     = pos.get("slug", "") or pos.get("event_slug", "")
+        entry_ts = pos.get("entry_ts")
+        entry_ts_text = str(pos.get("entry_ts_str", "") or "")
+        if not entry_ts_text and isinstance(entry_ts, (int, float)) and float(entry_ts) > 0:
+            entry_ts_text = datetime.fromtimestamp(float(entry_ts)).strftime("%Y-%m-%d %H:%M:%S")
     
         # Header
         hf = tk.Frame(win, bg="#0a0a20", pady=8)
@@ -534,6 +538,9 @@ def run_ui(api: TitanBackend) -> None:
         tier_icon = "💎" if pos.get("is_conviction") else ("⚡" if pos.get("is_hft") else "")
         tk.Label(hf, text=f"{tier_icon}[{pos.get('tier','?')}]  {title}",
                  fg="#00aaff", bg="#0a0a20", font=bold11, wraplength=780, justify="left").pack(anchor="w", padx=12)
+        if entry_ts_text:
+            tk.Label(hf, text=f"ENTRY TIME  {entry_ts_text}",
+                     fg="#ffdd44", bg="#0a0a20", font=bold11, wraplength=780, justify="left").pack(anchor="w", padx=12, pady=(2,0))
         tk.Label(hf, text=f"Side: {outcome}   Score: {pos.get('score',0):.0f}pts   CID: {cid[:30]}…",
                  fg="#556677", bg="#0a0a20", font=mono9).pack(anchor="w", padx=12)
     
@@ -569,7 +576,14 @@ def run_ui(api: TitanBackend) -> None:
         wf = tk.Frame(win, bg="#060615")
         wf.pack(fill="x", padx=8)
         tk.Label(wf, text="WHALE WALLETS", fg="#00ff88", bg="#060615", font=bold9).pack(anchor="w", padx=4, pady=(4,2))
-        elite_wallets = pos.get("elite_wallets", []) + pos.get("whale_wallets", [])
+        seen_wallets: set[str] = set()
+        elite_wallets: list[str] = []
+        for wallet_addr in list(pos.get("elite_wallets", [])) + list(pos.get("whale_wallets", [])):
+            wallet_key = str(wallet_addr).lower()
+            if wallet_key in seen_wallets:
+                continue
+            seen_wallets.add(wallet_key)
+            elite_wallets.append(str(wallet_addr))
         elite_names   = pos.get("elite_names", [])
         for i, w_addr in enumerate(elite_wallets[:8]):
             name  = (elite_names[i] if i < len(elite_names) else None) or _wallet_cache().get(w_addr, {}).get("name", w_addr[:16]+"…")
@@ -942,12 +956,12 @@ def run_ui(api: TitanBackend) -> None:
             title = str(pos.get("title", mkt_name))
             if history:
                 _last_chart_warn[0] = ""
-                pos_graph.load(history, title, entry_price)
+                pos_graph.load(history, title, entry_price, entry_ts=float(pos.get("entry_ts") or 0) or None)
                 pos_chart_frame.refresh_panel(reset=True)
                 return
 
             detail = str(pos.get("price_history_error") or "Closed position has no chart history.")
-            pos_graph.load([], title, entry_price, detail)
+            pos_graph.load([], title, entry_price, detail, entry_ts=float(pos.get("entry_ts") or 0) or None)
             pos_chart_frame.refresh_panel(reset=True)
             warn_msg = f"Closed chart empty: {title[:80]} [{outcome}] | {detail}"
             if _last_chart_warn[0] != warn_msg:
@@ -960,7 +974,7 @@ def run_ui(api: TitanBackend) -> None:
             if title[:48] in mkt_name or mkt_name[:30] in title:
                 if str(pos.get("outcome", "")) == outcome:
                     _last_chart_warn[0] = ""
-                    pos_graph.load(pos.get("price_history", []), title, pos.get("entry_price", 0))
+                    pos_graph.load(pos.get("price_history", []), title, pos.get("entry_price", 0), entry_ts=float(pos.get("entry_ts") or 0) or None)
                     pos_chart_frame.refresh_panel(reset=True)
                     return
 
@@ -1666,6 +1680,51 @@ def run_ui(api: TitanBackend) -> None:
         rows.append(_InspectorRow("value", text, child_value))
         return rows
 
+    def _previewable_mapping(value: object) -> dict[str, object] | None:
+        if isinstance(value, dict):
+            return {str(key): value[key] for key in sorted(value.keys(), key=str)}
+        if is_dataclass(value) and not isinstance(value, type):
+            return {field_info.name: getattr(value, field_info.name) for field_info in fields(value)}
+        if isinstance(value, (list, tuple)):
+            seq = list(value)
+            if not seq:
+                return {}
+            if (
+                len(seq) == 2
+                and isinstance(seq[0], (int, float))
+                and isinstance(seq[1], (int, float))
+            ):
+                ts_value = float(seq[0])
+                if ts_value > 0:
+                    try:
+                        dt_text = datetime.fromtimestamp(ts_value).strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        dt_text = str(seq[0])
+                    return {"Date": dt_text, "Value": seq[1]}
+            return {f"Value {idx + 1}": item for idx, item in enumerate(seq[:4])}
+        return None
+
+    def _list_preview_columns(value: object) -> list[str]:
+        if not isinstance(value, list) or not value:
+            return []
+        preview_fields: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            mapping = _previewable_mapping(item)
+            if mapping is None:
+                continue
+            for key, raw in mapping.items():
+                if key in seen:
+                    continue
+                _, child_value = _describe_property_value(raw)
+                if child_value is not None:
+                    continue
+                seen.add(key)
+                preview_fields.append(key)
+                if len(preview_fields) >= 4:
+                    return preview_fields
+        return preview_fields
+
     def show_properties_popup(
         value: object,
         title: str = "Properties",
@@ -1687,12 +1746,18 @@ def run_ui(api: TitanBackend) -> None:
         table_wrap = tk.Frame(detail_win, bg="#080810")
         table_wrap.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        prop_cols = ("Property", "Value")
+        preview_fields = _list_preview_columns(value)
+        prop_cols = ("Property", *preview_fields) if preview_fields else ("Property", "Value")
         prop_tree = ttk.Treeview(table_wrap, columns=prop_cols, show="headings")
         prop_tree.heading("Property", text="Property")
-        prop_tree.heading("Value", text="Value")
         prop_tree.column("Property", width=210, anchor="w", stretch=False)
-        prop_tree.column("Value", width=730, anchor="w", stretch=True)
+        if preview_fields:
+            for field_name in preview_fields:
+                prop_tree.heading(field_name, text=field_name)
+                prop_tree.column(field_name, width=150, anchor="w", stretch=True)
+        else:
+            prop_tree.heading("Value", text="Value")
+            prop_tree.column("Value", width=730, anchor="w", stretch=True)
 
         prop_vsb = tk.Scrollbar(table_wrap, command=prop_tree.yview)
         prop_hsb = tk.Scrollbar(table_wrap, orient="horizontal", command=prop_tree.xview)
@@ -1703,10 +1768,27 @@ def run_ui(api: TitanBackend) -> None:
         prop_tree.pack(fill="both", expand=True)
 
         detail_items: dict[str, object] = {}
-        for row in _build_property_rows(value):
-            item_id = prop_tree.insert("", "end", values=(row.name, row.value_text))
-            if row.child_value is not None:
-                detail_items[str(item_id)] = row.child_value
+        if preview_fields and isinstance(value, list):
+            for idx, item in enumerate(value):
+                mapping = _previewable_mapping(item)
+                if mapping is None:
+                    text, child_value = _describe_property_value(item)
+                    item_id = prop_tree.insert("", "end", values=(f"[{idx}]", text, "", "", "")[:len(prop_cols)])
+                    if child_value is not None:
+                        detail_items[str(item_id)] = child_value
+                    continue
+                row_values = [f"[{idx}]"]
+                for field_name in preview_fields:
+                    raw_value = mapping.get(field_name)
+                    text, child_value = _describe_property_value(raw_value)
+                    row_values.append(text if child_value is None else text)
+                item_id = prop_tree.insert("", "end", values=tuple(row_values))
+                detail_items[str(item_id)] = item
+        else:
+            for row in _build_property_rows(value):
+                item_id = prop_tree.insert("", "end", values=(row.name, row.value_text))
+                if row.child_value is not None:
+                    detail_items[str(item_id)] = row.child_value
 
         help_var = tk.StringVar(value="Double-click a row to inspect nested values.")
         tk.Label(detail_win, textvariable=help_var, fg="#445566", bg="#080810",
@@ -1904,7 +1986,11 @@ def run_ui(api: TitanBackend) -> None:
         tk.Label(hf, text=f"{icon} [{tier}] {signal_title}",
                  fg="#00aaff", bg="#0a0a20", font=bold11,
                  wraplength=730, justify="left").pack(anchor="w", padx=12)
-        tk.Label(hf, text=f"Outcome: {signal_outcome}   Score: {score:.0f}   Strategy: {strategy}",
+        tk.Label(hf, text=f"OUTCOME: {signal_outcome or '—'}",
+                 fg="#fff4b0", bg="#4a2a00", font=font.Font(family="Courier", size=11, weight="bold"),
+                 padx=10, pady=4,
+                 wraplength=730, justify="left").pack(anchor="w", padx=12, pady=(4, 4))
+        tk.Label(hf, text=f"Score: {score:.0f}   Strategy: {strategy}",
                  fg="#556677", bg="#0a0a20", font=mono9,
                  wraplength=730, justify="left").pack(anchor="w", padx=12)
 
@@ -2688,13 +2774,13 @@ def run_ui(api: TitanBackend) -> None:
                     for p in closed:
                         if p['title'][:48] in mkt_name or mkt_name in p['title'][:48]:
                             if p.get('outcome') == outcome:
-                                pos_graph.load(p.get("price_history", []), p['title'], p.get('entry_price', 0))
+                                pos_graph.load(p.get("price_history", []), p['title'], p.get('entry_price', 0), entry_ts=float(p.get('entry_ts') or 0) or None)
                                 break
                 else:
                     for _, p in pos.items():
                         if p['title'][:48] in mkt_name or mkt_name in p['title'][:48]:
                             if p['outcome'] == outcome:
-                                pos_graph.load(p.get("price_history", []), p['title'], p['entry_price'])
+                                pos_graph.load(p.get("price_history", []), p['title'], p['entry_price'], entry_ts=float(p.get('entry_ts') or 0) or None)
                                 break
     
     

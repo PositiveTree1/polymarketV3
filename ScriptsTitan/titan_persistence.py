@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import cast
 import titan_state as S
 import titan_db as DB
+from titan_market import fetch_position_price_history
 from titan_config import STATE_FILE, WHALE_FILE, STATE_DB, BANKROLL_START, SEED_WATCHLIST
 from titan_wallet import WalletProfile
 
@@ -30,15 +31,26 @@ def _normalize_ts_fields(record: dict, field_pairs: list[tuple[str, str]]) -> di
     return normalized
 
 
+def _set_position_price_history(pos: dict, points: list[tuple[float, float]], source: str) -> None:
+    pos["price_history"] = points
+    pos["price_history_source"] = source
+    S._log(
+        f"📈 Price history source [{source}] for {str(pos.get('title', '?'))[:30]} "
+        f"asset={str(pos.get('asset', ''))[:20]} points={len(points)}",
+        "DIAG",
+    )
+
+
 def save_state():
     try:
         env = S.env()
 
         # Flush time-series data to SQLite before stripping from positions
-        for (cid, outcome), pos in env.open_positions.items():
+        for pos in env.open_positions.values():
             ph = pos.get("price_history")
-            if ph:
-                DB.upsert_price_history(cid, outcome, ph)
+            asset = str(pos.get("asset", "") or "")
+            if ph and asset:
+                DB.upsert_price_history(asset, ph)
 
         if env.watchlist:
             DB.upsert_watchlist(env.watchlist)
@@ -153,9 +165,19 @@ def _load_trading_state():
         for key, pos in env.open_positions.items():
             cid = pos.get("cid", key[0])
             env.active_market_cids.add(cid)
-            ph = DB.load_price_history(key[0], key[1])
+            asset = str(pos.get("asset", "") or "")
+            ph = DB.load_price_history(asset) if asset else []
+            price_history_source = "db_restore" if ph else "none"
+            if not ph:
+                if asset:
+                    ph = fetch_position_price_history(asset)
+                    if ph:
+                        DB.upsert_price_history(asset, ph)
+                        price_history_source = "clob_api_restore"
             if ph:
-                pos["price_history"] = ph
+                _set_position_price_history(pos, ph, price_history_source)
+            else:
+                _set_position_price_history(pos, [], "none")
 
         n_pos = len(env.open_positions)
         if n_pos:

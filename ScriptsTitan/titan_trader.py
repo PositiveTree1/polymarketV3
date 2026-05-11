@@ -26,7 +26,7 @@ from typing import TypedDict
 import titan_state as S
 from titan_config import *
 import titan_config as C
-from titan_market  import get_market, get_outcome_price, is_market_resolving, Market
+from titan_market  import fetch_position_price_history, get_market, get_outcome_price, is_market_resolving, Market
 from titan_signals import classify_market, estimate_expected_value, _KNOWN_HEDGE_WALLETS, Signal
 from titan_wallet  import is_hft_wallet, record_whale_trade_performance
 from titan_persistence import save_state, save_whale_roster_async
@@ -96,6 +96,7 @@ class Position(_PositionRequired, total=False):
     whale_avg_entry:    float
     drift_discount_pct: float | None
     source_recent_wr:   float | None
+    price_history_source: str
 
 # Optional: resolution monitor (lazy import to avoid circular)
 def _get_ws_monitor():
@@ -242,6 +243,28 @@ def _dt_fields(ts: float) -> dict:
         "date": dt.strftime("%Y-%m-%d"),
         "time": dt.strftime("%H:%M:%S"),
     }
+
+
+def _with_latest_price_point(points: list[tuple[float, float]], now_t: float, price: float) -> list[tuple[float, float]]:
+    if not points:
+        return [(now_t, price)]
+    last_ts, last_price = points[-1]
+    if abs(last_ts - now_t) < 0.5:
+        points[-1] = (now_t, price)
+        return points
+    if last_price != price:
+        points.append((now_t, price))
+    return points
+
+
+def _set_position_price_history(pos: Position, points: list[tuple[float, float]], source: str) -> None:
+    pos["price_history"] = points
+    pos["price_history_source"] = source
+    S._log(
+        f"  Price history source [{source}] for {pos.get('title', '?')[:30]} "
+        f"asset={str(pos.get('asset', ''))[:20]} points={len(points)}",
+        "DIAG",
+    )
 
 
 def _build_market_url(event_slug: str = "", slug: str = "") -> str:
@@ -936,6 +959,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         market_url = _build_market_url(event_slug, resolved_slug)
         entry_audit = _build_entry_audit(sig, cur, shares, bet, ev_info, now_t, S.env().paper_bankroll)
 
+        price_history = _with_latest_price_point(fetch_position_price_history(asset), now_t, cur)
         pos: Position = {
             "title":             title,
             "slug":              resolved_slug,
@@ -973,7 +997,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             "exits":             [],
             "reason":            None,
             "market_fail_count": 0,
-            "price_history":     [(now_t, cur)],
+            "price_history":     price_history,
             "peak_pnl_pct":      0.0,
             "liq":               sig.mkt.get("liq", 0),
             "volume":            sig.mkt.get("volume", 0),
@@ -982,6 +1006,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             "market_url":        market_url,
             "entry_audit":       entry_audit,
         }
+        _set_position_price_history(pos, price_history, "clob_api_open")
 
         # v10: drift_discount strategy — store whale avg entry for reference
         if strat == "drift_discount":
@@ -995,6 +1020,8 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         S.env().open_positions[key]    = pos
         S.env().active_market_cids.add(cid)
         S.env().position_whale_map[cid] = set(all_whale_addrs)
+        if asset:
+            DB.upsert_price_history(asset, price_history)
 
         # WS: subscribe to real-time resolution events
         _ws_sub = _get_ws_monitor()

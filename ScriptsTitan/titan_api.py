@@ -128,6 +128,8 @@ class TitanAPI:
     )
     def get_positions(self, brief: bool = True) -> list[PositionBriefDict]:
         import titan_state as _TS
+        import titan_db as _DB
+        from titan_market import fetch_position_price_history
         positions = []
         for k, v in _TS.env().open_positions.items():
             if brief:
@@ -155,6 +157,21 @@ class TitanAPI:
                     "risk_flag": v.get("risk_flag", ""),
                 })
             else:
+                if v.get("price_history") and not v.get("price_history_source"):
+                    v["price_history_source"] = "unknown_existing"
+                if not v.get("price_history"):
+                    asset = str(v.get("asset", "") or "")
+                    if asset:
+                        price_history = fetch_position_price_history(asset)
+                        if price_history:
+                            v["price_history"] = price_history
+                            v["price_history_source"] = "clob_api_lazy"
+                            _TS._log(
+                                f"📈 Price history source [clob_api_lazy] for {str(v.get('title', '?'))[:30]} "
+                                f"asset={asset[:20]} points={len(price_history)}",
+                                "DIAG",
+                            )
+                            _DB.upsert_price_history(asset, price_history)
                 positions.append({"key": str(k), **v})
         return positions
 
@@ -168,13 +185,13 @@ class TitanAPI:
         sells = [t for t in _DB.load_trade_history(limit=limit) if t.get("type") == "SELL"]
         result = []
         for t in reversed(sells):
-            cid = str(t.get("cid") or "")
-            outcome = str(t.get("outcome") or "")
-            ph = _DB.load_price_history(cid, outcome) if cid and outcome else []
+            asset = str(t.get("asset") or "")
+            ph = _DB.load_price_history(asset) if asset else []
             result.append({
                 **t,
                 "price_history": ph,
-                "price_history_error": "old trade, no cid" if not cid else None,
+                "price_history_source": "db_closed" if ph else "none",
+                "price_history_error": "old trade, no asset" if not asset else None,
             })
         return result
 

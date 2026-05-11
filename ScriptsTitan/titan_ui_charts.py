@@ -293,13 +293,6 @@ class BaseChart(tk.Canvas):
         spread = max(high - low, 0.5)
         return low - spread * 0.1, high + spread * 0.1
 
-    # def _compute_y_bounds(self, values: list[float]) -> tuple[float, float]:
-    #     low, high = min(values), max(values)
-    #     if high == low:
-    #         high += 0.005
-    #         low -= 0.005
-    #     return low, high
-
     def _build_context(
         self,
         *,
@@ -521,6 +514,7 @@ class PositionChart(BaseChart):
         super().__init__(parent, bg="#050510", hl="#1a2a4a", **kwargs)
         self._title: str = ""
         self._empty_message: str = "Select a position to view its live price chart"
+        self._entry_ts: float | None = None
 
     def load(
         self,
@@ -528,12 +522,13 @@ class PositionChart(BaseChart):
         title: str,
         entry_price: float,
         empty_message: str | None = None,
+        entry_ts: float | None = None,
     ) -> None:
         new_len = len(history) if history else 0
         new_msg = empty_message or "Select a position to view its live price chart"
         new_last = history[-1][1] if history else 0.0
         track_latest = self._selector_index >= max(self._last_len - 1, 0)
-        position_changed = title != self._title or entry_price != self._baseline_value
+        position_changed = title != self._title or entry_price != self._baseline_value or entry_ts != self._entry_ts
         data_changed = (
             new_len != self._last_len
             or new_last != self._last_val
@@ -543,6 +538,7 @@ class PositionChart(BaseChart):
             history_points = list(history) if history else []
             self._title = title
             self._baseline_value = entry_price
+            self._entry_ts = entry_ts
             self._empty_message = new_msg
             self._apply_loaded_history(
                 history=history_points,
@@ -587,8 +583,10 @@ class PositionChart(BaseChart):
                 tags="chart",
             )
 
-        buy_x = ctx.x_from_ts(ctx.timestamps[0])
-        buy_y = ctx.y_from_value(ctx.values[0])
+        buy_ts = self._entry_ts if self._entry_ts is not None else ctx.timestamps[0]
+        buy_price = self._baseline_value if self._entry_ts is not None else ctx.values[0]
+        buy_x = ctx.x_from_ts(buy_ts)
+        buy_y = ctx.y_from_value(buy_price)
         self.create_text(buy_x, buy_y - 14, text="▲ BUY", fill="#ffdd00", font=_mono_sm, tags="chart")
         self.create_oval(buy_x - 4, buy_y - 4, buy_x + 4, buy_y + 4, fill="#ffdd00", outline="", tags="chart")
 
@@ -636,25 +634,11 @@ class PnLChart(BaseChart):
             self._redraw()
             self._dirty = False
 
-    # def _empty_message_text(self, visible: list[HistoryPoint]) -> str | None:
-    #     if len(visible) < 2:
-    #         return "No data yet — graph appears after first equity point"
-    #     return None
-
     def _guide_values(self, ctx: RenderContext) -> list[float]:
         return [ctx.low + (ctx.high - ctx.low) * i / 6 for i in range(7)]
 
-    # def _guide_line_color(self) -> str:
-    #     return "#1a1a28"
-
-    # def _guide_text_color(self) -> str:
-    #     return "#335544"
-
     def _guide_label(self, value: float) -> str:
         return f"${value:.3f}"
-
-    # def _baseline_text(self) -> str | None:
-    #     return "START"
 
     def _draw_series(self, ctx: RenderContext) -> None:
         polygon_coords: list[float] = [ctx.pad_left, ctx.y_from_value(ctx.values[0])]
