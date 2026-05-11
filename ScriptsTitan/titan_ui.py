@@ -432,6 +432,8 @@ def run_ui(api: TitanBackend) -> None:
     sig_btn_bar.pack(fill="x", padx=4, pady=(0,4))
 
     _sig_hist_btn_var = tk.StringVar(value="📜 SHOW HISTORY")
+    _debug_mode = [False]
+    _debug_btn_var = tk.StringVar(value="🐞 DEBUG OFF")
 
     def _toggle_signal_history():
         _show_signal_history[0] = not _show_signal_history[0]
@@ -440,8 +442,15 @@ def run_ui(api: TitanBackend) -> None:
             _signal_history_cache[0] = []
         _pending_update[0] = True
 
+    def _toggle_debug_mode() -> None:
+        _debug_mode[0] = not _debug_mode[0]
+        _debug_btn_var.set("🐞 DEBUG ON" if _debug_mode[0] else "🐞 DEBUG OFF")
+        log(f"Signals debug mode {'enabled' if _debug_mode[0] else 'disabled'}", "INFO")
+
     tk.Button(sig_btn_bar, textvariable=_sig_hist_btn_var, bg="#1a1a00", fg="#ffcc44",
               font=mono_sm, command=_toggle_signal_history).pack(side="left", padx=4, pady=2)
+    tk.Button(sig_btn_bar, textvariable=_debug_btn_var, bg="#1a1320", fg="#d8b4ff",
+              font=mono_sm, command=_toggle_debug_mode).pack(side="left", padx=4, pady=2)
     tk.Label(sig_btn_bar, text="Current cycle or recent DB history", fg="#334455",
              bg="#080810", font=mono_sm).pack(side="left", padx=8)
     
@@ -589,6 +598,9 @@ def run_ui(api: TitanBackend) -> None:
                 _log_ui_error("copy position title", e, "WARN")
 
         def inspect_raw_data() -> None:
+            show_raw_data_popup(pos, title=f"Position Raw Data - {title}")
+
+        def open_properties() -> None:
             show_properties_popup(pos, title=f"Position Properties - {title}", subtitle="Double-click nested rows to inspect them.")
     
         tk.Button(lf, text="🌐 Open on Polymarket", bg="#0a1a3a", fg="#00aaff",
@@ -597,6 +609,8 @@ def run_ui(api: TitanBackend) -> None:
                   font=mono9, padx=10, command=copy_title).pack(side="left", padx=4)
         tk.Button(lf, text="🔎 Inspect Raw", bg="#201a2a", fg="#d0b0ff",
                   font=mono9, padx=10, command=inspect_raw_data).pack(side="left", padx=4)
+        tk.Button(lf, text="🧩 Properties", bg="#2a2012", fg="#ffcc88",
+                  font=mono9, padx=10, command=open_properties).pack(side="left", padx=4)
     
         url_lbl = tk.Label(lf, text=market_url[:80], fg="#334455", bg="#060615", font=mono9)
         url_lbl.pack(side="left", padx=8)
@@ -759,6 +773,9 @@ def run_ui(api: TitanBackend) -> None:
                 _log_ui_error("copy trade title", e, "WARN")
 
         def inspect_raw_data() -> None:
+            show_raw_data_popup(trade, title=f"Trade Raw Data - {title}")
+
+        def open_properties() -> None:
             show_properties_popup(trade, title=f"Trade Properties - {title}", subtitle="Double-click nested rows to inspect them.")
     
         tk.Button(lf, text="🌐 Open on Polymarket", bg="#0a1a3a", fg="#00aaff",
@@ -767,18 +784,115 @@ def run_ui(api: TitanBackend) -> None:
                   font=mono9, padx=10, command=copy_title).pack(side="left", padx=4)
         tk.Button(lf, text="🔎 Inspect Raw", bg="#201a2a", fg="#d0b0ff",
                   font=mono9, padx=10, command=inspect_raw_data).pack(side="left", padx=4)
+        tk.Button(lf, text="🧩 Properties", bg="#2a2012", fg="#ffcc88",
+                  font=mono9, padx=10, command=open_properties).pack(side="left", padx=4)
     
-        # Full raw data
-        raw_f = tk.Frame(win, bg="#060615")
-        raw_f.pack(fill="both", expand=True, padx=8, pady=(0,8))
-        tk.Label(raw_f, text="ALL RAW FIELDS", fg="#556677", bg="#060615", font=mono9).pack(anchor="w", padx=4)
-        raw_txt = scrolledtext.ScrolledText(raw_f, bg="#040410", fg="#778899", font=("Courier", 8),
-                                             height=8, wrap="word")
-        raw_txt.pack(fill="both", expand=True)
-        import json as _rjson
-        raw_txt.insert("1.0", _rjson.dumps(trade, indent=2, default=str))
-        raw_txt.configure(state="disabled")
     
+    def show_whale_detail(wallet: str, whale: dict[str, object]) -> None:
+        win = tk.Toplevel(root)
+        whale_name = str(whale.get("name", wallet[:16] + "…"))
+        win.title(f"Whale Detail — {whale_name[:50]}")
+        win.configure(bg="#060615")
+        win.geometry("760x560")
+        win.resizable(True, True)
+
+        mono10 = font.Font(family="Courier", size=10)
+        mono9 = font.Font(family="Courier", size=9)
+        bold9 = font.Font(family="Courier", size=9, weight="bold")
+        bold11 = font.Font(family="Courier", size=11, weight="bold")
+
+        score = float(whale.get("score", 0.0) or 0.0)
+        total_pnl = float(whale.get("total_pnl", 0.0) or 0.0)
+        pnl_color = "#00ff55" if total_pnl >= 0 else "#ff5555"
+        verified = bool(whale.get("verified"))
+        elite = bool(whale.get("elite"))
+        hft = bool(whale.get("hft"))
+        icon = "🔥" if elite else ("✅" if verified else "👁")
+
+        hf = tk.Frame(win, bg="#0a0a20", pady=8)
+        hf.pack(fill="x", padx=8, pady=(8, 0))
+        tk.Label(hf, text=f"{icon} {whale_name}{' ⚡HFT' if hft else ''}",
+                 fg="#00aaff" if verified or elite else "#aaaaaa", bg="#0a0a20",
+                 font=bold11, wraplength=730, justify="left").pack(anchor="w", padx=12)
+        tk.Label(hf, text=f"Wallet: {wallet}",
+                 fg="#556677", bg="#0a0a20", font=mono9, wraplength=730,
+                 justify="left").pack(anchor="w", padx=12)
+
+        sf2 = tk.Frame(win, bg="#060615")
+        sf2.pack(fill="x", padx=8, pady=6)
+
+        def stat_cell(parent: tk.Misc, label: str, value: str, color: str = "#aaaacc", col: int = 0, row: int = 0) -> None:
+            f = tk.Frame(parent, bg="#0d0d20", bd=1, relief="solid")
+            f.grid(row=row, column=col, padx=4, pady=3, sticky="nsew")
+            tk.Label(f, text=label, fg="#445566", bg="#0d0d20", font=mono9, pady=2).pack()
+            tk.Label(f, text=value, fg=color, bg="#0d0d20", font=bold9, pady=2).pack()
+
+        stats_data = [
+            ("Score", f"{score:.2f}", "#ffdd44"),
+            ("Win Rate", f"{float(whale.get('win_rate', 0.0) or 0.0) * 100:.0f}%", "#00ff88"),
+            ("Wilson LB", f"{float(whale.get('wilson_lb', 0.0) or 0.0) * 100:.0f}%", "#88ccff"),
+            ("Resolved", f"{int(whale.get('n_resolved', 0) or 0)}", "#aaaacc"),
+            ("Portfolio", f"${float(whale.get('total_value', 0.0) or 0.0):,.0f}", "#00aaff"),
+            ("PnL", f"${total_pnl:+,.0f}", pnl_color),
+            ("Avg Bet", f"${float(whale.get('avg_bet', 0.0) or 0.0):,.0f}", "#ffaa44"),
+            ("TPH", f"{float(whale.get('trades_per_hour', 0.0) or 0.0):.1f}", "#aaaacc"),
+            ("7d PnL", f"${float(whale.get('recent_pnl_7d', 0.0) or 0.0):+,.0f}", "#88ccff"),
+            ("30d PnL", f"${float(whale.get('recent_pnl_30d', 0.0) or 0.0):+,.0f}", "#88ccff"),
+            ("Status", "ELITE" if elite else ("VERIFIED" if verified else "WATCH / REJECT"), "#ff8844"),
+            ("Type", "HFT" if hft else "STANDARD", "#aaaacc"),
+        ]
+        for i, (lbl, val, col) in enumerate(stats_data):
+            sf2.columnconfigure(i % 4, weight=1)
+            stat_cell(sf2, lbl, val, col, i % 4, i // 4)
+
+        info_f = tk.Frame(win, bg="#060615")
+        info_f.pack(fill="x", padx=8, pady=(0, 6))
+        tk.Label(info_f, text="DETAILS", fg="#00ff88", bg="#060615", font=bold9).pack(anchor="w", padx=4, pady=(4, 2))
+        detail_lines = [
+            f"  Verified: {'yes' if verified else 'no'}",
+            f"  Elite: {'yes' if elite else 'no'}",
+            f"  HFT: {'yes' if hft else 'no'}",
+            f"  Watchable: {'yes' if bool(whale.get('watchable')) else 'no'}",
+        ]
+        fail_reasons = whale.get("fail_reasons")
+        if isinstance(fail_reasons, list) and fail_reasons:
+            detail_lines.append(f"  Fail reasons: {', '.join(str(x) for x in fail_reasons[:8])}")
+        for line in detail_lines:
+            tk.Label(info_f, text=line, fg="#cccccc", bg="#060615", font=mono10,
+                     anchor="w", justify="left", wraplength=720).pack(anchor="w", padx=12)
+
+        lf = tk.Frame(win, bg="#060615")
+        lf.pack(fill="x", padx=8, pady=6)
+        profile_wallet = str(whale.get("wallet", wallet))
+        profile_url = f"https://polymarket.com/profile/{profile_wallet}"
+
+        def copy_wallet() -> None:
+            try:
+                win.clipboard_clear()
+                win.clipboard_append(wallet)
+                win.update()
+            except Exception as e:
+                _log_ui_error("copy whale wallet", e, "WARN")
+
+        def open_polymarket_profile() -> None:
+            webbrowser.open(profile_url)
+
+        def inspect_raw_data() -> None:
+            show_raw_data_popup({"wallet": wallet, **whale}, title=f"Whale Raw Data - {whale_name}")
+
+        def open_properties() -> None:
+            show_properties_popup({"wallet": wallet, **whale},
+                                  title=f"Whale Properties - {whale_name}",
+                                  subtitle="Double-click nested rows to inspect them.")
+
+        tk.Button(lf, text="🌐 Open in Polymarket", bg="#0a1a3a", fg="#00aaff",
+                  font=mono9, padx=10, command=open_polymarket_profile).pack(side="left", padx=4)
+        tk.Button(lf, text="📋 Copy Wallet", bg="#1a2a1a", fg="#00ff88",
+                  font=mono9, padx=10, command=copy_wallet).pack(side="left", padx=4)
+        tk.Button(lf, text="🔎 Inspect Raw", bg="#201a2a", fg="#d0b0ff",
+                  font=mono9, padx=10, command=inspect_raw_data).pack(side="left", padx=4)
+        tk.Button(lf, text="🧩 Properties", bg="#2a2012", fg="#ffcc88",
+                  font=mono9, padx=10, command=open_properties).pack(side="left", padx=4)
     
     
     def _clean_tree_market_title(value: object) -> str:
@@ -1167,6 +1281,7 @@ def run_ui(api: TitanBackend) -> None:
     wh_tree.configure(yscrollcommand=wh_vsb.set)
     wh_vsb.pack(side="right", fill="y")
     wh_tree.pack(fill="both", expand=True, padx=4, pady=4)
+    _whale_tree_items: dict[str, tuple[str, dict[str, object]]] = {}
     
     
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -1194,6 +1309,7 @@ def run_ui(api: TitanBackend) -> None:
     # ═══════════════════════════════════════════════════════════════════════════════
     LOG_COLORS = {
         "INFO":  "#00ff88",
+        "DEBUG": "#ffdd44",
         "DATA":  "#44aaff",
         "WARN":  "#ffaa00",
         "ERR":   "#ff4444",
@@ -1209,6 +1325,8 @@ def run_ui(api: TitanBackend) -> None:
     
     def log(msg, level="INFO"):
         try:
+            if level == "DEBUG" and not _debug_mode[0]:
+                return
             sig_log.configure(state="normal")
             ts  = datetime.now().strftime("%H:%M:%S")
             tag = level if level in LOG_COLORS else "INFO"
@@ -1548,11 +1666,17 @@ def run_ui(api: TitanBackend) -> None:
         rows.append(_InspectorRow("value", text, child_value))
         return rows
 
-    def show_properties_popup(value: object, title: str = "Properties", subtitle: str = "") -> None:
+    def show_properties_popup(
+        value: object,
+        title: str = "Properties",
+        subtitle: str = "",
+        parent: tk.Misc | None = None,
+    ) -> None:
+        owner = parent if parent is not None else root
         detail_win = tk.Toplevel(root)
         detail_win.title(title[:80] if title else "Properties")
         detail_win.configure(bg="#080810")
-        detail_win.geometry("980x680")
+        detail_win.geometry("600x550")
 
         tk.Label(detail_win, text=title or "Properties", fg="#00ff88", bg="#080810",
                  font=bold_hd, anchor="w", justify="left").pack(fill="x", padx=10, pady=(10, 4))
@@ -1567,8 +1691,8 @@ def run_ui(api: TitanBackend) -> None:
         prop_tree = ttk.Treeview(table_wrap, columns=prop_cols, show="headings")
         prop_tree.heading("Property", text="Property")
         prop_tree.heading("Value", text="Value")
-        prop_tree.column("Property", width=300, anchor="w", stretch=False)
-        prop_tree.column("Value", width=640, anchor="w", stretch=True)
+        prop_tree.column("Property", width=210, anchor="w", stretch=False)
+        prop_tree.column("Value", width=730, anchor="w", stretch=True)
 
         prop_vsb = tk.Scrollbar(table_wrap, command=prop_tree.yview)
         prop_hsb = tk.Scrollbar(table_wrap, orient="horizontal", command=prop_tree.xview)
@@ -1604,29 +1728,295 @@ def run_ui(api: TitanBackend) -> None:
                 return
             values = prop_tree.item(item_id).get("values", [])
             prop_name = str(values[0]) if values else "Property"
-            show_properties_popup(child_value, title=f"{title} / {prop_name}", subtitle=prop_name)
+            show_properties_popup(
+                child_value,
+                title=f"{title} / {prop_name}",
+                subtitle=prop_name,
+                parent=detail_win,
+            )
 
         prop_tree.bind("<Double-1>", _open_selected_property)
 
-        detail_win.transient(root)
-        detail_win.grab_set()
+        if isinstance(owner, (tk.Tk, tk.Toplevel)):
+            try:
+                owner_x = owner.winfo_rootx()
+                owner_y = owner.winfo_rooty()
+                detail_win.geometry(f"+{owner_x + 40}+{owner_y + 40}")
+            except Exception:
+                pass
+        detail_win.lift()
+        detail_win.focus_set()
+
+    def show_raw_data_popup(value: object, title: str = "Raw Data") -> None:
+        win = tk.Toplevel(root)
+        win.title(title[:80] if title else "Raw Data")
+        win.configure(bg="#060615")
+        win.geometry("760x560")
+        win.resizable(True, True)
+
+        tk.Label(win, text=title or "Raw Data", fg="#00ff88", bg="#060615",
+                 font=bold_hd, anchor="w", justify="left").pack(fill="x", padx=10, pady=(10, 4))
+
+        raw_txt = scrolledtext.ScrolledText(
+            win,
+            bg="#040410",
+            fg="#778899",
+            font=("Courier", 8),
+            wrap="word",
+        )
+        raw_txt.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        raw_txt.insert("1.0", json.dumps(value, indent=2, default=str))
+        raw_txt.focus_set()
+
+    def show_market_detail(market: dict[str, object], signal_title: str = "") -> None:
+        win = tk.Toplevel(root)
+        market_title = str(market.get("title", signal_title or "Market"))
+        market_slug = str(market.get("slug", ""))
+        win.title(f"Market Detail — {market_title[:50]}")
+        win.configure(bg="#060615")
+        win.geometry("760x560")
+        win.resizable(True, True)
+
+        mono10 = font.Font(family="Courier", size=10)
+        mono9 = font.Font(family="Courier", size=9)
+        bold9 = font.Font(family="Courier", size=9, weight="bold")
+        bold11 = font.Font(family="Courier", size=11, weight="bold")
+
+        liq = float(market.get("liq", 0.0) or 0.0)
+        volume = float(market.get("volume", 0.0) or 0.0)
+        yes_price = float(market.get("yes_price", 0.0) or 0.0)
+        no_price = float(market.get("no_price", 0.0) or 0.0)
+        hrs_left_obj = market.get("hrs_left")
+        hrs_left_text = f"{float(hrs_left_obj):.1f}h" if isinstance(hrs_left_obj, (int, float)) else "—"
+        ts_value = float(market.get("ts", 0.0) or 0.0)
+        ts_text = datetime.fromtimestamp(ts_value).strftime("%Y-%m-%d %H:%M:%S") if ts_value > 0 else "—"
+
+        hf = tk.Frame(win, bg="#0a0a20", pady=8)
+        hf.pack(fill="x", padx=8, pady=(8, 0))
+        tk.Label(hf, text=f"📈 {market_title}",
+                 fg="#00aaff", bg="#0a0a20", font=bold11,
+                 wraplength=730, justify="left").pack(anchor="w", padx=12)
+        tk.Label(hf, text=f"Slug: {market_slug or '—'}   Event: {market.get('event_slug', '—')}",
+                 fg="#556677", bg="#0a0a20", font=mono9,
+                 wraplength=730, justify="left").pack(anchor="w", padx=12)
+
+        sf2 = tk.Frame(win, bg="#060615")
+        sf2.pack(fill="x", padx=8, pady=6)
+
+        def stat_cell(parent: tk.Misc, label: str, value: str, color: str = "#aaaacc", col: int = 0, row: int = 0) -> None:
+            f = tk.Frame(parent, bg="#0d0d20", bd=1, relief="solid")
+            f.grid(row=row, column=col, padx=4, pady=3, sticky="nsew")
+            tk.Label(f, text=label, fg="#445566", bg="#0d0d20", font=mono9, pady=2).pack()
+            tk.Label(f, text=value, fg=color, bg="#0d0d20", font=bold9, pady=2).pack()
+
+        stats_data = [
+            ("Liquidity", f"${liq:,.0f}", "#00ff88"),
+            ("Volume", f"${volume:,.0f}", "#88ccff"),
+            ("Hours Left", hrs_left_text, "#ffdd44"),
+            ("End Date", str(market.get("end_date", "—") or "—"), "#ff8844"),
+            ("Slug", market_slug or "—", "#aaaaff"),
+            ("Event Slug", str(market.get("event_slug", "—") or "—"), "#aaaacc"),
+            ("Yes Price", f"${yes_price:.4f}" if yes_price > 0 else "—", "#00ff88"),
+            ("No Price", f"${no_price:.4f}" if no_price > 0 else "—", "#ff8844"),
+            ("Volume", f"${volume:,.0f}", "#88ccff"),
+            ("Timestamp", ts_text, "#88ccff"),
+            ("Outcome Labels", f"{len(market.get('outcome_labels', []) or [])}", "#aaaacc"),
+        ]
+        for i, (lbl, val, col) in enumerate(stats_data):
+            sf2.columnconfigure(i % 4, weight=1)
+            stat_cell(sf2, lbl, val, col, i % 4, i // 4)
+
+        info_f = tk.Frame(win, bg="#060615")
+        info_f.pack(fill="x", padx=8, pady=(0, 6))
+        tk.Label(info_f, text="DETAILS", fg="#00ff88", bg="#060615", font=bold9).pack(anchor="w", padx=4, pady=(4, 2))
+        detail_lines = [
+            f"  Title: {market_title}",
+            f"  End date: {market.get('end_date', '—')}",
+            f"  Hours left: {hrs_left_text}",
+        ]
+        outcome_labels = market.get("outcome_labels")
+        if isinstance(outcome_labels, list) and outcome_labels:
+            detail_lines.append(f"  Outcomes: {', '.join(str(x) for x in outcome_labels[:8])}")
+        for line in detail_lines:
+            tk.Label(info_f, text=line, fg="#cccccc", bg="#060615", font=mono10,
+                     anchor="w", justify="left", wraplength=720).pack(anchor="w", padx=12)
+
+        lf = tk.Frame(win, bg="#060615")
+        lf.pack(fill="x", padx=8, pady=6)
+
+        def copy_title() -> None:
+            try:
+                win.clipboard_clear()
+                win.clipboard_append(market_title)
+                win.update()
+            except Exception as e:
+                _log_ui_error("copy market title", e, "WARN")
+
+        def inspect_raw_data() -> None:
+            show_raw_data_popup(market, title=f"Market Raw Data - {market_title}")
+
+        def open_properties() -> None:
+            show_properties_popup(market,
+                                  title=f"Market Properties - {market_title}",
+                                  subtitle="Double-click nested rows to inspect them.")
+
+        tk.Button(lf, text="📋 Copy Title", bg="#1a2a1a", fg="#00ff88",
+                  font=mono9, padx=10, command=copy_title).pack(side="left", padx=4)
+        tk.Button(lf, text="🔎 Inspect Raw", bg="#201a2a", fg="#d0b0ff",
+                  font=mono9, padx=10, command=inspect_raw_data).pack(side="left", padx=4)
+        tk.Button(lf, text="🧩 Properties", bg="#2a2012", fg="#ffcc88",
+                  font=mono9, padx=10, command=open_properties).pack(side="left", padx=4)
 
     def _show_signal_detail(signal: SignalDict) -> None:
         signal_title = str(signal.get("title", "Signal"))
         signal_outcome = str(signal.get("outcome", ""))
         popup_title = signal_title if not signal_outcome else f"{signal_title} [{signal_outcome}]"
-        show_properties_popup(signal, title=f"Signal Properties - {popup_title}", subtitle="Double-click nested rows to inspect them.")
+        win = tk.Toplevel(root)
+        win.title(f"Signal Detail — {signal_title[:50]}")
+        win.configure(bg="#060615")
+        win.geometry("760x560")
+        win.resizable(True, True)
+
+        mono10 = font.Font(family="Courier", size=10)
+        mono9 = font.Font(family="Courier", size=9)
+        bold9 = font.Font(family="Courier", size=9, weight="bold")
+        bold11 = font.Font(family="Courier", size=11, weight="bold")
+
+        score = float(signal.get("score", 0.0) or 0.0)
+        drift = float(signal.get("drift", 0.0) or 0.0)
+        cur = float(signal.get("cur", 0.0) or 0.0)
+        avg_entry = float(signal.get("avg_entry", 0.0) or 0.0)
+        bet = float(signal.get("bet", 0.0) or 0.0)
+        total_flow = float(signal.get("total_flow", 0.0) or 0.0)
+        ver_flow = float(signal.get("ver_flow", 0.0) or 0.0)
+        n_elite = int(signal.get("n_elite", 0) or 0)
+        n_ver = int(signal.get("n_ver", 0) or 0)
+        n_total = int(signal.get("n_total", 0) or 0)
+        tier = str(signal.get("tier", "?"))
+        strategy = str(signal.get("strategy", "?"))
+        newest_ts = float(signal.get("newest_ts", 0.0) or 0.0)
+        newest_ts_text = datetime.fromtimestamp(newest_ts).strftime("%Y-%m-%d %H:%M:%S") if newest_ts > 0 else "—"
+        pnl_color = "#00ff55" if drift <= 0 else "#ffcc44"
+        icon = "💎" if tier == "CONVICTION" else ("⚡" if bool(signal.get("is_hft")) else "🎯")
+
+        hf = tk.Frame(win, bg="#0a0a20", pady=8)
+        hf.pack(fill="x", padx=8, pady=(8, 0))
+        tk.Label(hf, text=f"{icon} [{tier}] {signal_title}",
+                 fg="#00aaff", bg="#0a0a20", font=bold11,
+                 wraplength=730, justify="left").pack(anchor="w", padx=12)
+        tk.Label(hf, text=f"Outcome: {signal_outcome}   Score: {score:.0f}   Strategy: {strategy}",
+                 fg="#556677", bg="#0a0a20", font=mono9,
+                 wraplength=730, justify="left").pack(anchor="w", padx=12)
+
+        sf2 = tk.Frame(win, bg="#060615")
+        sf2.pack(fill="x", padx=8, pady=6)
+
+        def stat_cell(parent: tk.Misc, label: str, value: str, color: str = "#aaaacc", col: int = 0, row: int = 0) -> None:
+            f = tk.Frame(parent, bg="#0d0d20", bd=1, relief="solid")
+            f.grid(row=row, column=col, padx=4, pady=3, sticky="nsew")
+            tk.Label(f, text=label, fg="#445566", bg="#0d0d20", font=mono9, pady=2).pack()
+            tk.Label(f, text=value, fg=color, bg="#0d0d20", font=bold9, pady=2).pack()
+
+        stats_data = [
+            ("Whale Entry", f"${avg_entry:.4f}", "#ffaa44"),
+            ("Current Price", f"${cur:.4f}", "#aaaaff"),
+            ("Drift", f"{drift * 100:+.1f}%", pnl_color),
+            ("Age", f"{_signal_age_minutes(signal):.0f} min", "#888888"),
+            ("Bet Size", f"${bet:.2f}", "#00aaff"),
+            ("Total Flow", f"${total_flow:,.0f}", "#00ff88"),
+            ("Verified Flow", f"${ver_flow:,.0f}", "#88ccff"),
+            ("Elite / Verified", f"{n_elite} / {n_ver}", "#ffdd44"),
+            ("Confluence", f"{int(signal.get('n_confluence', 0) or 0)}", "#aaaacc"),
+            ("Total Whales", f"{n_total}", "#aaaacc"),
+            ("Window", str(signal.get("window", "?")).upper(), "#ff8844"),
+            ("Stop Loss", "OFF" if signal.get("stop_loss_pct") is None else f"{float(signal.get('stop_loss_pct', 0.0) or 0.0) * 100:.0f}%", "#aaaacc"),
+            ("Score", f"{score:.0f}", "#ffdd44"),
+            ("Tier", tier, "#ff8844"),
+            ("Large Trade", "YES" if bool(signal.get("has_large_trade")) else "NO", "#00ff88" if bool(signal.get("has_large_trade")) else "#aaaaaa"),
+            ("Newest TS", newest_ts_text, "#88ccff"),
+        ]
+        for i, (lbl, val, col) in enumerate(stats_data):
+            sf2.columnconfigure(i % 4, weight=1)
+            stat_cell(sf2, lbl, val, col, i % 4, i // 4)
+
+        info_f = tk.Frame(win, bg="#060615")
+        info_f.pack(fill="x", padx=8, pady=(0, 6))
+        tk.Label(info_f, text="DETAILS", fg="#00ff88", bg="#060615", font=bold9).pack(anchor="w", padx=4, pady=(4, 2))
+        detail_lines = [
+            f"  CID: {signal.get('cid', '')}",
+            f"  Market type: {signal.get('mkt_type', '?')}",
+            f"  Sports: {'yes' if bool(signal.get('is_sports')) else 'no'}",
+            f"  HFT: {'yes' if bool(signal.get('is_hft')) else 'no'}",
+            f"  Conviction: {'yes' if bool(signal.get('has_large_trade')) else 'no'}",
+        ]
+        names = signal.get("names")
+        if isinstance(names, list) and names:
+            detail_lines.append(f"  Via: {', '.join(str(x) for x in names[:6])}")
+        exits = signal.get("exits_detected")
+        if isinstance(exits, list) and exits:
+            detail_lines.append(f"  Exit alerts: {len(exits)}")
+        conviction_detail = signal.get("conviction_detail")
+        if isinstance(conviction_detail, str) and conviction_detail.strip():
+            detail_lines.append(f"  Conviction detail: {conviction_detail}")
+        for line in detail_lines:
+            tk.Label(info_f, text=line, fg="#cccccc", bg="#060615", font=mono10,
+                     anchor="w", justify="left", wraplength=720).pack(anchor="w", padx=12)
+
+        lf = tk.Frame(win, bg="#060615")
+        lf.pack(fill="x", padx=8, pady=6)
+        event_slug = str(signal.get("event_slug", "") or "")
+        signal_url = f"https://polymarket.com/event/{event_slug}" if event_slug else ""
+
+        def copy_title() -> None:
+            try:
+                win.clipboard_clear()
+                win.clipboard_append(signal_title)
+                win.update()
+            except Exception as e:
+                _log_ui_error("copy signal title", e, "WARN")
+
+        def open_polymarket_signal() -> None:
+            if not signal_url:
+                log("[signal detail] signal slug missing", "WARN")
+                return
+            webbrowser.open(signal_url)
+
+        def inspect_raw_data() -> None:
+            show_raw_data_popup(signal, title=f"Signal Raw Data - {popup_title}")
+
+        def open_properties() -> None:
+            show_properties_popup(signal,
+                                  title=f"Signal Properties - {popup_title}",
+                                  subtitle="Double-click nested rows to inspect them.")
+
+        def open_market_detail() -> None:
+            market_value = signal.get("mkt")
+            if not isinstance(market_value, dict):
+                log("[signal detail] market payload missing", "WARN")
+                return
+            show_market_detail(cast(dict[str, object], market_value), signal_title=signal_title)
+
+        tk.Button(lf, text="🌐 Polymarket", bg="#0a1a3a", fg="#00aaff",
+                  font=mono9, padx=10, command=open_polymarket_signal).pack(side="left", padx=4)
+        tk.Button(lf, text="📈 Market", bg="#10203a", fg="#88ccff",
+                  font=mono9, padx=10, command=open_market_detail).pack(side="left", padx=4)
+        tk.Button(lf, text="📋 Copy Title", bg="#1a2a1a", fg="#00ff88",
+                  font=mono9, padx=10, command=copy_title).pack(side="left", padx=4)
+        tk.Button(lf, text="🔎 Inspect Raw", bg="#201a2a", fg="#d0b0ff",
+                  font=mono9, padx=10, command=inspect_raw_data).pack(side="left", padx=4)
+        tk.Button(lf, text="🧩 Properties", bg="#2a2012", fg="#ffcc88",
+                  font=mono9, padx=10, command=open_properties).pack(side="left", padx=4)
 
     def _on_signal_double_click(event: tk.Event[tk.Misc]) -> None:
         log(
             f"[signal dblclick] x={event.x} y={event.y} "
             f"selection={list(sig_tree.selection())} "
             f"children={len(sig_tree.get_children())}",
-            "SIG",
+            "DEBUG",
         )
         item_id = sig_tree.identify_row(event.y)
         if not item_id:
-            log("[signal dblclick] no row from identify_row, falling back to selection", "SIG")
+            log("[signal dblclick] no row from identify_row, falling back to selection", "DEBUG")
             selection = sig_tree.selection()
             if not selection:
                 log("[signal dblclick] no selection available", "WARN")
@@ -1635,7 +2025,7 @@ def run_ui(api: TitanBackend) -> None:
         else:
             sig_tree.selection_set(item_id)
             sig_tree.focus(item_id)
-        log(f"[signal dblclick] resolved item_id={item_id}", "SIG")
+        log(f"[signal dblclick] resolved item_id={item_id}", "DEBUG")
         signal = _signal_tree_items.get(str(item_id))
         if signal is None:
             log(f"[signal dblclick] no backing signal found for item_id={item_id}", "WARN")
@@ -1643,7 +2033,7 @@ def run_ui(api: TitanBackend) -> None:
         log(
             f"[signal dblclick] opening detail for "
             f"title={signal.get('title', '?')} outcome={signal.get('outcome', '')}",
-            "SIG",
+            "DEBUG",
         )
         try:
             _show_signal_detail(signal)
@@ -1720,7 +2110,7 @@ def run_ui(api: TitanBackend) -> None:
         log(
             f"[render_signals] tree_rows={len(sig_tree.get_children())} "
             f"backing_rows={len(_signal_tree_items)} history_mode={_show_signal_history[0]}",
-            "SIG",
+            "DEBUG",
         )
 
     sig_tree.bind("<Double-1>", _on_signal_double_click)
@@ -1961,6 +2351,7 @@ def run_ui(api: TitanBackend) -> None:
         filt = wh_filter_var.get()
     
         wh_tree.delete(*wh_tree.get_children())
+        _whale_tree_items.clear()
         for w, p in sorted(all_wallets.items(), key=lambda x: x[1].get("score", 0), reverse=True):
             if p.get("total_pnl", 0) < 0 and not p.get("elite"):
                 continue
@@ -1979,7 +2370,7 @@ def run_ui(api: TitanBackend) -> None:
             status = ("🔥 ELITE"  if p.get("elite") else
                       "✅ VER"    if p.get("verified") else
                       "👁 WATCH"  if in_watch else "❌")
-            wh_tree.insert("", "end", values=(
+            item_id = wh_tree.insert("", "end", values=(
                 p.get("name", w[:10]+"…"),
                 w[:26]+"…",
                 f"{p.get('score',0):.2f}",
@@ -1993,6 +2384,26 @@ def run_ui(api: TitanBackend) -> None:
                 status,
                 "⚡" if p.get("hft") else "",
             ), tags=(tag,))
+            _whale_tree_items[str(item_id)] = (w, cast(dict[str, object], p))
+
+    def _on_whale_double_click(event: tk.Event[tk.Misc]) -> None:
+        item_id = wh_tree.identify_row(event.y)
+        if not item_id:
+            selection = wh_tree.selection()
+            if not selection:
+                return
+            item_id = str(selection[0])
+        else:
+            wh_tree.selection_set(item_id)
+            wh_tree.focus(item_id)
+        whale_item = _whale_tree_items.get(str(item_id))
+        if whale_item is None:
+            log(f"[whale dblclick] no whale found for item_id={item_id}", "WARN")
+            return
+        wallet, whale = whale_item
+        show_whale_detail(wallet, whale)
+
+    wh_tree.bind("<Double-1>", _on_whale_double_click)
     
     
     def render_analysis(signals, trades, wallets):

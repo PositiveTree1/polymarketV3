@@ -37,7 +37,7 @@ import re
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
-from typing import TypedDict
+from typing import TypedDict, cast
 import titan_state as S
 import titan_config as C
 from titan_config import *
@@ -64,7 +64,6 @@ class Signal:
     # ── whale observations ────────────────────────────────────────────────────
     ver:            dict[str, WhaleObservation]
     elite_ver:      dict[str, WhaleObservation]
-    wallets:        dict          # ambient wallet cache — for scorer/sizer use only
     n_ver:          int
     n_elite:        int
     n_confluence:   int
@@ -121,7 +120,9 @@ class Signal:
         return self.has_large_trade
 
     def to_dict(self) -> "SignalDict":
-        return asdict(self)  # type: ignore[return-value]
+        payload = asdict(self)
+        payload.pop("wallets", None)
+        return cast("SignalDict", payload)
 
 
 class _SignalDictRequired(TypedDict):
@@ -137,7 +138,6 @@ class _SignalDictRequired(TypedDict):
     stop_loss_pct:          float | None
     ver:                    dict
     elite_ver:              dict
-    wallets:                dict
     n_ver:                  int
     n_elite:                int
     n_confluence:           int
@@ -785,9 +785,9 @@ def _build_recent_form_signals(raw_trades: list, wallets: dict,
 
         sig = Signal(
             cid=cid, asset=asset_hint, outcome=outcome, title=title,
-            slug=cid, event_slug=event_slug, mkt_type=mkt_type, is_sports=(mkt_type == "SPORTS"),
+            slug=mkt.get("slug", "") or slug_hint, event_slug=event_slug, mkt_type=mkt_type, is_sports=(mkt_type == "SPORTS"),
             strategy="recent_form", stop_loss_pct=stop_loss_pct,
-            ver=all_ver, elite_ver=elite_wallets_rf, wallets=wallets,
+            ver=all_ver, elite_ver=elite_wallets_rf,
             n_ver=len(all_ver), n_elite=len(elite_wallets_rf),
             n_confluence=len(all_ver), n_total=len(by_w),
             avg_entry=avg_entry, cur=cur, drift=drift, slippage=slippage,
@@ -1000,9 +1000,9 @@ def _build_drift_discount_signals(raw_trades: list, wallets: dict,
 
         sig = Signal(
             cid=cid, asset=asset_hint, outcome=outcome, title=title,
-            slug=cid, event_slug=event_slug, mkt_type=mkt_type, is_sports=(mkt_type == "SPORTS"),
+            slug=mkt.get("slug", "") or slug_hint, event_slug=event_slug, mkt_type=mkt_type, is_sports=(mkt_type == "SPORTS"),
             strategy="drift_discount", stop_loss_pct=stop_loss_pct,
-            ver=all_ver, elite_ver=elite_wallets, wallets=wallets,
+            ver=all_ver, elite_ver=elite_wallets,
             n_ver=len(all_ver), n_elite=len(elite_wallets),
             n_confluence=len(all_ver), n_total=len(by_w),
             avg_entry=avg_whale_entry, cur=cur, drift=drift, slippage=drift,
@@ -1312,9 +1312,9 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
 
         sig = Signal(
             cid=cid, asset=asset_hint, outcome=outcome, title=title,
-            slug=cid, event_slug=event_slug, mkt_type=mkt_type, is_sports=(mkt_type == "SPORTS"),
+            slug=mkt.get("slug", "") or slug_hint, event_slug=event_slug, mkt_type=mkt_type, is_sports=(mkt_type == "SPORTS"),
             strategy="consensus_basket", stop_loss_pct=stop_loss_pct,
-            ver=all_ver, elite_ver=elite_wallets, wallets=wallets,
+            ver=all_ver, elite_ver=elite_wallets,
             n_ver=n_ver, n_elite=len(elite_wallets),
             n_confluence=n_confluence, n_total=len(by_w),
             avg_entry=elite_avg_entry, cur=cur, drift=drift, slippage=slippage,

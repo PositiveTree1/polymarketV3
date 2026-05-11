@@ -118,6 +118,7 @@ def init_db(db_path: str) -> None:
         """)
         _migrate_ts_columns(cx)
         _migrate_add_columns(cx)
+        _migrate_strip_signal_wallets(cx)
 
 
 @contextmanager
@@ -238,6 +239,34 @@ def _migrate_add_columns(cx: sqlite3.Connection) -> None:
         cx.execute("ALTER TABLE trade_history ADD COLUMN asset TEXT")
 
 
+def _sanitize_signal_payload(payload: object) -> dict[str, object] | None:
+    if not isinstance(payload, dict):
+        return None
+    sanitized = dict(payload)
+    sanitized.pop("wallets", None)
+    return sanitized
+
+
+def _migrate_strip_signal_wallets(cx: sqlite3.Connection) -> None:
+    rows = cx.execute("SELECT id, data FROM signals").fetchall()
+    updates: list[tuple[str, int]] = []
+    for row_id, raw_data in rows:
+        try:
+            decoded = json.loads(str(raw_data))
+            if isinstance(decoded, str):
+                decoded = json.loads(decoded)
+        except Exception:
+            continue
+        sanitized = _sanitize_signal_payload(decoded)
+        if sanitized is None:
+            continue
+        if sanitized == decoded:
+            continue
+        updates.append((json.dumps(sanitized, default=str), int(row_id)))
+    if updates:
+        cx.executemany("UPDATE signals SET data = ? WHERE id = ?", updates)
+
+
 def _ts_column_type(cx: sqlite3.Connection, table_name: str) -> str | None:
     rows = cx.execute(f"PRAGMA table_info({table_name})").fetchall()
     for row in rows:
@@ -355,11 +384,14 @@ def save_signals(signals: list[dict], ts: float) -> None:
     if not _DB_PATH:
         return
     now = _ts_to_dt(ts)
+    rows: list[tuple[str, str, str]] = []
+    for signal in signals:
+        sanitized = _sanitize_signal_payload(signal)
+        if sanitized is None:
+            continue
+        rows.append((now, now, json.dumps(sanitized, default=str)))
     with _connect() as cx:
-        cx.executemany(
-            "INSERT INTO signals (recorded_at, ts, data) VALUES (?, ?, ?)",
-            [(now, now, json.dumps(s, default=str)) for s in signals],
-        )
+        cx.executemany("INSERT INTO signals (recorded_at, ts, data) VALUES (?, ?, ?)", rows)
 
 
 def save_rejects(rejects: list[str], ts: float) -> None:
@@ -378,14 +410,20 @@ def _decode_signal_row_payload(data: str) -> "SignalDict | None":
 
     decoded = json.loads(data)
     if isinstance(decoded, dict):
-        return cast("SignalDict", decoded)
+        sanitized = _sanitize_signal_payload(decoded)
+        if sanitized is None:
+            return None
+        return cast("SignalDict", sanitized)
 
     if isinstance(decoded, str):
         decoded_text = decoded.strip()
         if decoded_text.startswith("{"):
             nested = json.loads(decoded_text)
             if isinstance(nested, dict):
-                return cast("SignalDict", nested)
+                sanitized = _sanitize_signal_payload(nested)
+                if sanitized is None:
+                    return None
+                return cast("SignalDict", sanitized)
         return None
 
     return None
