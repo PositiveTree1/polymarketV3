@@ -63,7 +63,7 @@ def _rescore_watchlist():
     save_whale_roster_async()
 
 
-def analyse(trades, is_hft_loop=False):
+def analyse(trades: list, is_hft_loop: bool = False) -> None:
     S.env().cycle_count += 1
 
     if S.env().cycle_count % DISCOVERY_INTERVAL_CYCLES == 0:
@@ -78,7 +78,12 @@ def analyse(trades, is_hft_loop=False):
         threading.Thread(target=_refresh_recent_form_scores, daemon=True).start()
 
     # Score wallets seen in the feed
-    feed_wallets = {t["wallet"] for t in trades}
+    from titan_market import WhaleObservation as _WO
+    bad = [t for t in trades if not isinstance(t, _WO)]
+    if bad:
+        _log(f"⚠ analyse() got non-WhaleObservation items: {[type(x).__name__ for x in bad[:3]]}", "ERR")
+        trades = [t for t in trades if isinstance(t, _WO)]
+    feed_wallets = {t.wallet for t in trades}
     wallets      = {}
     ver_count    = 0
     elite_count  = 0
@@ -92,8 +97,8 @@ def analyse(trades, is_hft_loop=False):
     for w in feed_wallets:
         p = fetch_wallet(w)
         trade_name = next(
-            (t["name"] for t in trades
-             if t["wallet"].lower() == w and t["name"] and not t["name"].endswith("…")),
+            (t.name for t in trades
+             if t.wallet.lower() == w and t.name and not t.name.endswith("…")),
             None
         )
         if trade_name:
@@ -103,12 +108,14 @@ def analyse(trades, is_hft_loop=False):
                 p["name"] = trade_name
                 S.env().wallet_cache[w] = p
 
-        cached = S.env().wallet_cache.get(w, {})
-        for flag in ("elite","verified","watchable","hft","score","win_rate","total_pnl",
-                     "avg_bet","n_resolved","trades_per_hour","total_value","name",
-                     "recent_pnl_30d","recent_pnl_7d","recent_ts"):
-            if not p.get(flag) and cached.get(flag):
-                p[flag] = cached[flag]
+        cached = S.env().wallet_cache.get(w)
+        if cached:
+            if not p["recent_pnl_30d"] and cached["recent_pnl_30d"]:
+                p["recent_pnl_30d"] = cached["recent_pnl_30d"]
+            if not p["recent_pnl_7d"] and cached["recent_pnl_7d"]:
+                p["recent_pnl_7d"] = cached["recent_pnl_7d"]
+            if not p["recent_ts"] and cached["recent_ts"]:
+                p["recent_ts"] = cached["recent_ts"]
 
         wallets[w] = p
         if p["verified"]:  ver_count  += 1
@@ -157,9 +164,7 @@ def analyse(trades, is_hft_loop=False):
     # v10: Break down signal count by strategy for the cycle log
     strat_counts: dict = {}
     for sig in signals:
-        strat = sig.get("strategy", "?")
-        # Strip merged tags to first strategy
-        primary = strat.split("+")[0]
+        primary = sig.strategy.split("+")[0]
         strat_counts[primary] = strat_counts.get(primary, 0) + 1
     strat_str = " ".join(f"{s}:{n}" for s, n in strat_counts.items()) if strat_counts else "none"
 
@@ -246,7 +251,13 @@ def run_loop():
             analyse(trades)
         except Exception as e:
             import traceback
-            _log(f"Cycle error: {e}\n{traceback.format_exc()[:400]}", "ERR")
+            tb = traceback.format_exc()
+            _log(f"Cycle error: {e}\n{tb[:2000]}", "ERR")
+            try:
+                with open("cycle_error.log", "w") as _f:
+                    _f.write(tb)
+            except Exception:
+                pass
         time.sleep(CYCLE_SECONDS)
 
 

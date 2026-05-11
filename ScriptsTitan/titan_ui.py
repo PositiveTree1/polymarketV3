@@ -6,16 +6,24 @@
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
+from __future__ import annotations
+
 import tkinter as tk
 from tkinter import ttk, font, scrolledtext
 import threading
 import time
 import math
+import importlib
 from datetime import datetime
+from typing import TYPE_CHECKING, cast
 from titan_protocol import TitanBackend
 import os
 import webbrowser
 from pathlib import Path
+
+if TYPE_CHECKING:
+    from titan_signals import SignalDict
+    from titan_types import TradeRecordDict
 
 try:
     import pyperclip
@@ -798,7 +806,15 @@ def run_ui(api: TitanBackend) -> None:
             return parts[1].strip()
         return raw
 
-    _closed_tree_items: dict[str, dict] = {}
+    def _closed_position_selection_key(pos: TradeRecordDict) -> tuple[str, str, str, str]:
+        return (
+            str(pos.get("cid") or ""),
+            str(pos.get("title") or ""),
+            str(pos.get("outcome") or ""),
+            str(pos.get("exit_ts") or pos.get("ts") or ""),
+        )
+
+    _closed_tree_items: dict[str, TradeRecordDict] = {}
 
     def _load_selected_position_chart() -> None:
         sel = pos_tree.selection()
@@ -852,7 +868,7 @@ def run_ui(api: TitanBackend) -> None:
         _last_chart_warn[0] = ""
         pos_graph.load([], mkt_name, 0.0, f"Open position match not found for {mkt_name[:48]} [{outcome}].")
     
-    def _find_selected_closed_position() -> dict | None:
+    def _find_selected_closed_position() -> TradeRecordDict | None:
         sel = pos_tree.selection()
         if not sel:
             return None
@@ -1505,17 +1521,51 @@ def run_ui(api: TitanBackend) -> None:
     # ═══════════════════════════════════════════════════════════════════════════════
     #  RENDERERS
     # ═══════════════════════════════════════════════════════════════════════════════
-    _last_signals        = []
+    _last_signals: list[SignalDict] = []
     _last_wallets        = {}
     _last_rejects        = []
     _last_trades         = []
     _cycle_num           = [0]
     _pending_update      = [False]
     _show_signal_history = [False]
-    _signal_history_cache = [[]]
+    _signal_history_cache: list[list[SignalDict]] = [[]]
     _last_hb_ts          = [0.0]
     _HB_DEAD_SECS = 60
     _HB_BLINK_MS  = 600
+
+    def _require_row_object(value: object, label: str) -> dict[str, object]:
+        if isinstance(value, dict):
+            return value
+        raise TypeError(f"{label} must be an object, got {type(value).__name__}")
+
+    def _require_signal_rows(value: object) -> list[SignalDict]:
+        if not isinstance(value, list):
+            raise TypeError(f"signals must be a list, got {type(value).__name__}")
+        rows: list[SignalDict] = []
+        for idx, item in enumerate(value):
+            rows.append(cast("SignalDict", _require_row_object(item, f"signal[{idx}]")))
+        return rows
+
+    def _signal_ev_pct(signal: SignalDict) -> float:
+        ev_info = signal.get("ev_info")
+        if isinstance(ev_info, dict):
+            ev_pct = ev_info.get("ev_pct")
+            if isinstance(ev_pct, (int, float)):
+                return float(ev_pct)
+        return 0.0
+
+    def _build_wallet_cache(value: object) -> dict[str, dict[str, object]]:
+        if not isinstance(value, list):
+            raise TypeError(f"whales must be a list, got {type(value).__name__}")
+        wallet_cache: dict[str, dict[str, object]] = {}
+        for idx, item in enumerate(value):
+            whale_row = _require_row_object(item, f"whale[{idx}]")
+            wallet_value = whale_row.get("wallet")
+            if not isinstance(wallet_value, str):
+                raise TypeError(f"whale[{idx}].wallet must be a string")
+            whale_profile = {key: row_value for key, row_value in whale_row.items() if key != "wallet"}
+            wallet_cache[wallet_value] = whale_profile
+        return wallet_cache
 
     def _hb_tick():
         try:
@@ -1687,16 +1737,21 @@ def run_ui(api: TitanBackend) -> None:
         prev_sel_key = None
         sel = pos_tree.selection()
         if sel:
-            vals = pos_tree.item(sel[0])['values']
-            if vals:
-                prev_sel_key = (str(vals[0])[:30], str(vals[1]))
+            if _show_closed[0]:
+                prev_closed_pos = _closed_tree_items.get(str(sel[0]))
+                if prev_closed_pos:
+                    prev_sel_key = _closed_position_selection_key(prev_closed_pos)
+            else:
+                vals = pos_tree.item(sel[0])['values']
+                if vals:
+                    prev_sel_key = (str(vals[0])[:30], str(vals[1]))
 
         pos_tree.delete(*pos_tree.get_children())
         new_item_map = {}
 
         if _show_closed[0]:
             _closed_tree_items.clear()
-            closed = api.get_closed_positions(limit=200)
+            closed: list[TradeRecordDict] = api.get_closed_positions(limit=200)
             for pos in closed:
                 entry   = pos.get("entry_price") or 0
                 w_entry = pos.get("avg_entry") or entry
@@ -1726,7 +1781,7 @@ def run_ui(api: TitanBackend) -> None:
                     reason[:18],
                 ), tags=(tag,))
                 _closed_tree_items[iid] = pos
-                new_item_map[(title_str[:30], outcome_str)] = iid
+                new_item_map[_closed_position_selection_key(pos)] = iid
             pos_var.set(f"Pos: {len(closed)} closed")
         else:
             _closed_tree_items.clear()
@@ -1859,7 +1914,7 @@ def run_ui(api: TitanBackend) -> None:
             f"  Open:         {len(_open_pos_dict())} positions\n\n"
             f"TRADE FEED (this cycle)\n{'─'*50}\n"
             f"  Total: {len(trades)}  hot:{hot_t}  hft_spikes:{hft_t}\n"
-            f"  Verified: {len(ver)}  Elite: {len(elites)}  Watchlist: {len(api.get_pnl_summary()["watchlist_size"])}\n"
+            f"  Verified: {len(ver)}  Elite: {len(elites)}  Watchlist: {api.get_pnl_summary()['watchlist_size']}\n"
             f"  Signals: {len(signals)}\n"
             f"    💎 CONVICTION: {sum(1 for s in signals if s['tier']=='CONVICTION')}\n"
             f"    ⚡ HFT:    {sum(1 for s in signals if s['tier']=='HFT')}\n"
@@ -1919,7 +1974,7 @@ def run_ui(api: TitanBackend) -> None:
     # ═══════════════════════════════════════════════════════════════════════════════
     def on_log_cb(msg, level="INFO"):
         root.after(0, lambda: log(msg, level))
-        if level == "ERR" and HAS_TELEGRAM:
+        if level == "ERR" and telegram_notifier is not None:
             threading.Thread(target=telegram_notifier.notify_error, args=(msg,), daemon=True).start()
     
     
@@ -1936,7 +1991,7 @@ def run_ui(api: TitanBackend) -> None:
             )
             nb.select(tab_positions)
         root.after(0, _update)
-        if HAS_TELEGRAM:
+        if telegram_notifier is not None:
             threading.Thread(target=telegram_notifier.notify_buy, args=(pos,), daemon=True).start()
     
     
@@ -1953,12 +2008,12 @@ def run_ui(api: TitanBackend) -> None:
                 tag
             )
         root.after(0, _update)
-        if HAS_TELEGRAM:
+        if telegram_notifier is not None:
             threading.Thread(target=telegram_notifier.notify_sell, args=(pos, pnl_usdc, pnl_pct), daemon=True).start()
     
     
     def on_cycle_complete_cb(signals, wallets, rejects, trades):
-        global _last_signals, _last_wallets, _last_rejects, _last_trades
+        nonlocal _last_signals, _last_wallets, _last_rejects, _last_trades
         _last_signals = signals
         _last_wallets = wallets
         
@@ -1997,7 +2052,7 @@ def run_ui(api: TitanBackend) -> None:
             except Exception as e: data["wallets"] = {}; log(f"[fetch wallets] {e}", "ERR")
             if not _show_signal_history[0]:
                 try:
-                    data["signals_live"] = api.get_signals()
+                    data["signals_live"] = _require_signal_rows(api.get_signals())
                 except Exception as e: data["signals_live"] = []; log(f"[fetch live signals] {e}", "ERR")
             if _show_signal_history[0] and (_pending_update[0] or not _signal_history_cache[0]):
                 try:
@@ -2188,14 +2243,15 @@ def run_ui(api: TitanBackend) -> None:
         status_var.set("🟢 LIVE — Follow The Whale | HFT Spike + Conviction")
 
         # ── Attach AI panel ───────────────────────────────────────────────────────
-        if HAS_AI:
-            AIPanel(ai_frame, engine_module=api)
+        if AIPanel is not None:
+            ai_panel_cls = AIPanel
+            ai_panel_cls(ai_frame, engine_module=api)
 
         def _boot_log():
             try:
-                global _last_signals, _last_rejects, _last_wallets
+                nonlocal _last_signals, _last_rejects, _last_wallets
                 try:
-                    _last_signals = api.get_signals() or []
+                    _last_signals = _require_signal_rows(api.get_signals())
                 except Exception:
                     pass
                 try:
@@ -2203,8 +2259,7 @@ def run_ui(api: TitanBackend) -> None:
                 except Exception:
                     pass
                 try:
-                    whales = api.get_whales() or []
-                    _last_wallets = {w["wallet"]: {k: v for k, v in w.items() if k != "wallet"} for w in whales}
+                    _last_wallets = _build_wallet_cache(api.get_whales())
                 except Exception:
                     pass
                 root.after(0, lambda: log(f"📂 Boot signals: {len(_last_signals)} signal(s), {len(_last_rejects)} reject(s), {len(_last_wallets)} whale(s)", "INFO"))
@@ -2225,7 +2280,8 @@ def run_ui(api: TitanBackend) -> None:
                 root.after(0, lambda: log(f"📂 Boot summary unavailable: {_msg}", "WARN"))
         threading.Thread(target=_boot_log, daemon=True).start()
     
-        if HAS_TELEGRAM:
+        if telegram_notifier is not None:
+            notifier = telegram_notifier
             def handle_tg_message(text: str):
                 cmd = text.strip().lower()
                 if cmd in ("pl", "pnl", "p&l"):
@@ -2250,11 +2306,11 @@ def run_ui(api: TitanBackend) -> None:
                                 img.save(buf, format='PNG')
                                 buf.seek(0)
                                 root.attributes('-topmost', False)
-                                threading.Thread(target=telegram_notifier.send_photo, args=(buf, "Titan P&L Graph"), daemon=True).start()
+                                threading.Thread(target=notifier.send_photo, args=(buf, "Titan P&L Graph"), daemon=True).start()
                                 
                             root.after(200, _do_grab)
                         except ImportError:
-                            threading.Thread(target=telegram_notifier.notify_error, args=("PIL not installed.",), daemon=True).start()
+                            threading.Thread(target=notifier.notify_error, args=("PIL not installed.",), daemon=True).start()
                         except Exception as e:
                             print(f"Failed to capture PnL screenshot: {e}")
                     root.after(10, _take_screenshot)
@@ -2264,7 +2320,8 @@ def run_ui(api: TitanBackend) -> None:
                         global _ngrok_url
                         if not _ngrok_url:
                             try:
-                                from pycloudflared import try_cloudflare
+                                pycloudflared_module = importlib.import_module("pycloudflared")
+                                try_cloudflare = getattr(pycloudflared_module, "try_cloudflare")
                                 print("☁️ Starting Cloudflare tunnel...")
                                 tunnel = try_cloudflare(port=8080)
                                 # Try multiple possible attribute names (pycloudflared uses .tunnel)
@@ -2273,12 +2330,12 @@ def run_ui(api: TitanBackend) -> None:
                                     _ngrok_url = str(tunnel)
                                 print(f"🔗 Tunnel established: {_ngrok_url}")
                             except ImportError:
-                                telegram_notifier.notify_error("pycloudflared not installed. Please 'pip install pycloudflared' to enable the dashboard Web App.")
+                                notifier.notify_error("pycloudflared not installed. Please 'pip install pycloudflared' to enable the dashboard Web App.")
                                 return
                             except Exception as e:
-                                telegram_notifier.notify_error(f"Failed to start Cloudflare tunnel: {e}")
+                                notifier.notify_error(f"Failed to start Cloudflare tunnel: {e}")
                                 return
-                        telegram_notifier.send_dashboard_button(_ngrok_url)
+                        notifier.send_dashboard_button(_ngrok_url)
                     threading.Thread(target=_start_app_and_send, daemon=True).start()
                 else:
                     def _ask_groq():
@@ -2303,14 +2360,14 @@ def run_ui(api: TitanBackend) -> None:
                             )
                             if resp.status_code == 200:
                                 reply = resp.json()["choices"][0]["message"]["content"]
-                                telegram_notifier._send(reply, is_markdown=False)
+                                notifier._send(reply, is_markdown=False)
                             else:
-                                telegram_notifier._send(f"AI Error: {resp.status_code} - {resp.text}", is_markdown=False)
+                                notifier._send(f"AI Error: {resp.status_code} - {resp.text}", is_markdown=False)
                         except Exception as e:
-                            telegram_notifier._send(f"AI Exception: {e}", is_markdown=False)
+                            notifier._send(f"AI Exception: {e}", is_markdown=False)
                     threading.Thread(target=_ask_groq, daemon=True).start()
     
-            telegram_notifier.start_polling(handle_tg_message)
+            notifier.start_polling(handle_tg_message)
     
             # Background server for dashboard
             import http.server
@@ -2326,7 +2383,7 @@ def run_ui(api: TitanBackend) -> None:
                         self.end_headers()
     
                         whales = sorted(_wallet_cache().values(), key=lambda x: x.get("score", 0), reverse=True)[:10]
-                        signals = _last_signals[:15] if _last_signals else []
+                        signals: list[SignalDict] = _last_signals[:15] if _last_signals else []
     
                         # Calculate equity
                         open_value = sum(pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0) for pos in _open_pos_dict().values())
@@ -2347,7 +2404,7 @@ def run_ui(api: TitanBackend) -> None:
                                 {"wallet": w.get("wallet", ""), "name": w.get("name", "Unknown"), "pnl": w.get("total_pnl", 0), "volume": w.get("volume", 0), "score": w.get("score", 0)} for w in whales
                             ],
                             "signals": [
-                                {"question": s.get("title", ""), "outcome": s.get("outcome", ""), "suggested_bet": s.get("bet", 0), "current_price": s.get("cur", 0), "ev_edge": (s.get("ev_info") or {}).get("ev_pct", 0) / 100, "confluence_count": s.get("n_confluence", 0)} for s in signals
+                                {"question": s.get("title", ""), "outcome": s.get("outcome", ""), "suggested_bet": s.get("bet", 0), "current_price": s.get("cur", 0), "ev_edge": _signal_ev_pct(s) / 100, "confluence_count": s.get("n_confluence", 0)} for s in signals
                             ],
                             "open_positions": [
                                 {"title": p.get("title", ""), "outcome": p.get("outcome", ""), "entry": p.get("entry_price", 0), "cur": p.get("cur_price", 0), "shares": p.get("shares", 0), "pnl": (p.get("cur_price",0) - p.get("entry_price",0)) * p.get("shares",0)}

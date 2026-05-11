@@ -31,11 +31,95 @@ v10 ADDITIONS:
 
 import time
 import math
+from typing import TypedDict
 import titan_state as S
 from titan_config import *
 
 
-def wilson_lower_bound(wins, total, z=1.96):
+class WhalePerformanceRecord(TypedDict):
+    wins:           int
+    losses:         int
+    total_pnl:      float
+    n_trades:       int
+    recent_trades:  list[tuple[float, float]]
+
+
+class WhalePerformanceSummary(TypedDict):
+    wallet:         str
+    name:           str
+    n_trades:       int
+    wins:           int
+    losses:         int
+    win_rate:       float
+    total_pnl:      float
+    avg_pnl:        float
+    weekly_pnl:     float
+    weekly_trades:  int
+
+
+class WalletOpenPosition(TypedDict):
+    cid:        str
+    outcome:    str
+    asset:      str
+    cur:        float
+    size:       float
+
+
+class WinRateData(TypedDict):
+    wins:               int
+    losses:             int
+    total:              int
+    win_rate:           float
+    wilson_lb:          float
+    source:             str
+    avg_profit:         float
+    avg_bet:            float
+    trades_per_hour:    float
+    recent_pnl_30d:     float
+    recent_pnl_7d:      float
+
+
+class WalletProfile(TypedDict):
+    # ── identity ──────────────────────────────────────────────────────────────
+    name:               str
+    ts:                 float
+
+    # ── scoring ───────────────────────────────────────────────────────────────
+    score:              float
+    win_rate:           float
+    wilson_lb:          float
+    alpha_per_trade:    float
+    wr_source:          str
+
+    # ── stats ─────────────────────────────────────────────────────────────────
+    n_resolved:         int
+    n_pos:              int
+    total_value:        float
+    total_pnl:          float
+    pnl_pct:            float
+    avg_pos_size:       float
+    avg_profit:         float
+    avg_bet:            float
+    trades_per_hour:    float
+
+    # ── flags ─────────────────────────────────────────────────────────────────
+    verified:           bool
+    watchable:          bool
+    elite:              bool
+    hft:                bool
+    sports_bot:         bool
+
+    # ── recent form ───────────────────────────────────────────────────────────
+    recent_pnl_30d:     float | None
+    recent_pnl_7d:      float | None
+    recent_ts:          float
+
+    # ── debug ─────────────────────────────────────────────────────────────────
+    detail:             str
+    fail_reasons:       list[str]
+
+
+def wilson_lower_bound(wins: int, total: int, z: float = 1.96) -> float:
     if total == 0:
         return 0.0
     p  = wins / total
@@ -44,7 +128,7 @@ def wilson_lower_bound(wins, total, z=1.96):
     return max(0.0, lb)
 
 
-def is_hft_wallet(profile: dict) -> bool:
+def is_hft_wallet(profile: WalletProfile) -> bool:
     """
     Return True if this wallet behaves like a high-frequency trader.
 
@@ -65,7 +149,7 @@ def is_hft_wallet(profile: dict) -> bool:
     return False
 
 
-def is_sports_bot(profile: dict) -> bool:
+def is_sports_bot(profile: WalletProfile) -> bool:
     """
     Return True if this wallet is likely a sports market-making bot.
 
@@ -106,7 +190,7 @@ def is_sports_bot(profile: dict) -> bool:
     return False
 
 
-def alpha_per_trade(profile: dict) -> float:
+def alpha_per_trade(profile: WalletProfile) -> float:
     """
     Calculate the average alpha (profit) per resolved trade.
     Genuine alpha traders have alpha_per_trade >= $20.
@@ -122,10 +206,10 @@ def alpha_per_trade(profile: dict) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 #  WHALE PERFORMANCE TRACKER
 # ─────────────────────────────────────────────────────────────────────────────
-_whale_performance: dict = {}  # wallet_addr → {wins, losses, total_pnl, n_trades, recent_trades}
+_whale_performance: dict[str, WhalePerformanceRecord] = {}
 
 
-def record_whale_trade_performance(wallet_addrs: list, pnl_usdc: float, won: bool):
+def record_whale_trade_performance(wallet_addrs: list[str], pnl_usdc: float, won: bool) -> None:
     """
     Record the outcome of a copied trade for the whale(s) that sourced it.
     Called when a position is closed. Tracks 7-day rolling window for recency.
@@ -152,9 +236,10 @@ def record_whale_trade_performance(wallet_addrs: list, pnl_usdc: float, won: boo
         rec["recent_trades"] = [(ts, p) for ts, p in rec["recent_trades"] if ts >= week_ago]
 
 
-def get_whale_performance(wallet: str) -> dict:
+def get_whale_performance(wallet: str) -> WhalePerformanceRecord:
     """Get copy-trading performance record for a whale."""
-    return _whale_performance.get(wallet.lower(), {"wins": 0, "losses": 0, "total_pnl": 0.0, "n_trades": 0})
+    _empty: WhalePerformanceRecord = {"wins": 0, "losses": 0, "total_pnl": 0.0, "n_trades": 0, "recent_trades": []}
+    return _whale_performance.get(wallet.lower(), _empty)
 
 
 def get_whale_weekly_pnl(wallet: str) -> float:
@@ -167,7 +252,7 @@ def get_whale_weekly_pnl(wallet: str) -> float:
     return sum(p for ts, p in recent if ts >= week_ago)
 
 
-def get_whale_performance_summary() -> list:
+def get_whale_performance_summary() -> list[WhalePerformanceSummary]:
     """
     Return a sorted summary of all whale performance records.
     Sorted by total PnL (worst first for easy identification of bad sources).
@@ -198,7 +283,7 @@ def get_whale_performance_summary() -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 #  v10: RECENT FORM FUNCTIONS
 # ─────────────────────────────────────────────────────────────────────────────
-def get_wallet_open_positions(wallet: str) -> list:
+def get_wallet_open_positions(wallet: str) -> list[WalletOpenPosition]:
     """
     Fetch current open positions for a wallet.
     Returns list of {cid, outcome, asset, cur_price, size} dicts.
@@ -229,7 +314,7 @@ def get_wallet_open_positions(wallet: str) -> list:
     return results
 
 
-def is_recent_form_qualified(profile: dict,
+def is_recent_form_qualified(profile: WalletProfile,
                               min_pnl_30d: float = 0,
                               min_pnl_7d: float = -50,
                               max_tph: float = 20) -> bool:
@@ -250,7 +335,7 @@ def is_recent_form_qualified(profile: dict,
 # ─────────────────────────────────────────────────────────────────────────────
 #  WIN RATE CALCULATION
 # ─────────────────────────────────────────────────────────────────────────────
-def fetch_real_winrate(wallet: str) -> dict:
+def fetch_real_winrate(wallet: str) -> WinRateData:
     """
     Compute win rate from resolved trades.
     Returns win_rate, wilson_lb, total resolved, avg_profit, avg_bet.
@@ -408,7 +493,7 @@ def fetch_real_winrate(wallet: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 #  WALLET SCORING
 # ─────────────────────────────────────────────────────────────────────────────
-def fetch_wallet(wallet: str) -> dict:
+def fetch_wallet(wallet: str) -> WalletProfile:
     wallet = wallet.lower()
     now_t  = time.time()
     cached = S.env().wallet_cache.get(wallet)
@@ -432,13 +517,13 @@ def fetch_wallet(wallet: str) -> dict:
         "sortBy": "CASHPNL", "sortDirection": "DESC",
     })
 
-    null = {
-        "score": 0.10, "win_rate": 0.0, "wilson_lb": 0.0,
-        "n_resolved": 0, "n_pos": 0, "total_value": 0,
-        "total_pnl": 0, "pnl_pct": 0, "avg_pos_size": 0,
-        "avg_profit": 0, "avg_bet": 0, "trades_per_hour": 0,
-        "recent_pnl_30d": None, "recent_pnl_7d": None, "recent_ts": 0,
-        "verified": False, "watchable": False, "elite": False, "hft": False,
+    null: WalletProfile = {
+        "score": 0.10, "win_rate": 0.0, "wilson_lb": 0.0, "alpha_per_trade": 0.0,
+        "n_resolved": 0, "n_pos": 0, "total_value": 0.0,
+        "total_pnl": 0.0, "pnl_pct": 0.0, "avg_pos_size": 0.0,
+        "avg_profit": 0.0, "avg_bet": 0.0, "trades_per_hour": 0.0,
+        "recent_pnl_30d": None, "recent_pnl_7d": None, "recent_ts": 0.0,
+        "verified": False, "watchable": False, "elite": False, "hft": False, "sports_bot": False,
         "name": keep_name or (wallet[:10] + "…"), "ts": now_t,
         "detail": "No data", "wr_source": "none",
         "fail_reasons": ["no_data"],
@@ -446,10 +531,9 @@ def fetch_wallet(wallet: str) -> dict:
 
     if not pos_data or not isinstance(pos_data, list):
         if cached:
-            stale = dict(cached)
-            stale["ts"] = now_t - WALLET_TTL + 60
-            S.env().wallet_cache[wallet] = stale
-            return stale
+            cached["ts"] = now_t - WALLET_TTL + 60
+            S.env().wallet_cache[wallet] = cached
+            return cached
         S.env().wallet_cache[wallet] = null
         return null
 
@@ -521,7 +605,7 @@ def fetch_wallet(wallet: str) -> dict:
         fail_reasons.append(f"VER_WR {wr*100:.0f}%<{MIN_WIN_RATE_VER*100:.0f}%")
 
     portfolio_proxy = max(cur, pnl)
-    apt = alpha_per_trade({"total_pnl": pnl, "n_resolved": n_res})
+    apt = pnl / n_res if n_res > 0 else 0.0
     _alpha_threshold = 1.0
     elite = (
         verified and
@@ -550,10 +634,22 @@ def fetch_wallet(wallet: str) -> dict:
     est_tag = "~" if avg_profit_estimated else ""
     hft_tag = "⚡HFT" if hft_detected else ""
 
-    sports_bot_detected = is_sports_bot({
-        "name": final_name, "trades_per_hour": tph,
-        "avg_bet": avg_bet, "sports_bot": False,
-    })
+    try:
+        import titan_config as _C
+        _sports_bot_tph = getattr(_C, "SPORTS_BOT_MIN_TPH", 150)
+    except Exception:
+        _sports_bot_tph = 150
+    _SPORTS_BOT_NAMES = {
+        "gamblingisallyouneed", "swisstony", "rn1", "cannae", "lilybaeum",
+        "billdenter", "billdenter2026", "elkmonkey", "billyel", "sportsguy",
+        "texaskid", "ferrarichampions", "ferrarichampions2026", "snakeball",
+    }
+    _lname = final_name.lower()
+    sports_bot_detected = (
+        tph >= _sports_bot_tph or
+        any(sbn in _lname for sbn in _SPORTS_BOT_NAMES) or
+        (tph >= 50 and avg_bet > 0 and avg_bet < 100)
+    )
     sports_tag = "🏈SPORTS" if sports_bot_detected else ""
 
     # v10: recent form tag for display
@@ -561,7 +657,7 @@ def fetch_wallet(wallet: str) -> dict:
     if recent_pnl_30d is not None:
         rf_tag = f" RF30d:${recent_pnl_30d:+.0f}"
 
-    result = {
+    result: WalletProfile = {
         "score": round(score, 5), "win_rate": wr, "wilson_lb": wb,
         "n_resolved": n_res, "n_pos": n_pos,
         "total_value": cur, "total_pnl": pnl, "pnl_pct": pct,
@@ -596,11 +692,11 @@ def fetch_wallet(wallet: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 #  HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
-def get_elite_wallets() -> list:
+def get_elite_wallets() -> list[str]:
     return [w.lower() for w, p in S.env().wallet_cache.items() if p.get("elite")]
 
 
-def _refresh_recent_form_scores():
+def _refresh_recent_form_scores() -> None:
     """
     v10: Refresh recent_pnl_30d / recent_pnl_7d for verified wallets whose
     recent_ts is older than 6 hours. Called every 50 cycles from the engine.
@@ -629,7 +725,7 @@ def _refresh_recent_form_scores():
         S._log(f"♻ Recent form refreshed for {refreshed} wallets", "DATA")
 
 
-def discover_new_whales():
+def discover_new_whales() -> None:
     S._log("🔍 Running whale discovery…", "DATA")
     candidates = set()
 
@@ -686,7 +782,7 @@ def discover_new_whales():
     S._log(f"🔍 Discovery done — {discovered} new. Watchlist: {len(S.env().watchlist)}", "DATA")
 
 
-def scan_top_market_holders():
+def scan_top_market_holders() -> None:
     S._log("🔍 Scanning top market holders…", "DATA")
     try:
         data = S.safe_get(f"{GAMMA_API}/markets", {"limit": 100, "active": "true"})

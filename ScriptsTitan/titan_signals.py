@@ -36,11 +36,150 @@ import time
 import re
 import math
 from collections import defaultdict
+from dataclasses import dataclass, field, asdict
+from typing import TypedDict
 import titan_state as S
 import titan_config as C
 from titan_config import *
-from titan_market import get_market, get_outcome_price, get_outcome_price_by_trade, fetch_wallet_sells, mark_cid_verified
+from titan_market import get_market, get_outcome_price, get_outcome_price_by_trade, fetch_wallet_sells, mark_cid_verified, WhaleObservation, Market
 from titan_wallet import is_hft_wallet, get_whale_weekly_pnl, is_recent_form_qualified
+
+
+@dataclass
+class Signal:
+    # ── market identity ───────────────────────────────────────────────────────
+    cid:            str
+    asset:          str
+    outcome:        str
+    title:          str
+    slug:           str
+    event_slug:     str
+    mkt_type:       str
+    is_sports:      bool
+
+    # ── strategy ─────────────────────────────────────────────────────────────
+    strategy:       str          # "recent_form" | "drift_discount" | "consensus_basket"
+    stop_loss_pct:  float | None
+
+    # ── whale observations ────────────────────────────────────────────────────
+    ver:            dict[str, WhaleObservation]
+    elite_ver:      dict[str, WhaleObservation]
+    wallets:        dict          # ambient wallet cache — for scorer/sizer use only
+    n_ver:          int
+    n_elite:        int
+    n_confluence:   int
+    n_total:        int
+
+    # ── price & flow ─────────────────────────────────────────────────────────
+    avg_entry:      float
+    cur:            float
+    drift:          float
+    slippage:       float
+    total_flow:     float
+    ver_flow:       float
+    max_bet_cash:   float
+    opposing_flow:  float
+
+    # ── timing ────────────────────────────────────────────────────────────────
+    newest_ts:      float
+    age_h:          float
+    window:         str          # "hot" | "warm"
+
+    mkt:            Market
+
+    # ── quality flags ─────────────────────────────────────────────────────────
+    avg_wscore:         float
+    is_hft:             bool
+    has_large_trade:    bool
+    conviction_detail:  str
+    elite_only_mode:    bool
+    sports_conviction_mult: float
+    exits_detected:     list
+    exits_same_side:    list
+
+    # ── scoring (set after construction) ──────────────────────────────────────
+    score:  float = 0.0
+    bd:     dict  = field(default_factory=dict)
+    tier:   str   = ""
+    bet:    float = 0.0
+    names:  list  = field(default_factory=list)
+
+    # ── strategy-specific extras ───────────────────────────────────────────────
+    source_recent_wr:   float | None = None   # recent_form only
+    drift_discount_pct: float | None = None   # drift_discount only
+
+    @property
+    def age_min(self) -> float:
+        return self.age_h * 60
+
+    @property
+    def max_bet(self) -> float:
+        return self.max_bet_cash
+
+    @property
+    def is_conviction(self) -> bool:
+        return self.has_large_trade
+
+    def to_dict(self) -> "SignalDict":
+        return asdict(self)  # type: ignore[return-value]
+
+
+class _SignalDictRequired(TypedDict):
+    cid:                    str
+    asset:                  str
+    outcome:                str
+    title:                  str
+    slug:                   str
+    event_slug:             str
+    mkt_type:               str
+    is_sports:              bool
+    strategy:               str
+    stop_loss_pct:          float | None
+    ver:                    dict
+    elite_ver:              dict
+    wallets:                dict
+    n_ver:                  int
+    n_elite:                int
+    n_confluence:           int
+    n_total:                int
+    avg_entry:              float
+    cur:                    float
+    drift:                  float
+    slippage:               float
+    total_flow:             float
+    ver_flow:               float
+    max_bet_cash:           float
+    opposing_flow:          float
+    newest_ts:              float
+    age_h:                  float
+    window:                 str
+    mkt:                    dict
+    avg_wscore:             float
+    is_hft:                 bool
+    has_large_trade:        bool
+    conviction_detail:      str
+    elite_only_mode:        bool
+    sports_conviction_mult: float
+    exits_detected:         list
+    exits_same_side:        list
+    score:                  float
+    bd:                     dict
+    tier:                   str
+    bet:                    float
+    names:                  list
+    source_recent_wr:       float | None
+    drift_discount_pct:     float | None
+
+
+class SignalDict(_SignalDictRequired, total=False):
+    snapshot_ts:            float
+
+
+def _hft_spike_ratio_value(trade: WhaleObservation) -> float:
+    ratio = trade.hft_spike_ratio
+    if ratio is None:
+        return 0.0
+    return ratio
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -62,7 +201,7 @@ _CRYPTO_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
-def classify_market(title: str, event_slug: str, hrs_left: float = None) -> str:
+def classify_market(title: str, event_slug: str, hrs_left: float | None = None) -> str:
     """
     Classify a market into SPORTS, CRYPTO, POLITICS, or EVENT.
     Sports markets require stricter entry criteria.
@@ -136,7 +275,7 @@ def restore_known_hedge_wallets(wallets_iter):
 # ─────────────────────────────────────────────────────────────────────────────
 #  EXIT MONITORING
 # ─────────────────────────────────────────────────────────────────────────────
-def check_whale_exits(cid_to_wallet_sets: dict, entry_times: dict = None) -> dict:
+def check_whale_exits(cid_to_wallet_sets: dict, entry_times: dict | None = None) -> dict:
     """
     Returns {conditionId: [wallet_addresses_that_sold]}.
     Only checks SELL activity for wallets on open positions.
@@ -181,10 +320,10 @@ def check_whale_exits(cid_to_wallet_sets: dict, entry_times: dict = None) -> dic
             continue
 
         for sell in sells:
-            ts    = sell["ts"]
-            cid   = sell["cid"]
-            asset = sell.get("asset", "")
-            sell_cash = sell.get("cash", 0)
+            ts    = sell.ts
+            cid   = sell.cid
+            asset = sell.asset
+            sell_cash = sell.cash
 
             if cid not in cid_to_wallet_sets:
                 if asset and asset in cid_to_wallet_sets:
@@ -239,7 +378,7 @@ def whale_still_holding(wallet: str, cid: str) -> bool:
     since = time.time() - 48 * 3600
     sells = fetch_wallet_sells(wallet, since, limit=100)
     for s in sells:
-        if s["cid"] == cid or s.get("asset") == cid:
+        if s.cid == cid or s.asset == cid:
             return False
     return True
 
@@ -247,33 +386,31 @@ def whale_still_holding(wallet: str, cid: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 #  SCORING
 # ─────────────────────────────────────────────────────────────────────────────
-def score_signal(s: dict) -> dict:
+def score_signal(s: "Signal") -> dict:
     _sc = getattr(C, "strategy_scoring", {})
     bd = {}
 
-    bd["wallet"] = round(s["avg_wscore"] * _sc.get("wallet_max_pts", 30), 1)
+    bd["wallet"] = round(s.avg_wscore * _sc.get("wallet_max_pts", 30), 1)
 
-    n_confluence = s.get("n_confluence", 0)
     _conf_pts = _sc.get("confluence_pts", [0, 6, 10, 14, 18])
-    bd["conf"] = _conf_pts[min(n_confluence, len(_conf_pts) - 1)]
-    if s.get("elite_only_mode"):
+    bd["conf"] = _conf_pts[min(s.n_confluence, len(_conf_pts) - 1)]
+    if s.elite_only_mode:
         bd["conf"] = max(bd["conf"], _sc.get("elite_only_conf_floor", 8))
-    if s.get("has_large_trade"):
+    if s.has_large_trade:
         bd["conf"] = min(_conf_pts[-1], bd["conf"] + _sc.get("large_trade_conf_bonus", 4))
 
-    age_h  = (time.time() - s["newest_ts"]) / 3600
-    window = s.get("window", "warm")
-    if window in ("hot", "hft"):
+    age_h  = (time.time() - s.newest_ts) / 3600
+    if s.window in ("hot", "hft"):
         _hot = _sc.get("recency_hot_thresholds", [[0.25,20],[0.5,17],[1,14],[2,9],[3,6],[4,4],[None,2]])
         bd["rec"] = next(pts for (thr, pts) in _hot if thr is None or age_h < thr)
     else:
         _warm = _sc.get("recency_warm_thresholds", [[4,6],[6,4],[8,2],[None,1]])
         bd["rec"] = next(pts for (thr, pts) in _warm if thr is None or age_h < thr)
 
-    if s.get("is_hft") and (time.time() - s["newest_ts"]) <= HFT_MIRROR_DELAY_MAX_SECONDS:
+    if s.is_hft and (time.time() - s.newest_ts) <= HFT_MIRROR_DELAY_MAX_SECONDS:
         bd["rec"] = min(_sc.get("hft_recency_cap", 20), bd["rec"] + _sc.get("hft_recency_bonus", 5))
 
-    drift = s["drift"]
+    drift = s.drift
     if drift < 0:
         _base = _sc.get("opp_neg_drift_base", 8)
         _scale = _sc.get("opp_neg_drift_scale", 25)
@@ -283,7 +420,7 @@ def score_signal(s: dict) -> dict:
         _pos = _sc.get("opp_pos_drift_thresholds", [[0.04,15],[0.08,12],[0.12,8],[0.15,4],[None,0]])
         bd["opp"] = next(pts for (thr, pts) in _pos if thr is None or drift < thr)
 
-    mkt   = s["mkt"]
+    mkt   = s.mkt
     liq_p = min(_sc.get("liq_quality_max", 5.0), mkt["liq"] / _sc.get("liq_quality_scale", 8000) * _sc.get("liq_quality_max", 5.0))
     vol_p = min(_sc.get("vol_quality_max", 3.0), mkt["volume"] / _sc.get("vol_quality_scale", 40000) * _sc.get("vol_quality_max", 3.0))
     hrs   = mkt.get("hrs_left")
@@ -292,29 +429,27 @@ def score_signal(s: dict) -> dict:
     t_p = _tq_pts[0] if (hrs is None or hrs > _tq_thr[0]) else _tq_pts[1] if hrs > _tq_thr[1] else _tq_pts[2]
     bd["mkt"] = round(liq_p + vol_p + t_p, 1)
 
-    mb = s["max_bet_cash"]
-    bd["bonus"] = (_sc.get("conviction_bonus_massive", 5) if mb >= MASSIVE_TRADE
-                   else _sc.get("conviction_bonus_large", 2) if mb >= LARGE_TRADE else 0)
-    if s.get("has_large_trade"):
+    bd["bonus"] = (_sc.get("conviction_bonus_massive", 5) if s.max_bet_cash >= MASSIVE_TRADE
+                   else _sc.get("conviction_bonus_large", 2) if s.max_bet_cash >= LARGE_TRADE else 0)
+    if s.has_large_trade:
         bd["bonus"] = min(10, bd["bonus"] + _sc.get("large_trade_bonus", 3))
 
-    cur_p = s.get("cur", 0.5)
-    if C.IDEAL_PRICE_MIN <= cur_p <= C.IDEAL_PRICE_MAX:
+    if C.IDEAL_PRICE_MIN <= s.cur <= C.IDEAL_PRICE_MAX:
         bd["price_zone"] = _sc.get("price_zone_ideal_bonus", 5)
-    elif C.MIN_ENTRY_PRICE <= cur_p <= C.MAX_ENTRY_PRICE:
+    elif C.MIN_ENTRY_PRICE <= s.cur <= C.MAX_ENTRY_PRICE:
         bd["price_zone"] = _sc.get("price_zone_acceptable_bonus", 2)
     else:
         bd["price_zone"] = _sc.get("price_zone_outside_penalty", -10)
 
-    n_el = s.get("n_elite", 0)
+    n_el = s.n_elite
     _mw = _sc.get("multi_whale_pts", [0, 0, 5, 8])
     bd["multi_whale"] = _mw[min(n_el, len(_mw) - 1)]
 
-    bd["exit_penalty"] = len(s.get("exits_same_side", [])) * _sc.get("exit_penalty_per_whale", -8)
+    bd["exit_penalty"] = len(s.exits_same_side) * _sc.get("exit_penalty_per_whale", -8)
 
     weekly_pnl_total = sum(
         get_whale_weekly_pnl(w)
-        for w in s.get("elite_ver", {}).keys()
+        for w in s.elite_ver.keys()
     )
     if weekly_pnl_total < -1.0:
         bd["weekly_penalty"] = max(_sc.get("weekly_pnl_penalty_min", -10), round(weekly_pnl_total, 0))
@@ -337,19 +472,19 @@ def _adaptive_bet_caps():
     return MAX_BET_ABS, MAX_BET_PCT
 
 
-def kelly_bet(signal: dict, wallets: dict, score: float = None) -> float:
+def kelly_bet(signal: Signal, wallets: dict, score: float | None = None) -> float:
     """
     v10 KELLY BET SIZING — strategy-aware.
     Applies strategy-specific caps from titan_config strategy blocks.
     """
-    cur        = signal["cur"]
-    fair_value = signal["avg_entry"]
-    score      = score if score is not None else signal.get("score", 50)
-    tier       = signal.get("tier", "MEDIUM")
-    is_large   = signal.get("has_large_trade", False)
-    avg_wscore = signal.get("avg_wscore", 0.85)
-    n_elite    = signal.get("n_elite", 0)
-    strategy   = signal.get("strategy", "consensus_basket")
+    cur        = signal.cur
+    fair_value = signal.avg_entry
+    score      = score if score is not None else signal.score
+    tier       = signal.tier if signal.tier else "MEDIUM"
+    is_large   = signal.has_large_trade
+    avg_wscore = signal.avg_wscore
+    n_elite    = signal.n_elite
+    strategy   = signal.strategy
 
     fair_value = max(0.05, min(0.95, fair_value))
     cur        = max(0.05, min(0.95, cur))
@@ -396,14 +531,14 @@ def kelly_bet(signal: dict, wallets: dict, score: float = None) -> float:
 
     _lt_boost = _kc.get("large_trade_max_abs_boost", 1.5)
     _lt_br_cap = _kc.get("large_trade_bankroll_cap", 0.22)
-    if is_large and not signal.get("is_hft", False):
+    if is_large and not signal.is_hft:
         max_abs = min(max_abs * _lt_boost, br * _lt_br_cap)
 
     bet = max(score_floor, kelly_bet_raw)
     return round(min(max_abs, br * max_pct, max(MIN_BET, bet)), 2)
 
 
-def _strategy_bet_multiplier(sig: dict) -> float:
+def _strategy_bet_multiplier(sig: Signal) -> float:
     """
     v10: Compute a strategy-specific bet size multiplier.
     recent_form: scale by recent win rate of the sourcing whale.
@@ -411,16 +546,15 @@ def _strategy_bet_multiplier(sig: dict) -> float:
     open_book: scale by consensus count.
     consensus_basket: no multiplier (volume strategy, flat sizing).
     """
-    strategy = sig.get("strategy", "consensus_basket")
+    strategy = sig.strategy
     if "recent_form" in strategy:
-        wr = sig.get("source_recent_wr", 0.55)
+        wr = sig.source_recent_wr or 0.55
         return max(0.8, min(1.6, (wr - 0.50) * 4 + 0.8))
     elif "drift_discount" in strategy:
-        discount = sig.get("drift_discount_pct", 0.05)
+        discount = sig.drift_discount_pct or 0.0
         return max(0.9, min(1.5, 1.0 + discount * 5))
     elif "open_book" in strategy:
-        consensus = sig.get("consensus_count", 3)
-        return max(1.0, min(1.8, 0.8 + consensus * 0.2))
+        return max(1.0, min(1.8, 0.8 + sig.n_confluence * 0.2))
     else:
         return 1.0
 
@@ -513,7 +647,7 @@ def _build_recent_form_signals(raw_trades: list, wallets: dict,
     # Pre-filter: only keep trades from recent-form qualified wallets
     qualified_trades = []
     for t in raw_trades:
-        w = t["wallet"]
+        w = t.wallet
         prof = wallets.get(w, _EMPTY_W)
         if not prof.get("verified") and not prof.get("elite"):
             continue
@@ -526,19 +660,19 @@ def _build_recent_form_signals(raw_trades: list, wallets: dict,
 
     cid_groups = defaultdict(list)
     for t in qualified_trades:
-        cid_groups[(t["cid"], t["outcome"])].append(t)
+        cid_groups[(t.cid, t.outcome)].append(t)
 
     for (cid, outcome), group in cid_groups.items():
         by_w: dict = {}
         for t in group:
-            w = t["wallet"]
-            if w not in by_w or t["ts"] > by_w[w]["ts"]:
+            w = t.wallet
+            if w not in by_w or t.ts > by_w[w].ts:
                 by_w[w] = t
 
         title = next(
-            (t["title"] for t in sorted(by_w.values(), key=lambda x: x["ts"], reverse=True)
-             if t.get("title")),
-            next(iter(by_w.values()))["title"]
+            (t.title for t in sorted(by_w.values(), key=lambda x: x.ts, reverse=True)
+             if t.title),
+            next(iter(by_w.values())).title
         )
 
         # Classify wallets — recent form strategy: elite OR verified with good recent form
@@ -564,7 +698,7 @@ def _build_recent_form_signals(raw_trades: list, wallets: dict,
             continue
 
         # Age gate — use newest qualified wallet's trade time
-        newest_ts = max(t["ts"] for t in rf_qualified.values())
+        newest_ts = max(t.ts for t in rf_qualified.values())
         age_h = (now_t - newest_ts) / 3600
         if age_h > max_age_h:
             rejects.append(
@@ -574,8 +708,8 @@ def _build_recent_form_signals(raw_trades: list, wallets: dict,
             continue
 
         # Market data — only call Gamma since these wallets are verified
-        asset_hint = next((t.get("asset", "") for t in rf_qualified.values() if t.get("asset")), "")
-        slug_hint  = next((t.get("slug", "") for t in rf_qualified.values() if t.get("slug")), "")
+        asset_hint = next((t.asset for t in rf_qualified.values() if t.asset), "")
+        slug_hint  = next((t.slug for t in rf_qualified.values() if t.slug), "")
 
         mkt, mkt_fail = _get_market_for_signal(cid, title, asset_hint, slug_hint)
         if not mkt:
@@ -588,13 +722,13 @@ def _build_recent_form_signals(raw_trades: list, wallets: dict,
             continue
 
         # Market type classification
-        event_slug = next((t.get("event_slug", "") for t in group if t.get("event_slug")), "")
+        event_slug = next((t.event_slug for t in group if t.event_slug), "")
         if not event_slug:
             event_slug = mkt.get("event_slug", "")
         mkt_type = classify_market(title, event_slug, mkt.get("hrs_left"))
 
         # Avg entry from recent-form wallets
-        entries = [(t["price"], t["cash"]) for t in rf_qualified.values()]
+        entries = [(t.price, t.cash) for t in rf_qualified.values()]
         total_w = sum(c for _, c in entries)
         if total_w == 0:
             continue
@@ -645,32 +779,29 @@ def _build_recent_form_signals(raw_trades: list, wallets: dict,
         exits_here = whale_exits.get(cid, [])
         exits_same_side = list(set(exits_here) & set(all_ver.keys()))
 
-        total_flow = sum(t["cash"] for t in by_w.values())
-        max_bet_cash = max(t["cash"] for t in rf_qualified.values())
-        window = "hot" if any(t.get("window") == "hot" for t in rf_qualified.values()) else "warm"
+        total_flow = sum(t.cash for t in by_w.values())
+        max_bet_cash = max(t.cash for t in rf_qualified.values())
+        window = "hot" if any(t.window == "hot" for t in rf_qualified.values()) else "warm"
 
-        sig = {
-            "slug": cid, "cid": cid, "title": title, "event_slug": event_slug,
-            "outcome": outcome, "asset": asset_hint, "mkt": mkt, "mkt_type": mkt_type,
-            "is_sports": (mkt_type == "SPORTS"),
-            "ver": all_ver, "elite_ver": elite_wallets_rf,
-            "n_ver": len(all_ver), "n_elite": len(elite_wallets_rf),
-            "n_confluence": len(all_ver), "n_total": len(by_w),
-            "avg_entry": avg_entry, "cur": cur, "drift": drift, "slippage": slippage,
-            "total_flow": total_flow, "ver_flow": total_flow,
-            "max_bet_cash": max_bet_cash, "max_bet": max_bet_cash,
-            "newest_ts": newest_ts, "age_h": age_h, "age_min": age_h * 60,
-            "avg_wscore": avg_wscore, "window": window, "is_hft": False,
-            "has_large_trade": max_bet_cash >= LARGE_TRADE, "conviction_detail": "",
-            "elite_only_mode": len(verified_wallets_rf) == 0,
-            "wallets": wallets,
-            "exits_detected": exits_here, "exits_same_side": exits_same_side,
-            "sports_conviction_mult": 1.0,
-            "strategy": "recent_form",
-            "stop_loss_pct": stop_loss_pct,
-            "source_recent_wr": avg_recent_wr,
-            "opposing_flow": 0.0,
-        }
+        sig = Signal(
+            cid=cid, asset=asset_hint, outcome=outcome, title=title,
+            slug=cid, event_slug=event_slug, mkt_type=mkt_type, is_sports=(mkt_type == "SPORTS"),
+            strategy="recent_form", stop_loss_pct=stop_loss_pct,
+            ver=all_ver, elite_ver=elite_wallets_rf, wallets=wallets,
+            n_ver=len(all_ver), n_elite=len(elite_wallets_rf),
+            n_confluence=len(all_ver), n_total=len(by_w),
+            avg_entry=avg_entry, cur=cur, drift=drift, slippage=slippage,
+            total_flow=total_flow, ver_flow=total_flow,
+            max_bet_cash=max_bet_cash, opposing_flow=0.0,
+            newest_ts=newest_ts, age_h=age_h, window=window,
+            avg_wscore=avg_wscore, is_hft=False,
+            has_large_trade=max_bet_cash >= LARGE_TRADE, conviction_detail="",
+            elite_only_mode=len(verified_wallets_rf) == 0,
+            exits_detected=exits_here, exits_same_side=exits_same_side,
+            sports_conviction_mult=1.0,
+            source_recent_wr=avg_recent_wr,
+            mkt=mkt,
+        )
 
         bd    = score_signal(sig)
         total = bd["total"]
@@ -686,8 +817,8 @@ def _build_recent_form_signals(raw_trades: list, wallets: dict,
         tier = "ALERT" if total >= ALERT_SCORE else "STRONG" if total >= STRONG_SCORE else "MEDIUM"
         bet  = kelly_bet(sig, wallets, score=total)
 
-        names = _build_names(elite_wallets_rf, verified_wallets_rf, all_ver, False, sig["has_large_trade"])
-        sig.update({"score": total, "bd": bd, "tier": tier, "bet": bet, "names": names})
+        names = _build_names(elite_wallets_rf, verified_wallets_rf, all_ver, False, sig.has_large_trade)
+        sig.score = total; sig.bd = bd; sig.tier = tier; sig.bet = bet; sig.names = names
         signals.append(sig)
 
     return signals, rejects
@@ -729,8 +860,8 @@ def _build_drift_discount_signals(raw_trades: list, wallets: dict,
     # Pre-filter: only verified/elite wallets
     verified_trades = [
         t for t in raw_trades
-        if wallets.get(t["wallet"], _EMPTY_W).get("verified") or
-           wallets.get(t["wallet"], _EMPTY_W).get("elite")
+        if wallets.get(t.wallet, _EMPTY_W).get("verified") or
+           wallets.get(t.wallet, _EMPTY_W).get("elite")
     ]
 
     if not verified_trades:
@@ -738,19 +869,19 @@ def _build_drift_discount_signals(raw_trades: list, wallets: dict,
 
     cid_groups = defaultdict(list)
     for t in verified_trades:
-        cid_groups[(t["cid"], t["outcome"])].append(t)
+        cid_groups[(t.cid, t.outcome)].append(t)
 
     for (cid, outcome), group in cid_groups.items():
         by_w: dict = {}
         for t in group:
-            w = t["wallet"]
-            if w not in by_w or t["ts"] > by_w[w]["ts"]:
+            w = t.wallet
+            if w not in by_w or t.ts > by_w[w].ts:
                 by_w[w] = t
 
         title = next(
-            (t["title"] for t in sorted(by_w.values(), key=lambda x: x["ts"], reverse=True)
-             if t.get("title")),
-            next(iter(by_w.values()))["title"]
+            (t.title for t in sorted(by_w.values(), key=lambda x: x.ts, reverse=True)
+             if t.title),
+            next(iter(by_w.values())).title
         )
 
         elite_wallets = {w: t for w, t in by_w.items() if wallets.get(w, _EMPTY_W).get("elite")}
@@ -765,14 +896,14 @@ def _build_drift_discount_signals(raw_trades: list, wallets: dict,
             continue
 
         # Age gate — for drift discount, we look back up to 6h
-        newest_ts = max(t["ts"] for t in all_ver.values())
+        newest_ts = max(t.ts for t in all_ver.values())
         age_h = (now_t - newest_ts) / 3600
         if age_h > max_age_h:
             continue  # Too old — skip silently (would generate too many rejects)
 
         # Market data
-        asset_hint = next((t.get("asset", "") for t in all_ver.values() if t.get("asset")), "")
-        slug_hint  = next((t.get("slug", "") for t in all_ver.values() if t.get("slug")), "")
+        asset_hint = next((t.asset for t in all_ver.values() if t.asset), "")
+        slug_hint  = next((t.slug for t in all_ver.values() if t.slug), "")
 
         mkt, mkt_fail = _get_market_for_signal(cid, title, asset_hint, slug_hint)
         if not mkt:
@@ -781,7 +912,7 @@ def _build_drift_discount_signals(raw_trades: list, wallets: dict,
         cur = get_outcome_price(mkt, outcome, asset=asset_hint)
 
         # Compute discount
-        entries = [(t["price"], t["cash"]) for t in all_ver.values()]
+        entries = [(t.price, t.cash) for t in all_ver.values()]
         total_w = sum(c for _, c in entries)
         if total_w == 0:
             continue
@@ -812,10 +943,10 @@ def _build_drift_discount_signals(raw_trades: list, wallets: dict,
         if check_holding:
             exited_whales = []
             for w, t in all_ver.items():
-                buy_ts = t["ts"]
+                buy_ts = t.ts
                 sells = fetch_wallet_sells(w, buy_ts - 60, limit=50)
                 for s in sells:
-                    if (s["cid"] == cid or s.get("asset") == asset_hint) and s["ts"] > buy_ts:
+                    if (s.cid == cid or s.asset == asset_hint) and s.ts > buy_ts:
                         exited_whales.append(w)
                         break
                 time.sleep(0.05)
@@ -835,13 +966,13 @@ def _build_drift_discount_signals(raw_trades: list, wallets: dict,
                     elite_wallets.pop(w, None)
                     verified_wallets.pop(w, None)
                 # Recompute avg entry without exited wallets
-                entries = [(t["price"], t["cash"]) for t in all_ver.values()]
+                entries = [(t.price, t.cash) for t in all_ver.values()]
                 total_w = sum(c for _, c in entries)
                 if total_w > 0:
                     avg_whale_entry = sum(p * w for p, w in entries) / total_w
                     discount = (avg_whale_entry - cur) / max(avg_whale_entry, 0.01)
 
-        event_slug = next((t.get("event_slug", "") for t in group if t.get("event_slug")), "")
+        event_slug = next((t.event_slug for t in group if t.event_slug), "")
         if not event_slug:
             event_slug = mkt.get("event_slug", "")
         mkt_type = classify_market(title, event_slug, mkt.get("hrs_left"))
@@ -852,8 +983,8 @@ def _build_drift_discount_signals(raw_trades: list, wallets: dict,
         exits_here = whale_exits.get(cid, [])
         exits_same_side = list(set(exits_here) & set(all_ver.keys()))
 
-        total_flow   = sum(t["cash"] for t in by_w.values())
-        max_bet_cash = max(t["cash"] for t in all_ver.values())
+        total_flow   = sum(t.cash for t in by_w.values())
+        max_bet_cash = max(t.cash for t in all_ver.values())
         window       = "warm"  # DD signals are inherently not "hot"
 
         # Score: base 60 + discount * 200 + elite count bonus
@@ -867,32 +998,29 @@ def _build_drift_discount_signals(raw_trades: list, wallets: dict,
         if age_h > MAX_SIGNAL_AGE_H:
             tier = "STRONG"  # Don't mark DD as STALE — the whole point is older signals
 
-        sig = {
-            "slug": cid, "cid": cid, "title": title, "event_slug": event_slug,
-            "outcome": outcome, "asset": asset_hint, "mkt": mkt, "mkt_type": mkt_type,
-            "is_sports": (mkt_type == "SPORTS"),
-            "ver": all_ver, "elite_ver": elite_wallets,
-            "n_ver": len(all_ver), "n_elite": len(elite_wallets),
-            "n_confluence": len(all_ver), "n_total": len(by_w),
-            "avg_entry": avg_whale_entry, "cur": cur, "drift": drift, "slippage": drift,
-            "total_flow": total_flow, "ver_flow": total_flow,
-            "max_bet_cash": max_bet_cash, "max_bet": max_bet_cash,
-            "newest_ts": newest_ts, "age_h": age_h, "age_min": age_h * 60,
-            "avg_wscore": avg_wscore, "window": window, "is_hft": False,
-            "has_large_trade": max_bet_cash >= LARGE_TRADE, "conviction_detail": "",
-            "elite_only_mode": len(verified_wallets) == 0,
-            "wallets": wallets,
-            "exits_detected": exits_here, "exits_same_side": exits_same_side,
-            "sports_conviction_mult": 1.0,
-            "strategy": "drift_discount",
-            "stop_loss_pct": stop_loss_pct,
-            "drift_discount_pct": discount,
-            "opposing_flow": 0.0,
-        }
+        sig = Signal(
+            cid=cid, asset=asset_hint, outcome=outcome, title=title,
+            slug=cid, event_slug=event_slug, mkt_type=mkt_type, is_sports=(mkt_type == "SPORTS"),
+            strategy="drift_discount", stop_loss_pct=stop_loss_pct,
+            ver=all_ver, elite_ver=elite_wallets, wallets=wallets,
+            n_ver=len(all_ver), n_elite=len(elite_wallets),
+            n_confluence=len(all_ver), n_total=len(by_w),
+            avg_entry=avg_whale_entry, cur=cur, drift=drift, slippage=drift,
+            total_flow=total_flow, ver_flow=total_flow,
+            max_bet_cash=max_bet_cash, opposing_flow=0.0,
+            newest_ts=newest_ts, age_h=age_h, window=window,
+            avg_wscore=avg_wscore, is_hft=False,
+            has_large_trade=max_bet_cash >= LARGE_TRADE, conviction_detail="",
+            elite_only_mode=len(verified_wallets) == 0,
+            exits_detected=exits_here, exits_same_side=exits_same_side,
+            sports_conviction_mult=1.0,
+            drift_discount_pct=discount,
+            mkt=mkt,
+        )
 
         bet = kelly_bet(sig, wallets, score=drift_score)
-        names = _build_names(elite_wallets, verified_wallets, all_ver, False, sig["has_large_trade"])
-        sig.update({"score": drift_score, "bd": {"total": drift_score}, "tier": tier, "bet": bet, "names": names})
+        names = _build_names(elite_wallets, verified_wallets, all_ver, False, sig.has_large_trade)
+        sig.score = drift_score; sig.bd = {"total": drift_score}; sig.tier = tier; sig.bet = bet; sig.names = names
         signals.append(sig)
         S._log(
             f"  📉 DD signal: {title[:35]} [{outcome}] "
@@ -930,7 +1058,7 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
 
     cid_groups = defaultdict(list)
     for t in trades:
-        cid_groups[(t["cid"], t["outcome"])].append(t)
+        cid_groups[(t.cid, t.outcome)].append(t)
 
     now_t    = time.time()
     signals  = []
@@ -939,14 +1067,14 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
     for (cid, outcome), group in cid_groups.items():
         by_w: dict = {}
         for t in group:
-            w = t["wallet"]
-            if w not in by_w or t["ts"] > by_w[w]["ts"]:
+            w = t.wallet
+            if w not in by_w or t.ts > by_w[w].ts:
                 by_w[w] = t
 
         title = next(
-            (t["title"] for t in sorted(by_w.values(), key=lambda x: x["ts"], reverse=True)
-             if t.get("title")),
-            next(iter(by_w.values()))["title"]
+            (t.title for t in sorted(by_w.values(), key=lambda x: x.ts, reverse=True)
+             if t.title),
+            next(iter(by_w.values())).title
         )
 
         # ── Classify wallets ──────────────────────────────────────────────────
@@ -956,13 +1084,13 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
 
         # Spike promotion (same as original)
         _any_hft_trade_tagged = any(
-            t.get("is_large_trade") or t.get("hft_spike_ratio", 0) > 0
+            t.is_large_trade or _hft_spike_ratio_value(t) > 0
             for t in by_w.values()
         )
         if _any_hft_trade_tagged and not elite_wallets:
             for w, t in by_w.items():
-                spike_r  = t.get("hft_spike_ratio", 0)
-                is_large = t.get("is_large_trade", False)
+                spike_r  = _hft_spike_ratio_value(t)
+                is_large = t.is_large_trade
                 if spike_r < 20 and not is_large:
                     continue
                 if w in elite_wallets:
@@ -983,13 +1111,13 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
 
         # Counter-whale check
         opposite_elite_cash = 0.0
-        our_elite_cash = sum(t["cash"] for t in elite_wallets.values()) if elite_wallets else 0.0
+        our_elite_cash = sum(t.cash for t in elite_wallets.values()) if elite_wallets else 0.0
         for (other_cid, other_outcome), other_group in cid_groups.items():
             if other_cid == cid and other_outcome != outcome:
                 for t in other_group:
-                    w = t["wallet"]
+                    w = t.wallet
                     if wallets.get(w, _EMPTY_W).get("elite") or wallets.get(w, _EMPTY_W).get("verified"):
-                        opposite_elite_cash += t["cash"]
+                        opposite_elite_cash += t.cash
                 break
 
         _opp_block = float(getattr(C, "strategy_consensus_basket", {}).get("opposition_ratio_block", 0.60))
@@ -1018,23 +1146,24 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
             continue
 
         # Market data — only for elite-sourced signals
-        asset_hint = next((t.get("asset", "") for t in elite_wallets.values() if t.get("asset")), "")
-        slug_hint  = next((t.get("slug", "") for t in elite_wallets.values() if t.get("slug")), "")
+        asset_hint = next((t.asset for t in elite_wallets.values() if t.asset), "")
+        slug_hint  = next((t.slug for t in elite_wallets.values() if t.slug), "")
 
         mkt, mkt_fail = _get_market_for_signal(cid, title, asset_hint, slug_hint)
         if not mkt:
-            _is_hft_pre = any(t.get("hft_spike_ratio", 0) > 0 or t.get("is_large_trade") for t in by_w.values())
+            _is_hft_pre = any(_hft_spike_ratio_value(t) > 0 or t.is_large_trade for t in by_w.values())
             if _is_hft_pre and len(hft_wallets) > 0:
-                _trade_price = next(iter(elite_wallets.values())).get("price", 0.5)
-                mkt = {
-                    "yes_price": _trade_price, "no_price": 1.0 - _trade_price,
-                    "outcome_prices": {"Yes": _trade_price, "No": 1.0 - _trade_price},
-                    "asset_to_price": {asset_hint: _trade_price} if asset_hint else {},
-                    "liq": 10_000, "volume": 50_000, "title": title,
-                    "hrs_left": 48.0, "slug": slug_hint or "", "event_slug": "",
-                    "ts": now_t, "outcome_labels": [], "token_index": {},
-                    "index_to_price": {0: _trade_price, 1: 1.0 - _trade_price},
-                }
+                _trade_price = next(iter(elite_wallets.values())).price
+                mkt = Market(
+                    yes_price=_trade_price, no_price=1.0 - _trade_price,
+                    outcome_prices={"Yes": _trade_price, "No": 1.0 - _trade_price},
+                    asset_to_price={asset_hint: _trade_price} if asset_hint else {},
+                    asset_to_index={},
+                    liq=10_000, volume=50_000, title=title,
+                    hrs_left=48.0, slug=slug_hint or "", event_slug="",
+                    end_date="", ts=now_t, outcome_labels=[], token_index={},
+                    index_to_price={0: _trade_price, 1: 1.0 - _trade_price},
+                )
             else:
                 rejects.append(f"  {outcome:<12} {title[:40]}\n    ↳ [CB] Market: {mkt_fail}")
                 continue
@@ -1045,7 +1174,7 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
             continue
 
         # Sports gate
-        event_slug = next((t.get("event_slug", "") for t in group if t.get("event_slug")), "")
+        event_slug = next((t.event_slug for t in group if t.event_slug), "")
         if not event_slug:
             event_slug = mkt.get("event_slug", "")
         mkt_type = classify_market(title, event_slug, mkt.get("hrs_left"))
@@ -1063,13 +1192,13 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
                 continue
 
         # Elite avg entry
-        elite_entries = [(t["price"], t["cash"]) for t in elite_wallets.values()]
+        elite_entries = [(t.price, t.cash) for t in elite_wallets.values()]
         elite_total_w = sum(c for _, c in elite_entries)
         if elite_total_w == 0:
             continue
         elite_avg_entry = sum(p * w for p, w in elite_entries) / elite_total_w
 
-        newest_elite_ts = max(t["ts"] for t in elite_wallets.values())
+        newest_elite_ts = max(t.ts for t in elite_wallets.values())
         age_h_elite     = (now_t - newest_elite_ts) / 3600
 
         # Age gate
@@ -1129,7 +1258,7 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
         for w, t in {**elite_wallets, **verified_wallets}.items():
             prof = wallets.get(w, {})
             portfolio = prof.get("total_value", 0) or prof.get("total_pnl", 0)
-            cash = t["cash"]
+            cash = t.cash
             avg_b = prof.get("avg_bet", 0)
             if portfolio > 0 and cash >= portfolio * _CONVICTION_PORTFOLIO_PCT and cash >= _CONVICTION_ABS_FLOOR:
                 w_name = S.env().wallet_cache.get(w, {}).get("name", w[:10])
@@ -1139,7 +1268,7 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
             if cash >= MASSIVE_TRADE:
                 has_large_trade = True
                 break
-            if t.get("is_large_trade") or t.get("hft_spike_ratio", 0) >= 20:
+            if t.is_large_trade or _hft_spike_ratio_value(t) >= 20:
                 has_large_trade = True
                 break
 
@@ -1148,8 +1277,8 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
         # HFT gate
         if is_hft_signal and not has_large_trade:
             all_elites_are_hft = all(
-                wallets.get(w, {}).get("hft") or
-                wallets.get(w, {}).get("trades_per_hour", 0) >= HFT_MIN_TRADES_PER_HOUR
+                (_wp := wallets.get(w)) and
+                (_wp.get("hft") or _wp.get("trades_per_hour", 0) >= HFT_MIN_TRADES_PER_HOUR)
                 for w in elite_wallets
             )
             if all_elites_are_hft:
@@ -1163,14 +1292,14 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
                 rejects.append(f"  {outcome:<12} {title[:40]}\n    ↳ [CB] Near-expiry")
                 continue
 
-        window = "hot" if any(t.get("window") == "hot" for t in all_ver.values()) else "warm"
+        window = "hot" if any(t.window == "hot" for t in all_ver.values()) else "warm"
         if is_hft_signal:
             window = "hft"
 
-        total_flow   = sum(t["cash"] for t in by_w.values())
-        ver_flow     = sum(t["cash"] for t in all_ver.values())
-        max_bet_cash = max(t["cash"] for t in all_ver.values())
-        newest_ts    = max(t["ts"] for t in all_ver.values())
+        total_flow   = sum(t.cash for t in by_w.values())
+        ver_flow     = sum(t.cash for t in all_ver.values())
+        max_bet_cash = max(t.cash for t in all_ver.values())
+        newest_ts    = max(t.ts for t in all_ver.values())
         age_h        = (now_t - newest_ts) / 3600
 
         avg_wscore = sum(wallets.get(w, _EMPTY_W).get("score", 0.10) for w in elite_wallets) / len(elite_wallets)
@@ -1181,26 +1310,24 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
         elite_only_mode = len(verified_wallets) == 0
         n_confluence    = len(all_ver)
 
-        sig = {
-            "slug": cid, "cid": cid, "title": title, "event_slug": event_slug,
-            "outcome": outcome, "asset": asset_hint, "mkt": mkt, "mkt_type": mkt_type,
-            "is_sports": (mkt_type == "SPORTS"),
-            "opposing_flow": opposite_elite_cash,
-            "ver": all_ver, "elite_ver": elite_wallets,
-            "n_ver": n_ver, "n_elite": len(elite_wallets),
-            "n_confluence": n_confluence, "n_total": len(by_w),
-            "avg_entry": elite_avg_entry, "cur": cur, "drift": drift, "slippage": slippage,
-            "total_flow": total_flow, "ver_flow": ver_flow,
-            "max_bet_cash": max_bet_cash, "max_bet": max_bet_cash,
-            "newest_ts": newest_ts, "age_h": age_h, "age_min": age_h * 60,
-            "avg_wscore": avg_wscore, "window": window, "is_hft": is_hft_signal,
-            "has_large_trade": has_large_trade, "conviction_detail": conviction_detail,
-            "elite_only_mode": elite_only_mode, "wallets": wallets,
-            "exits_detected": exits_here, "exits_same_side": exits_same_side,
-            "sports_conviction_mult": 1.0,
-            "strategy": "consensus_basket",
-            "stop_loss_pct": stop_loss_pct,
-        }
+        sig = Signal(
+            cid=cid, asset=asset_hint, outcome=outcome, title=title,
+            slug=cid, event_slug=event_slug, mkt_type=mkt_type, is_sports=(mkt_type == "SPORTS"),
+            strategy="consensus_basket", stop_loss_pct=stop_loss_pct,
+            ver=all_ver, elite_ver=elite_wallets, wallets=wallets,
+            n_ver=n_ver, n_elite=len(elite_wallets),
+            n_confluence=n_confluence, n_total=len(by_w),
+            avg_entry=elite_avg_entry, cur=cur, drift=drift, slippage=slippage,
+            total_flow=total_flow, ver_flow=ver_flow,
+            max_bet_cash=max_bet_cash, opposing_flow=opposite_elite_cash,
+            newest_ts=newest_ts, age_h=age_h, window=window,
+            avg_wscore=avg_wscore, is_hft=is_hft_signal,
+            has_large_trade=has_large_trade, conviction_detail=conviction_detail,
+            elite_only_mode=elite_only_mode,
+            exits_detected=exits_here, exits_same_side=exits_same_side,
+            sports_conviction_mult=1.0,
+            mkt=mkt,
+        )
 
         bd    = score_signal(sig)
         total = bd["total"]
@@ -1232,7 +1359,7 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
 
         bet   = kelly_bet(sig, wallets, score=total)
         names = _build_names(elite_wallets, verified_wallets, all_ver, is_hft_signal, has_large_trade)
-        sig.update({"score": total, "bd": bd, "tier": tier, "bet": bet, "names": names})
+        sig.score = total; sig.bd = bd; sig.tier = tier; sig.bet = bet; sig.names = names
         signals.append(sig)
 
     return signals, rejects
@@ -1241,7 +1368,7 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
 # ─────────────────────────────────────────────────────────────────────────────
 #  MAIN MULTI-STRATEGY DISPATCHER
 # ─────────────────────────────────────────────────────────────────────────────
-def build_signals(trades: list, wallets: dict, whale_exits: dict):
+def build_signals(trades: list, wallets: dict, whale_exits: dict) -> tuple[list[Signal], list[str]]:
     """
     Multi-strategy signal dispatcher.
     Returns (signals, rejects).
@@ -1278,10 +1405,10 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
     # Price zone enforcement at dispatcher level (belt-and-suspenders)
     price_filtered = []
     for sig in all_signals:
-        cur = sig.get("cur", 0.5)
+        cur = sig.cur
         if cur < C.MIN_ENTRY_PRICE or cur > C.MAX_ENTRY_PRICE:
             all_rejects.append(
-                f"  {sig['outcome']:<12} {sig['title'][:40]}\n"
+                f"  {sig.outcome:<12} {sig.title[:40]}\n"
                 f"    ↳ [DISPATCHER] Price zone block: {cur:.3f} outside [{C.MIN_ENTRY_PRICE:.2f},{C.MAX_ENTRY_PRICE:.2f}]"
             )
             continue
@@ -1290,31 +1417,31 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
 
     # Dedup: same (cid, outcome) from multiple strategies
     # Keep higher-scored; merge strategy tags from both
-    deduped: dict = {}
+    deduped: dict[tuple, Signal] = {}
     for sig in all_signals:
-        key = (sig["cid"], sig["outcome"])
+        key = (sig.cid, sig.outcome)
         if key not in deduped:
             deduped[key] = sig
         else:
             existing = deduped[key]
-            merged_strategy = f"{existing['strategy']}+{sig['strategy']}"
-            if sig["score"] > existing["score"]:
-                sig["strategy"] = merged_strategy
+            merged_strategy = f"{existing.strategy}+{sig.strategy}"
+            if sig.score > existing.score:
+                sig.strategy = merged_strategy
                 deduped[key] = sig
             else:
-                existing["strategy"] = merged_strategy
+                existing.strategy = merged_strategy
 
     # Hedge bot detection across all deduped signals
     _KNOWN_HEDGE_WALLETS_copy = set(_KNOWN_HEDGE_WALLETS)
     cid_wallets: dict = {}
     for sig in deduped.values():
-        cid = sig["cid"]
+        cid = sig.cid
         if cid not in cid_wallets:
             cid_wallets[cid] = {}
-        for w in sig.get("elite_ver", {}):
+        for w in sig.elite_ver:
             if w not in cid_wallets[cid]:
                 cid_wallets[cid][w] = []
-            cid_wallets[cid][w].append(sig["outcome"])
+            cid_wallets[cid][w].append(sig.outcome)
 
     hedge_cids: set = set()
     for cid, wmap in cid_wallets.items():
@@ -1330,34 +1457,34 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict):
     seen_cids: set = set()
     final_signals  = []
     tp = {"CONVICTION": 6, "HFT": 5, "ALERT": 4, "STRONG": 3, "ELITE_ONLY": 2, "MEDIUM": 1, "STALE": 0}
-    sorted_signals = sorted(deduped.values(), key=lambda x: (tp.get(x["tier"], 0), x["score"]), reverse=True)
+    sorted_signals = sorted(deduped.values(), key=lambda x: (tp.get(x.tier, 0), x.score), reverse=True)
 
     for s in sorted_signals:
-        if s["cid"] in hedge_cids:
+        if s.cid in hedge_cids:
             all_rejects.append(
-                f"  {s['outcome']:<12} {s['title'][:40]}\n"
+                f"  {s.outcome:<12} {s.title[:40]}\n"
                 f"    ↳ HEDGE bot market — skipping BOTH sides"
             )
             continue
-        sig_elites = set(s.get("elite_ver", {}).keys())
+        sig_elites = set(s.elite_ver.keys())
         if sig_elites and sig_elites.issubset(_KNOWN_HEDGE_WALLETS):
             all_rejects.append(
-                f"  {s['outcome']:<12} {s['title'][:40]}\n"
+                f"  {s.outcome:<12} {s.title[:40]}\n"
                 f"    ↳ All elites are known hedge bots"
             )
             continue
-        if s["cid"] in seen_cids:
+        if s.cid in seen_cids:
             all_rejects.append(
-                f"  {s['outcome']:<12} {s['title'][:40]}\n"
+                f"  {s.outcome:<12} {s.title[:40]}\n"
                 f"    ↳ Deduped (another outcome scored higher)"
             )
             continue
-        seen_cids.add(s["cid"])
+        seen_cids.add(s.cid)
         final_signals.append(s)
 
     S.env().active_signal_cids.clear()
     for s in final_signals:
-        S.env().active_signal_cids[s["cid"]] = set(s.get("ver", {}).keys())
+        S.env().active_signal_cids[s.cid] = set(s.ver.keys())
 
     S.env().LAST_SIGNALS = final_signals
     S.env().LAST_REJECTS = all_rejects

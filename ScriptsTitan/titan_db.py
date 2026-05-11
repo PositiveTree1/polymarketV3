@@ -7,7 +7,11 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator, cast
+if TYPE_CHECKING:
+    from titan_state import TradeStats
+    from titan_signals import SignalDict
+    from titan_types import TradeRecordDict
 
 _DB_PATH: str = ""
 
@@ -57,6 +61,7 @@ def init_db(db_path: str) -> None:
             CREATE TABLE IF NOT EXISTS trade_history (
                 id              INTEGER  PRIMARY KEY AUTOINCREMENT,
                 cid             TEXT,
+                asset           TEXT,
                 type            TEXT     NOT NULL,
                 title           TEXT,
                 outcome         TEXT,
@@ -112,6 +117,7 @@ def init_db(db_path: str) -> None:
             );
         """)
         _migrate_ts_columns(cx)
+        _migrate_add_columns(cx)
 
 
 @contextmanager
@@ -142,7 +148,9 @@ def _dt_to_ts(value: str) -> float:
 def _normalize_db_ts(value: object) -> str:
     if isinstance(value, str):
         return _ts_to_dt(_dt_to_ts(value))
-    return _ts_to_dt(float(value))
+    if isinstance(value, (int, float)):
+        return _ts_to_dt(float(value))
+    raise TypeError(f"Expected timestamp-compatible value, got {type(value).__name__}")
 
 
 def _migrate_ts_columns(cx: sqlite3.Connection) -> None:
@@ -222,6 +230,12 @@ def _migrate_ts_columns(cx: sqlite3.Connection) -> None:
         cx.execute(f"ALTER TABLE {table_name}__new RENAME TO {table_name}")
         for statement in index_sql:
             cx.execute(statement)
+
+
+def _migrate_add_columns(cx: sqlite3.Connection) -> None:
+    existing = {row[1] for row in cx.execute("PRAGMA table_info(trade_history)").fetchall()}
+    if "asset" not in existing:
+        cx.execute("ALTER TABLE trade_history ADD COLUMN asset TEXT")
 
 
 def _ts_column_type(cx: sqlite3.Connection, table_name: str) -> str | None:
@@ -359,10 +373,27 @@ def save_rejects(rejects: list[str], ts: float) -> None:
         )
 
 
-def load_latest_signals(limit: int = 200) -> list[dict]:
+def _decode_signal_row_payload(data: str) -> SignalDict | None:
+    import json
+
+    decoded = json.loads(data)
+    if isinstance(decoded, dict):
+        return cast("SignalDict", decoded)
+
+    if isinstance(decoded, str):
+        decoded_text = decoded.strip()
+        if decoded_text.startswith("{"):
+            nested = json.loads(decoded_text)
+            if isinstance(nested, dict):
+                return cast("SignalDict", nested)
+        return None
+
+    return None
+
+
+def load_latest_signals(limit: int = 200) -> list["SignalDict"]:
     if not _DB_PATH:
         return []
-    import json
     with _connect() as cx:
         latest_ts_row = cx.execute("SELECT MAX(ts) FROM signals").fetchone()
         latest_ts = latest_ts_row[0] if latest_ts_row else None
@@ -372,32 +403,35 @@ def load_latest_signals(limit: int = 200) -> list[dict]:
             "SELECT data FROM signals WHERE ts = ? ORDER BY id ASC LIMIT ?",
             (latest_ts, limit),
         ).fetchall()
-    return [json.loads(r[0]) for r in rows]
+    signals: list[SignalDict] = []
+    for row in rows:
+        signal_data = _decode_signal_row_payload(str(row[0]))
+        if signal_data is not None:
+            signals.append(signal_data)
+    return signals
 
 
-def load_signal_history(limit: int = 200, min_score: float = 0.0, cid: str | None = None) -> list[dict]:
+def load_signal_history(limit: int = 200, min_score: float = 0.0, cid: str | None = None) -> list["SignalDict"]:
     if not _DB_PATH:
         return []
-    import json
     query = (
-        "SELECT recorded_at, ts, data FROM signals "
+        "SELECT ts, data FROM signals "
         "ORDER BY id DESC LIMIT ?"
     )
     with _connect() as cx:
         rows = cx.execute(query, (limit,)).fetchall()
 
-    out: list[dict] = []
-    for recorded_at, snapshot_ts, data in reversed(rows):
-        sig = json.loads(data)
-        if sig.get("score", 0) < min_score:
+    out: list[SignalDict] = []
+    for snapshot_ts, data in reversed(rows):
+        typed_sig = _decode_signal_row_payload(str(data))
+        if typed_sig is None:
             continue
-        if cid and sig.get("cid") != cid:
+        if typed_sig.get("score", 0) < min_score:
             continue
-        out.append({
-            "recorded_at": recorded_at,
-            "snapshot_ts": _dt_to_ts(str(snapshot_ts)),
-            "signal": sig,
-        })
+        if cid and typed_sig.get("cid") != cid:
+            continue
+        typed_sig["snapshot_ts"] = _dt_to_ts(str(snapshot_ts))
+        out.append(typed_sig)
     return out
 
 
@@ -420,7 +454,7 @@ def get_schema_description() -> str:
 # ── trade_history ────────────────────────────────────────────────────────────
 
 _TRADE_SCALAR_COLS = (
-    "cid", "type", "title", "outcome", "entry_price", "exit_price",
+    "cid", "asset", "type", "title", "outcome", "entry_price", "exit_price",
     "shares", "bet", "pnl_usdc", "pnl_pct", "reason", "ts", "ts_str",
     "bankroll", "tier", "strategy", "stop_loss_pct", "avg_entry",
     "score", "n_confluence", "is_conviction", "market_url",
@@ -435,6 +469,7 @@ def _trade_to_row(trade: dict) -> tuple:
     exit_ts_raw = trade.get("exit_ts")
     return (
         trade.get("cid"),
+        trade.get("asset"),
         trade.get("type", ""),
         trade.get("title"),
         trade.get("outcome"),
@@ -461,27 +496,85 @@ def _trade_to_row(trade: dict) -> tuple:
     )
 
 
-def _row_to_trade(row: sqlite3.Row, wallets: list[dict], audits: list[dict]) -> dict:
-    trade: dict = dict(row)
-    ts_str = trade.get("ts")
-    trade["ts"] = _dt_to_ts(str(ts_str)) if ts_str else 0.0
-    if trade.get("entry_ts"):
-        trade["entry_ts"] = _dt_to_ts(str(trade["entry_ts"]))
-    if trade.get("exit_ts"):
-        trade["exit_ts"] = _dt_to_ts(str(trade["exit_ts"]))
-    trade["is_conviction"] = bool(trade.get("is_conviction"))
+def _row_to_trade(row: sqlite3.Row, wallets: list[dict], audits: list[dict]) -> "TradeRecordDict":
+    row_data = dict(row)
 
-    elite_wallets = [w["wallet"] for w in wallets]
-    whale_names = [w["name"] for w in wallets if w.get("name")]
-    whale_buy_cash = {w["wallet"]: w["cash"] for w in wallets if w.get("cash") is not None}
-    trade["elite_wallets"] = elite_wallets
-    trade["whale_names"] = whale_names
-    trade["whale_buy_cash"] = whale_buy_cash
+    def _as_str(value: object) -> str:
+        return "" if value is None else str(value)
+
+    def _as_float(value: object) -> float:
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float, str)):
+            return float(value)
+        raise TypeError(f"Expected float-compatible value, got {type(value).__name__}")
+
+    def _as_int(value: object) -> int:
+        if value is None:
+            return 0
+        if isinstance(value, (int, str)):
+            return int(value)
+        raise TypeError(f"Expected int-compatible value, got {type(value).__name__}")
+
+    ts_value = row_data.get("ts")
+    entry_ts_value = row_data.get("entry_ts")
+    exit_ts_value = row_data.get("exit_ts")
+
+    elite_wallets = [str(wallet["wallet"]) for wallet in wallets]
+    whale_names = [str(wallet["name"]) for wallet in wallets if wallet.get("name")]
+    whale_buy_cash = {
+        str(wallet["wallet"]): float(wallet["cash"])
+        for wallet in wallets
+        if wallet.get("cash") is not None
+    }
+
+    trade: TradeRecordDict = {
+        "cid": _as_str(row_data.get("cid")),
+        "asset": _as_str(row_data.get("asset")),
+        "type": _as_str(row_data.get("type")),
+        "title": _as_str(row_data.get("title")),
+        "outcome": _as_str(row_data.get("outcome")),
+        "entry_price": _as_float(row_data.get("entry_price")),
+        "shares": _as_float(row_data.get("shares")),
+        "bet": _as_float(row_data.get("bet")),
+        "ts": _dt_to_ts(str(ts_value)) if ts_value else 0.0,
+        "ts_str": _as_str(row_data.get("ts_str")),
+        "bankroll": _as_float(row_data.get("bankroll")),
+        "tier": _as_str(row_data.get("tier")),
+        "strategy": _as_str(row_data.get("strategy")),
+        "score": _as_float(row_data.get("score")),
+        "n_confluence": _as_int(row_data.get("n_confluence")),
+        "is_conviction": bool(row_data.get("is_conviction")),
+        "market_url": _as_str(row_data.get("market_url")),
+        "entry_ts": _dt_to_ts(str(entry_ts_value)) if entry_ts_value else 0.0,
+        "elite_wallets": elite_wallets,
+        "whale_names": whale_names,
+        "whale_buy_cash": whale_buy_cash,
+    }
+
+    if row_data.get("exit_price") is not None:
+        trade["exit_price"] = float(row_data["exit_price"])
+    if exit_ts_value:
+        trade["exit_ts"] = _dt_to_ts(str(exit_ts_value))
+    if row_data.get("pnl_usdc") is not None:
+        trade["pnl_usdc"] = float(row_data["pnl_usdc"])
+    if row_data.get("pnl_pct") is not None:
+        trade["pnl_pct"] = float(row_data["pnl_pct"])
+    if row_data.get("reason") is not None:
+        trade["reason"] = str(row_data["reason"])
+    if row_data.get("stop_loss_pct") is not None:
+        trade["stop_loss_pct"] = float(row_data["stop_loss_pct"])
+    if row_data.get("avg_entry") is not None:
+        trade["avg_entry"] = float(row_data["avg_entry"])
 
     for audit in audits:
-        trade[audit["audit_type"]] = json.loads(audit["data"])
+        audit_type = str(audit["audit_type"])
+        audit_data = json.loads(str(audit["data"]))
+        if audit_type == "entry_audit":
+            trade["entry_audit"] = audit_data
+        elif audit_type == "exit_audit":
+            trade["exit_audit"] = audit_data
 
-    trade.pop("id", None)
     return trade
 
 
@@ -526,7 +619,7 @@ def bulk_insert_trades(trades: list[dict]) -> None:
         append_trade(trade)
 
 
-def load_trade_history(limit: int = 5000) -> list[dict]:
+def load_trade_history(limit: int = 5000) -> list["TradeRecordDict"]:
     if not _DB_PATH:
         return []
     with _connect() as cx:
@@ -561,7 +654,7 @@ def load_trade_history(limit: int = 5000) -> list[dict]:
     ]
 
 
-def upsert_trade_stats(stats: object) -> None:
+def upsert_trade_stats(stats: "TradeStats") -> None:
     if not _DB_PATH:
         return
     now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -575,13 +668,13 @@ def upsert_trade_stats(stats: object) -> None:
                loss_count=excluded.loss_count, sum_pnl=excluded.sum_pnl,
                sum_wins=excluded.sum_wins, sum_losses=excluded.sum_losses,
                best=excluded.best, worst=excluded.worst, updated_at=excluded.updated_at""",
-            (stats.sell_count, stats.win_count, stats.loss_count,  # type: ignore[attr-defined]
-             stats.sum_pnl, stats.sum_wins, stats.sum_losses,      # type: ignore[attr-defined]
-             stats.best, stats.worst, now),                        # type: ignore[attr-defined]
+            (stats.sell_count, stats.win_count, stats.loss_count,
+             stats.sum_pnl, stats.sum_wins, stats.sum_losses,
+             stats.best, stats.worst, now),
         )
 
 
-def load_trade_stats() -> object | None:
+def load_trade_stats() -> "TradeStats | None":
     """Return a TradeStats populated from DB, or None if no row exists."""
     if not _DB_PATH:
         return None

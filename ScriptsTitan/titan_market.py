@@ -32,10 +32,61 @@ KEY ARCHITECTURE FACTS about Polymarket:
 
 import time
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import TypedDict
 import titan_state as S
+
+
+class Market(TypedDict):
+    yes_price:      float
+    no_price:       float
+    outcome_labels: list
+    outcome_prices: dict[str, float]
+    token_index:    dict[str, int]
+    index_to_price: dict[int, float]
+    asset_to_price: dict[str, float]
+    asset_to_index: dict[str, int]
+    liq:            float
+    volume:         float
+    title:          str
+    end_date:       str
+    hrs_left:       float | None
+    slug:           str
+    event_slug:     str
+    ts:             float
 from titan_config import *
-from titan_wallet import fetch_wallet, get_elite_wallets, is_hft_wallet
+from titan_wallet import WalletProfile, fetch_wallet, get_elite_wallets, is_hft_wallet
+
+
+@dataclass
+class WhaleObservation:
+    wallet:         str
+    name:           str
+    cid:            str
+    asset:          str
+    slug:           str
+    event_slug:     str
+    title:          str
+    outcome:        str
+    price:          float
+    size:           float
+    cash:           float
+    ts:             float
+    window:         str          # "hot" | "warm"
+    source:         str          # "elite_poll" | "hft_spike_poll" | "public_feed" | …
+    is_elite:       bool
+    is_large_trade: bool  = False
+    hft_spike_ratio: float | None = None
+
+
+@dataclass
+class WhaleSell:
+    cid:   str
+    asset: str
+    ts:    float
+    price: float
+    cash:  float
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  v10: CID REGISTRY — only call Gamma for cids from verified wallets
@@ -233,8 +284,8 @@ def _fetch_market_raw(cid: str, asset: str = "", slug: str = "") -> dict | None:
     return None
 
 
-def get_market(cid: str, trade_title: str = None, asset: str = "", slug: str = "",
-               from_verified: bool = False):
+def get_market(cid: str, trade_title: str | None = None, asset: str = "", slug: str = "",
+               from_verified: bool = False) -> tuple[Market | None, str | None]:
     """
     Fetch and cache market data for a conditionId.
 
@@ -309,15 +360,15 @@ def get_market(cid: str, trade_title: str = None, asset: str = "", slug: str = "
             return None, "Price parse failed (closed market)"
         if yes_price is None and no_price is None:
             return None, "No prices available (closed market)"
-        return {
-            "yes_price": yes_price or 0.5, "no_price": no_price or 0.5,
-            "outcome_labels": [], "outcome_prices": {},
-            "asset_to_price": {}, "asset_to_index": {},
-            "token_index": {}, "index_to_price": {0: yes_price, 1: no_price},
-            "liq": liq, "volume": vol, "title": trade_title or cid[:28],
-            "hrs_left": 0, "slug": m.get("slug") or slug or "",
-            "end_date": "", "event_slug": "", "ts": now_t,
-        }, None
+        return Market(
+            yes_price=yes_price or 0.5, no_price=no_price or 0.5,
+            outcome_labels=[], outcome_prices={},
+            asset_to_price={}, asset_to_index={},
+            token_index={}, index_to_price={0: yes_price or 0.5, 1: no_price or 0.5},
+            liq=liq, volume=vol, title=trade_title or cid[:28],
+            hrs_left=0.0, slug=m.get("slug") or slug or "",
+            end_date="", event_slug="", ts=now_t,
+        ), None
 
     if liq < MIN_LIQUIDITY:
         return None, f"Liq ${liq:,.0f} < ${MIN_LIQUIDITY:,}"
@@ -399,29 +450,29 @@ def get_market(cid: str, trade_title: str = None, asset: str = "", slug: str = "
     gamma_title = m.get("question") or m.get("slug") or cid[:28]
     title = trade_title if (trade_title and len(trade_title) > 5 and "?" in trade_title) else gamma_title
 
-    result = {
-        "yes_price":      yes_price,
-        "no_price":       no_price,
-        "outcome_labels": outcome_labels,
-        "outcome_prices": outcome_prices,
-        "token_index":    token_index,
-        "index_to_price": index_to_price,
-        "asset_to_price": asset_to_price,
-        "asset_to_index": asset_to_index,
-        "liq":            liq,
-        "volume":         vol,
-        "title":          title,
-        "end_date":       ed[:10] if len(ed) >= 10 else ed,
-        "hrs_left":       hrs_left,
-        "slug":           m.get("slug") or slug or "",
-        "event_slug":     m.get("eventSlug") or m.get("event_slug") or "",
-        "ts":             now_t,
-    }
+    result = Market(
+        yes_price=yes_price,
+        no_price=no_price,
+        outcome_labels=outcome_labels,
+        outcome_prices=outcome_prices,
+        token_index=token_index,
+        index_to_price=index_to_price,
+        asset_to_price=asset_to_price,
+        asset_to_index=asset_to_index,
+        liq=liq,
+        volume=vol,
+        title=title,
+        end_date=ed[:10] if len(ed) >= 10 else ed,
+        hrs_left=hrs_left,
+        slug=m.get("slug") or slug or "",
+        event_slug=m.get("eventSlug") or m.get("event_slug") or "",
+        ts=now_t,
+    )
     S.market_cache[cid] = result
     return result, None
 
 
-def get_outcome_price(mkt: dict, outcome: str, asset: str = "") -> float:
+def get_outcome_price(mkt: Market, outcome: str, asset: str = "") -> float:
     """
     Look up the current price for a specific outcome token.
 
@@ -465,7 +516,7 @@ def get_outcome_price(mkt: dict, outcome: str, asset: str = "") -> float:
     return 0.5
 
 
-def get_outcome_price_by_trade(mkt: dict, trade: dict) -> float:
+def get_outcome_price_by_trade(mkt: Market, trade: dict) -> float:
     """
     Most accurate price lookup using both the outcome label AND the asset/token id.
     Always prefer this over get_outcome_price() when you have a trade record.
@@ -573,7 +624,7 @@ def fetch_position_price_fast(cid: str, asset: str, outcome: str) -> float | Non
     return None
 
 
-def is_market_resolving(mkt: dict) -> bool:
+def is_market_resolving(mkt: Market) -> bool:
     """
     Returns True if a market appears to be resolving/resolved.
     A binary market resolves when one outcome goes to ~1.0 and the other to ~0.0.
@@ -587,7 +638,7 @@ def is_market_resolving(mkt: dict) -> bool:
 #  TRADE NORMALISER
 # ─────────────────────────────────────────────────────────────────────────────
 def _normalise_trade(t: dict, wallet: str, hot_cutoff: float, warm_cutoff: float,
-                     source: str, is_elite: bool = False) -> dict | None:
+                     source: str, is_elite: bool = False) -> WhaleObservation | None:
     try:
         ts = float(t.get("timestamp") or 0)
         if ts < warm_cutoff:
@@ -603,23 +654,23 @@ def _normalise_trade(t: dict, wallet: str, hot_cutoff: float, warm_cutoff: float
         cash = S.extract_cash(t)
         if cash <= 0:
             return None
-        return {
-            "wallet":     wallet.lower(),
-            "name":       t.get("name") or t.get("pseudonym") or wallet[:10] + "…",
-            "cid":        cid,
-            "asset":      asset,   # v8: preserve asset/token ID for definitive price lookup
-            "slug":       t.get("slug") or "",
-            "event_slug": t.get("eventSlug") or "",
-            "title":      t.get("title") or t.get("slug") or cid[:28],
-            "outcome":    outcome,
-            "price":      price,
-            "size":       float(t.get("size") or 0),
-            "cash":       cash,
-            "ts":         ts,
-            "window":     "hot" if ts >= hot_cutoff else "warm",
-            "source":     source,
-            "is_elite":   is_elite,
-        }
+        return WhaleObservation(
+            wallet     = wallet.lower(),
+            name       = t.get("name") or t.get("pseudonym") or wallet[:10] + "…",
+            cid        = cid,
+            asset      = asset,
+            slug       = t.get("slug") or "",
+            event_slug = t.get("eventSlug") or "",
+            title      = t.get("title") or t.get("slug") or cid[:28],
+            outcome    = outcome,
+            price      = price,
+            size       = float(t.get("size") or 0),
+            cash       = cash,
+            ts         = ts,
+            window     = "hot" if ts >= hot_cutoff else "warm",
+            source     = source,
+            is_elite   = is_elite,
+        )
     except Exception:
         return None
 
@@ -634,7 +685,7 @@ def _poll_wallet_trades(wallet: str, limit: int, min_cash: float,
                         hot_cutoff: float, warm_cutoff: float,
                         source: str, is_elite: bool = False,
                         avg_bet: float = 0, hft: bool = False,
-                        is_large_trade_mode: bool = False) -> list:
+                        is_large_trade_mode: bool = False) -> list[WhaleObservation]:
     data = S.safe_get(f"{DATA_API}/trades", {
         "user":         wallet,
         "limit":        limit,
@@ -653,17 +704,17 @@ def _poll_wallet_trades(wallet: str, limit: int, min_cash: float,
 
     prof    = S.env().wallet_cache.get(wallet, {})
     name    = prof.get("name", wallet[:10] + "…")
-    results = []
+    results : list[WhaleObservation] = []
     for t in data:
-        trade = _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, source, is_elite)
-        if trade is None:
+        whaletrade : WhaleObservation | None = _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, source, is_elite)
+        if whaletrade is None:
             continue
 
         if hft and avg_bet > 0:
-            cash = trade["cash"]
+            cash = whaletrade.cash
             if cash >= avg_bet * 3.0:
-                trade["is_large_trade"] = True
-                results.append(trade)
+                whaletrade.is_large_trade = True
+                results.append(whaletrade)
                 continue
             if cash < max(HFT_MIN_CASH_PER_TRADE, avg_bet * ELITE_TRADE_MIN_FRACTION):
                 S._log(
@@ -672,25 +723,25 @@ def _poll_wallet_trades(wallet: str, limit: int, min_cash: float,
                     "DIAG"
                 )
                 continue
-            results.append(trade)
-        elif not hft and avg_bet > 0 and trade["cash"] < avg_bet * ELITE_TRADE_MIN_FRACTION:
+            results.append(whaletrade)
+        elif not hft and avg_bet > 0 and whaletrade.cash < avg_bet * ELITE_TRADE_MIN_FRACTION:
             S._log(
-                f"  ⏭ {name} skipped ${trade['cash']:,.0f} < "
+                f"  ⏭ {name} skipped ${whaletrade.cash:,.0f} < "
                 f"{ELITE_TRADE_MIN_FRACTION*100:.0f}% of avg ${avg_bet:,.0f}",
                 "DIAG"
             )
             continue
         else:
-            if avg_bet > 0 and trade["cash"] >= avg_bet * 3.0:
-                trade["is_large_trade"] = True
-            results.append(trade)
+            if avg_bet > 0 and whaletrade.cash >= avg_bet * 3.0:
+                whaletrade.is_large_trade = True
+            results.append(whaletrade)
     return results
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  VIP / ELITE DIRECT POLLING (PRIMARY source)
 # ─────────────────────────────────────────────────────────────────────────────
-def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list:
+def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list[WhaleObservation]:
     elite_addrs = set()
     for e in S.wallets:
         elite_addrs.update(a.lower() for a, p in e.wallet_cache.items() if p.get("elite"))
@@ -701,14 +752,13 @@ def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list:
         return []
 
     S._log(f"🐳 Polling {len(all_to_poll)} elite/VIP wallets…", "DIAG")
-    results = []
+    results : list[WhaleObservation] = []
 
     for wallet in sorted(all_to_poll):
-        prof = {}
-        for e in S.wallets:
-            if wallet in e.wallet_cache:
-                prof = e.wallet_cache[wallet]
-                break
+        prof: WalletProfile = next(
+            (e.wallet_cache[wallet] for e in S.wallets if wallet in e.wallet_cache),
+            fetch_wallet(wallet),
+        )
         is_elite = prof.get("elite", False)
         hft      = is_hft_wallet(prof)
         avg_bet  = prof.get("avg_bet", 0)
@@ -722,14 +772,14 @@ def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list:
             limit    = ELITE_POLL_LIMIT
             source   = "elite_poll" if is_elite else "vip_poll"
 
-        trades = _poll_wallet_trades(
+        trades : list[WhaleObservation] = _poll_wallet_trades(
             wallet, limit, min_cash, hot_cutoff, warm_cutoff,
             source, is_elite, avg_bet, hft
         )
         # v10: Register all cids from elite/VIP wallet trades as verified
         for t in trades:
-            if t.get("cid"):
-                _seen_verified_cids.add(t["cid"])
+            if t.cid:
+                _seen_verified_cids.add(t.cid)
         results.extend(trades)
         time.sleep(0.07)
 
@@ -740,7 +790,7 @@ def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 #  WATCHLIST POLLING (verified non-elite)
 # ─────────────────────────────────────────────────────────────────────────────
-def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) -> list:
+def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) -> list[WhaleObservation]:
     candidates = set()
     for e in S.wallets:
         for w in e.watchlist:
@@ -748,7 +798,7 @@ def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) 
                 candidates.add(w)
     candidates = list(candidates)[:50]
 
-    results = []
+    results : list[WhaleObservation] = []
     for wallet in candidates:
         prof = {}
         for e in S.wallets:
@@ -756,15 +806,15 @@ def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) 
                 prof = e.wallet_cache[wallet]
                 break
         avg_bet = prof.get("avg_bet", 0)
-        trades  = _poll_wallet_trades(
+        trades : list[WhaleObservation]  = _poll_wallet_trades(
             wallet, 100, max(50.0, float(MIN_TRADE_CASH)),
             hot_cutoff, warm_cutoff, "watchlist_poll",
             False, avg_bet, False
         )
         # Register cids from verified watchlist wallets
         for t in trades:
-            if t.get("cid"):
-                _seen_verified_cids.add(t["cid"])
+            if t.cid:
+                _seen_verified_cids.add(t.cid)
         results.extend(trades)
         time.sleep(0.07)
     return results
@@ -773,7 +823,7 @@ def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) 
 # ─────────────────────────────────────────────────────────────────────────────
 #  PUBLIC FEED (secondary — discovery + confluence)
 # ─────────────────────────────────────────────────────────────────────────────
-def _fetch_public_feed(hot_cutoff: float, warm_cutoff: float) -> list:
+def _fetch_public_feed(hot_cutoff: float, warm_cutoff: float) -> list[WhaleObservation]:
     pub_data = S.safe_get(f"{DATA_API}/trades", {
         "limit":        MAX_TRADES_FETCH,
         "filterType":   "CASH",
@@ -790,21 +840,17 @@ def _fetch_public_feed(hot_cutoff: float, warm_cutoff: float) -> list:
         wallet = (t.get("proxyWallet") or "").lower()
         if not wallet:
             continue
-        trade = _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, "public_feed")
-        if trade:
-            results.append(trade)
+        whaletrade: WhaleObservation | None = _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, "public_feed")
+        if whaletrade:
+            results.append(whaletrade)
     return results
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  SELL DETECTION  — check if a wallet sold a specific conditionId
 # ─────────────────────────────────────────────────────────────────────────────
-def fetch_wallet_sells(wallet: str, since_ts: float, limit: int = 100) -> list:
-    """
-    Fetch SELL activity for a wallet since a given timestamp.
-    Returns list of {cid, ts, asset, price, cash} dicts.
-    """
-    sells = []
+def fetch_wallet_sells(wallet: str, since_ts: float, limit: int = 100) -> list[WhaleSell]:
+    sells: list[WhaleSell] = []
 
     data = S.safe_get(f"{DATA_API}/trades", {
         "user":  wallet,
@@ -818,13 +864,13 @@ def fetch_wallet_sells(wallet: str, since_ts: float, limit: int = 100) -> list:
                 continue
             cid = t.get("conditionId") or t.get("asset") or ""
             if cid:
-                sells.append({
-                    "cid":   cid,
-                    "asset": t.get("asset") or "",
-                    "ts":    ts,
-                    "price": float(t.get("price") or 0),
-                    "cash":  S.extract_cash(t),
-                })
+                sells.append(WhaleSell(
+                    cid   = cid,
+                    asset = t.get("asset") or "",
+                    ts    = ts,
+                    price = float(t.get("price") or 0),
+                    cash  = S.extract_cash(t),
+                ))
 
     if not sells:
         data2 = S.safe_get(f"{DATA_API}/activity", {
@@ -844,13 +890,13 @@ def fetch_wallet_sells(wallet: str, since_ts: float, limit: int = 100) -> list:
                     continue
                 cid = t.get("conditionId") or t.get("asset") or ""
                 if cid:
-                    sells.append({
-                        "cid":   cid,
-                        "asset": t.get("asset") or "",
-                        "ts":    ts,
-                        "price": float(t.get("price") or 0),
-                        "cash":  S.extract_cash(t),
-                    })
+                    sells.append(WhaleSell(
+                        cid   = cid,
+                        asset = t.get("asset") or "",
+                        ts    = ts,
+                        price = float(t.get("price") or 0),
+                        cash  = S.extract_cash(t),
+                    ))
 
     return sells
 
@@ -858,36 +904,36 @@ def fetch_wallet_sells(wallet: str, since_ts: float, limit: int = 100) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 #  MAIN FETCH ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
-def fetch_trades() -> list:
+def fetch_trades() -> list[WhaleObservation]:
     hot_cutoff  = time.time() - HOT_HOURS  * 3600
     warm_cutoff = time.time() - WARM_HOURS * 3600
 
     priority = _poll_vip_and_elite(hot_cutoff, warm_cutoff)
-    polled   = {t["wallet"] for t in priority}
+    polled   = {t.wallet for t in priority}
 
     watchlist_trades = _poll_watchlist(hot_cutoff, warm_cutoff, polled)
-    public    = _fetch_public_feed(hot_cutoff, warm_cutoff)
+    public = _fetch_public_feed(hot_cutoff, warm_cutoff)
 
     best: dict = {}
     source_priority = {"hft_poll": 3, "elite_poll": 3, "vip_poll": 3,
                        "watchlist_poll": 2, "public_feed": 1}
-    for trade in priority + watchlist_trades + public:
-        key = (trade["wallet"], trade["cid"], trade["outcome"])
+    for whaletrade in priority + watchlist_trades + public:
+        key = (whaletrade.wallet, whaletrade.cid, whaletrade.outcome)
         if key not in best:
-            best[key] = trade
+            best[key] = whaletrade
         else:
             existing = best[key]
-            src_new = source_priority.get(trade["source"], 1)
-            src_old = source_priority.get(existing["source"], 1)
-            if src_new > src_old or (src_new == src_old and trade["ts"] > existing["ts"]):
-                best[key] = trade
+            src_new = source_priority.get(whaletrade.source, 1)
+            src_old = source_priority.get(existing.source, 1)
+            if src_new > src_old or (src_new == src_old and whaletrade.ts > existing.ts):
+                best[key] = whaletrade
 
     return list(best.values())
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  HFT SPIKE FAST POLL — dedicated, runs every 3-5s on its own thread
 # ─────────────────────────────────────────────────────────────────────────────
-def fetch_hft_spike_trades() -> list:
+def fetch_hft_spike_trades() -> list[WhaleObservation]:
     """
     Dedicated fast poll for HFT Spike Detector.
 
@@ -913,7 +959,7 @@ def fetch_hft_spike_trades() -> list:
     if not hft_wallets:
         return []
 
-    results = []
+    results : list[WhaleObservation] = []
     for wallet, prof in hft_wallets.items():
         avg_bet = prof.get("avg_bet", 0)
         if avg_bet <= 0:
@@ -931,10 +977,10 @@ def fetch_hft_spike_trades() -> list:
             continue
 
         for t in raw:
-            trade = _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, "hft_spike_poll")
-            if trade is None:
+            whaletrade : WhaleObservation | None= _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, "hft_spike_poll")
+            if whaletrade is None:
                 continue
-            cash = trade["cash"]
+            cash = whaletrade.cash
 
             tph = prof.get("trades_per_hour", 0)
             required_mult = HFT_SPIKE_MULTIPLIER_HIGH if tph > 200 else HFT_SPIKE_MULTIPLIER_LOW
@@ -944,20 +990,18 @@ def fetch_hft_spike_trades() -> list:
             if cash < HFT_SPIKE_MIN_ABS_CASH:
                 continue
 
-            # v10 FIX: Register the cid from elite HFT wallet so get_market() will
-            # process it (no more "unverified source — skipping" rejections for spikes)
-            if trade.get("cid"):
-                _seen_verified_cids.add(trade["cid"])
+            if whaletrade.cid:
+                _seen_verified_cids.add(whaletrade.cid)
 
-            trade["is_large_trade"]   = True
-            trade["hft_spike_ratio"]  = round(cash / avg_bet, 1)
-            trade["source"]           = "hft_spike_poll"
-            results.append(trade)
+            whaletrade.is_large_trade  = True
+            whaletrade.hft_spike_ratio = round(cash / avg_bet, 1)
+            whaletrade.source          = "hft_spike_poll"
+            results.append(whaletrade)
 
             name = prof.get("name", wallet[:10] + "…")
             S._log(
                 f"⚡ HFT SPIKE: {name} ${cash:,.0f} = {cash/avg_bet:.0f}x avg "
-                f"[{trade.get('title','?')[:35]}]",
+                f"[{whaletrade.title[:35]}]",
                 "INFO"
             )
 

@@ -6,6 +6,7 @@ import json
 import requests
 import os
 from datetime import datetime
+from typing import Literal
 from titan_client import TitanClient
 from titan_protocol import TitanBackend
 
@@ -453,7 +454,7 @@ class TitanAIClient:
 # ── UI panel ──────────────────────────────────────────────────────────────────
 
 class AIPanel:
-    def __init__(self, parent: tk.Widget, engine_module: TitanBackend | None = None):
+    def __init__(self, parent: tk.Misc, engine_module: TitanBackend | None = None):
         self._engine: TitanBackend | None = engine_module
         self._client = TitanAIClient(engine_module=engine_module)
         self._busy   = False
@@ -472,7 +473,8 @@ class AIPanel:
 
         # backend selector
         self._backend_var = tk.StringVar(value=ACTIVE_BACKEND)
-        bk_menu = tk.OptionMenu(hdr, self._backend_var, *BACKENDS.keys(), command=self._switch_backend)
+        bk_menu = tk.OptionMenu(hdr, self._backend_var, *BACKENDS.keys())
+        self._backend_var.trace_add("write", self._on_backend_var_changed)
         bk_menu.config(bg=BG_LIGHT, fg=FG_ACCENT, font=mono_sm, relief="flat",
                        activebackground=BG_MID, highlightthickness=0)
         bk_menu["menu"].config(bg=BG_MID, fg=FG_MAIN)
@@ -543,6 +545,9 @@ class AIPanel:
         self._status_var.set(f"⬤ {name}/{MODEL}")
         self._write_system(f"🔀 Switched to {name} / {MODEL}")
 
+    def _on_backend_var_changed(self, *_args: str) -> None:
+        self._switch_backend(self._backend_var.get())
+
     def _write(self, text: str, tag: str = "ai") -> None:
         self._chat.configure(state="normal")
         self._chat.insert(tk.END, text, tag)
@@ -606,7 +611,7 @@ class AIPanel:
 
         self._client.ask(text, on_token, on_done, on_error, on_tool_call)
 
-    def _set_controls(self, state: str) -> None:
+    def _set_controls(self, state: WidgetState) -> None:
         try:
             self._send_btn.configure(state=state)
             self._inp.configure(state=state)
@@ -678,3 +683,4 @@ if __name__ == "__main__":
     root.configure(bg="#080810")
     AIPanel(root, engine_module=None)
     root.mainloop()
+WidgetState = Literal["normal", "disabled"]

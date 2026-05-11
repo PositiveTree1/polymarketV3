@@ -4,6 +4,7 @@
 
 - Only UI code in titan_ui.py, everything else must be in the API.
 - Use strong typing throughout the codebase.
+- No dict, classes instead
 - Never use hasattr, it is strongly typed
 - Add explicit type annotations for function parameters and return values.
 - Avoid `Any`; use `Protocol`, `TypeVar`, `TypedDict`, `dataclass`, or Pydantic models where suitable.

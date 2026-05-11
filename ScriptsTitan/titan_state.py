@@ -9,7 +9,14 @@ import threading
 import os
 from collections import deque
 from datetime import datetime
+from typing import TYPE_CHECKING, TypedDict
 from titan_config import *
+
+if TYPE_CHECKING:
+    from titan_wallet import WalletProfile
+    from titan_market import Market
+    from titan_trader import Position
+    from titan_signals import Signal
 
 _local = threading.local()
 
@@ -19,7 +26,7 @@ LOG_FILE = os.path.join(LOG_DIR, "titan.log")
 VERBOSE_LOG_FILE = os.path.join(LOG_DIR, "titan_verbose.log")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-def load_logs_from_disk():
+def load_logs_from_disk() -> list[str]:
     if not os.path.exists(LOG_FILE):
         return []
     try:
@@ -73,32 +80,32 @@ class TradeStats:
 
 class WalletEnv:
     def __init__(self):
-        self.index        = 0
-        self.wallet_cache = {}          # shared reference — set after init
-        self.SYSTEM_LOGS  = load_logs_from_disk()
-        self.logged_signals     = {}
-        self.watchlist          = set(w.lower() for w in SEED_WATCHLIST)
-        self.cycle_count        = 0
-        self.active_signal_cids = {}
-        self.LAST_SIGNALS       = []
-        self.LAST_REJECTS       = []
-        self.WHALE_EXIT_HISTORY = []
-        self.paper_bankroll     = BANKROLL_START
-        self.open_positions     = {}
-        self.trade_stats        = TradeStats()
-        self.session_pnl        = 0.0
-        self.active_market_cids = set()
-        self.cooldown_cids      = {}
-        self.position_whale_map = {}
-        self.equity_history     = []
+        self.index:               int                                    = 0
+        self.wallet_cache:        dict[str, "WalletProfile"]            = {}
+        self.SYSTEM_LOGS:         list[str]                             = load_logs_from_disk()
+        self.logged_signals:      dict[str, float]                      = {}
+        self.watchlist:           set[str]                              = set(w.lower() for w in SEED_WATCHLIST)
+        self.cycle_count:         int                                    = 0
+        self.active_signal_cids:  dict[str, set[str]]                   = {}
+        self.LAST_SIGNALS:        list["Signal"]                        = []
+        self.LAST_REJECTS:        list[str]                             = []
+        self.WHALE_EXIT_HISTORY:  list[str]                             = []
+        self.paper_bankroll:      float                                  = BANKROLL_START
+        self.open_positions:      dict[tuple[str, str], "Position"]     = {}
+        self.trade_stats:         TradeStats                             = TradeStats()
+        self.session_pnl:         float                                  = 0.0
+        self.active_market_cids:  set[str]                              = set()
+        self.cooldown_cids:       dict[str, float]                      = {}
+        self.position_whale_map:  dict[str, set[str]]                   = {}
+        self.equity_history:      list[tuple[float, float]]             = []
 
 # The one wallet
 _wallet = WalletEnv()
 
 # Shared caches
-_shared_wallet_cache = {}
+_shared_wallet_cache: dict[str, "WalletProfile"] = {}
 _wallet.wallet_cache = _shared_wallet_cache
-market_cache = {}
+market_cache: dict[str, "Market"] = {}
 _http_trace_lock = threading.Lock()
 _recent_http_traces = deque(maxlen=400)
 
@@ -131,7 +138,7 @@ def _build_http_caller_chain(depth: int = 5) -> str:
 
 
 def _store_http_trace(url: str, params: dict | None, status_code: int | None,
-                      body: str, caller: str, ok: bool):
+                      body: str, caller: str, ok: bool) -> None:
     entry = {
         "ts": time.time(),
         "url": url,
@@ -187,7 +194,7 @@ on_heartbeat      = None
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-def _log(msg, level="INFO"):
+def _log(msg: str, level: str = "INFO") -> None:
     ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{ts}] [{level:5}] {msg}"
     if level == "VERB":
@@ -211,85 +218,7 @@ def _log(msg, level="INFO"):
     else:
         print(line)
 
-
-# ── HTTP ──────────────────────────────────────────────────────────────────────
-# def safe_get(url, params=None, retries=3, timeout=12, quiet=False):
-#     for i in range(retries):
-#         try:
-#             r = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
-#             if r.status_code == 429:
-#                 wait = 2 ** (i + 1)
-#                 if not quiet:
-#                     _log(f"⚠ Rate limited — sleeping {wait}s", "WARN")
-#                 time.sleep(wait)
-#                 continue
-#             if r.status_code == 200:
-#                 data = r.json()
-#                 if VERBOSE_HTTP:
-#                     import inspect as _vi
-#                     _vskip = {"safe_get", "_gamma_get", "<module>"}
-#                     _vchain = []
-#                     for _fi in _vi.stack()[1:8]:
-#                         if _fi.function not in _vskip:
-#                             _vchain.append(
-#                                 f"{_fi.filename.replace(chr(92),'/').split('/')[-1]}::{_fi.function}"
-#                             )
-#                         if len(_vchain) >= 3:
-#                             break
-#                     _vcaller = " → ".join(_vchain) or "?"
-#                     _pstr = ", ".join(f"{k}={v}" for k, v in (params or {}).items())
-#                     _count = f" | items: {len(data)}" if isinstance(data, list) else ""
-#                     _body  = r.text[:300].replace("\n", " ")
-#                     _log(
-#                         f"📡 HTTP 200 {url} | {_vcaller}"
-#                         f" | params: {_pstr}{_count}"
-#                         f" | body: {_body}",
-#                         "VERB"
-#                     )
-#                 return data
-
-#             if not quiet:
-#                 import inspect as _inspect
-#                 # Find the first caller frame outside titan_state and titan_market._gamma_get
-#                 # Build full call chain so we know exactly what triggered this
-#                 _skip = {"safe_get", "_gamma_get", "<module>"}
-#                 chain = []
-#                 for frame_info in _inspect.stack()[1:12]:
-#                     fn  = frame_info.function
-#                     mod = frame_info.filename.replace("\\", "/").split("/")[-1]
-#                     if fn in _skip:
-#                         continue
-#                     chain.append(f"{mod}::{fn}")
-#                     if len(chain) >= 5:
-#                         break
-#                 caller = " → ".join(chain) if chain else "?"
-#                 # Full params and body — no truncation (debug log)
-#                 param_str = ""
-#                 if params:
-#                     parts = [f"{k}={v}" for k, v in params.items()]
-#                     param_str = " | params: " + ", ".join(parts)
-#                 try:
-#                     body = r.text.replace("\n", " ")
-#                 except Exception:
-#                     body = ""
-#                 _log(
-#                     f"⚠ HTTP {r.status_code} from {url}"
-#                     f" | caller: {caller}{param_str}"
-#                     f" | body: {body}",
-#                     "DIAG"
-#                 )
-#             return None
-#         except requests.exceptions.Timeout:
-#             time.sleep(1.5)
-#         except requests.exceptions.ConnectionError:
-#             time.sleep(2)
-#         except Exception as e:
-#             if not quiet:
-#                 _log(f"⚠ Request error: {e}", "DIAG")
-#             time.sleep(0.5)
-#     return None
-
-def safe_get(url, params=None, retries=3, timeout=12, quiet=False):
+def safe_get(url: str, params: dict | None = None, retries: int = 3, timeout: int = 12, quiet: bool = False) -> list | dict | None:
     for i in range(retries):
         try:
             r = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
@@ -345,7 +274,7 @@ def safe_get(url, params=None, retries=3, timeout=12, quiet=False):
     return None
 
 # ── Cash extraction ───────────────────────────────────────────────────────────
-def extract_cash(t: dict) -> float:
+def extract_cash(t: dict[str, str | float | int | None]) -> float:
     price = float(t.get("price") or 0)
     for field in ("usdcSize", "amount", "cashSize", "collateralAmount", "dollarSize"):
         v = t.get(field)

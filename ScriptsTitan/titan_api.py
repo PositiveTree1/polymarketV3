@@ -2,7 +2,26 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from typing import Callable
+from typing import TYPE_CHECKING, Callable, TypedDict
+
+if TYPE_CHECKING:
+    from titan_signals import SignalDict
+    from titan_types import (
+        AlertDict, ErrorDict, PositionBriefDict, WhaleDict,
+        PnlSummaryDict, TradeStatsDict, PortfolioOverviewDict, TradeRecordDict,
+    )
+
+
+class EngineStatus(TypedDict):
+    running:            bool
+    paused:             bool
+    cycle_count:        int
+    uptime_s:           float | None
+    last_cycle_at:      float | None
+    open_positions:     int
+    watchlist_size:     int
+    recent_error_count: int
+    auth_enabled:       bool
 
 
 # ── decorator ─────────────────────────────────────────────────────────────────
@@ -30,7 +49,7 @@ class TitanAPI:
         self._running: bool = False
         self._start_time: float | None = None
         self._subscribers: dict[str, list[Callable]] = defaultdict(list)
-        self._last_signals: list[dict] = []
+        self._last_signals: list[SignalDict] = []
         self._last_rejects: list[str] = []
         self._telegram = None
         self._telegram_enabled = False
@@ -78,7 +97,7 @@ class TitanAPI:
         description="Returns engine health and key runtime counters. Call this first to confirm the server is alive.",
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_status(self) -> dict:
+    def get_status(self) -> EngineStatus:
         import titan_state as _TS
         env = _TS.env()
         logs = env.SYSTEM_LOGS
@@ -107,7 +126,7 @@ class TitanAPI:
         },
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_positions(self, brief: bool = True) -> list[dict]:
+    def get_positions(self, brief: bool = True) -> list[PositionBriefDict]:
         import titan_state as _TS
         positions = []
         for k, v in _TS.env().open_positions.items():
@@ -144,7 +163,7 @@ class TitanAPI:
         input_schema={"limit": {"type": "integer", "description": "Max number of closed positions to return (default 200)"}},
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_closed_positions(self, limit: int = 200) -> list[dict]:
+    def get_closed_positions(self, limit: int = 200) -> list[TradeRecordDict]:
         import titan_db as _DB
         sells = [t for t in _DB.load_trade_history(limit=limit) if t.get("type") == "SELL"]
         result = []
@@ -164,7 +183,7 @@ class TitanAPI:
         input_schema={"min_score": {"type": "number", "description": "Minimum signal score filter. Typical range 0–100 (integer-like values such as 78 or 81 are normal)."}},
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_signals(self, min_score: float = 0.0) -> list[dict]:
+    def get_signals(self, min_score: float = 0.0) -> list[SignalDict]:
         return [s for s in self._last_signals if s.get("score", 0) >= min_score]
 
     @mcp_tool(
@@ -179,7 +198,7 @@ class TitanAPI:
         },
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_signal_history(self, limit: int = 200, min_score: float = 0.0, cid: str | None = None) -> list[dict]:
+    def get_signal_history(self, limit: int = 200, min_score: float = 0.0, cid: str | None = None) -> list[SignalDict]:
         import titan_db as _DB
         return _DB.load_signal_history(limit=limit, min_score=min_score, cid=cid)
 
@@ -194,7 +213,7 @@ class TitanAPI:
         description="Returns recent system alert log entries.",
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_alerts(self) -> list[dict]:
+    def get_alerts(self) -> list[AlertDict]:
         import titan_state as _TS
         logs = _TS.env().SYSTEM_LOGS
         return [{"msg": l} for l in logs if "ALERT" in l or "WARN" in l or "ERR" in l]
@@ -203,7 +222,7 @@ class TitanAPI:
         description="Returns the current elite whale roster with performance metrics.",
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_whales(self) -> list[dict]:
+    def get_whales(self) -> list[WhaleDict]:
         import titan_state as _TS
         return [
             {"wallet": w, **p}
@@ -217,7 +236,7 @@ class TitanAPI:
         ),
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_pnl_summary(self) -> dict:
+    def get_pnl_summary(self) -> PnlSummaryDict:
         import titan_state as _TS
         from titan_config import BANKROLL_START
         env = _TS.env()
@@ -233,7 +252,7 @@ class TitanAPI:
         }
 
     @mcp_tool("Return aggregated trade statistics (win rate, PnL, etc.)")
-    def get_trade_stats(self) -> dict:
+    def get_trade_stats(self) -> TradeStatsDict:
         import titan_state as _TS
         st = _TS.env().trade_stats
         return {
@@ -257,7 +276,7 @@ class TitanAPI:
         ),
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_portfolio_overview(self) -> dict:
+    def get_portfolio_overview(self) -> PortfolioOverviewDict:
         import titan_state as _TS
         from titan_config import BANKROLL_START
         env = _TS.env()
@@ -284,7 +303,7 @@ class TitanAPI:
         input_schema={"limit": {"type": "integer", "description": "Max entries to return (default 20)"}},
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_recent_errors(self, limit: int = 20) -> list[dict]:
+    def get_recent_errors(self, limit: int = 20) -> list[ErrorDict]:
         import titan_state as _TS
         result = []
         for line in reversed(_TS.env().SYSTEM_LOGS):
@@ -326,7 +345,7 @@ class TitanAPI:
         description="Returns the full trade history (buys and sells).",
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_trade_history(self) -> list[dict]:
+    def get_trade_history(self) -> list[TradeRecordDict]:
         import titan_db as _DB
         return _DB.load_trade_history()
 
@@ -450,6 +469,8 @@ class TitanAPI:
 
         def _run() -> None:
             try:
+                if not self._telegram:
+                    return
                 ok = bool(self._telegram.notify_boot())
             except Exception as exc:
                 _TS._log(f"Telegram boot alert failed: {exc}", "WARN")
@@ -475,11 +496,17 @@ class TitanAPI:
             _S._log(f"⚠ Failed to restore signals/rejects from DB: {e}", "WARN")
 
     def _on_cycle(self, signals, wallets, rejects, trades) -> None:
+        from titan_signals import Signal
+        from typing import cast
         import titan_db as DB
         ts = time.time()
-        self._last_signals = signals or []
-        if signals:
-            DB.save_signals(signals, ts)
+        signal_dicts: list[SignalDict] = [
+            s.to_dict() if isinstance(s, Signal) else cast(SignalDict, s)
+            for s in (signals or [])
+        ]
+        self._last_signals = signal_dicts
+        if signal_dicts:
+            DB.save_signals(cast(list[dict], signal_dicts), ts)
         if rejects:
             DB.save_rejects(rejects, ts)
             for r in reversed(rejects):

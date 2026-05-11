@@ -5,13 +5,17 @@ Saves: titan_state.json, titan_whales.json, titan_state.db
 
 import os, json, threading, time
 from datetime import datetime
+from typing import cast
 import titan_state as S
 import titan_db as DB
 from titan_config import STATE_FILE, WHALE_FILE, STATE_DB, BANKROLL_START, SEED_WATCHLIST
+from titan_wallet import WalletProfile
 
 
-def _format_ts_str(ts_value: object) -> str | None:
+def _format_ts_str(ts_value: float | int | str | None) -> str | None:
     try:
+        if ts_value is None:
+            return None
         return datetime.fromtimestamp(float(ts_value)).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return None
@@ -195,8 +199,9 @@ def _rebuild_trade_stats(env) -> None:
     from titan_state import TradeStats
     stats = TradeStats()
     for t in DB.load_trade_history():
-        if t.get("type") == "SELL" and t.get("pnl_usdc") is not None:
-            stats.record_sell(float(t["pnl_usdc"]))
+        pnl_usdc = t.get("pnl_usdc")
+        if pnl_usdc is not None and t.get("type") == "SELL":
+            stats.record_sell(float(pnl_usdc))
     env.trade_stats = stats
 
 
@@ -244,7 +249,7 @@ def _load_whale_roster():
                 perf = profile.pop("copy_performance", None)
                 if perf:
                     _whale_performance[addr] = perf
-                S.env().wallet_cache[addr] = profile
+                S.env().wallet_cache[addr] = cast(WalletProfile, profile)
                 loaded += 1
                 if profile.get("watchable"):
                     S.env().watchlist.add(addr)

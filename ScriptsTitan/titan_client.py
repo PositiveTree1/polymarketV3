@@ -8,10 +8,17 @@ from __future__ import annotations
 import json
 import threading
 import time
-import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from collections import defaultdict
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from titan_signals import SignalDict
+    from titan_types import (
+        AlertDict, ErrorDict, PositionBriefDict, WhaleDict,
+        PnlSummaryDict, TradeStatsDict, PortfolioOverviewDict, TradeRecordDict,
+    )
 
 
 class TitanClient:
@@ -46,6 +53,29 @@ class TitanClient:
             h.update(extra)
         return h
 
+    def _require_mapping(self, value: object, context: str) -> Mapping[str, object]:
+        if isinstance(value, Mapping):
+            return value
+        raise RuntimeError(f"Invalid {context}: expected object, got {type(value).__name__}")
+
+    def _extract_text_result(self, result: Mapping[str, object]) -> object:
+        content_value = result.get("content")
+        if not isinstance(content_value, list) or not content_value:
+            return ""
+
+        first_item = content_value[0]
+        if not isinstance(first_item, Mapping):
+            return ""
+
+        text_value = first_item.get("text")
+        if not isinstance(text_value, str):
+            return ""
+
+        try:
+            return json.loads(text_value)
+        except (json.JSONDecodeError, TypeError):
+            return text_value
+
     def _post(self, body: dict) -> dict:
         self._ready.wait(timeout=6)
         data = json.dumps(body).encode()
@@ -58,7 +88,10 @@ class TitanClient:
         with urllib.request.urlopen(req, timeout=5) as resp:
             if not self._sid:
                 self._sid = resp.headers.get("MCP-Session-Id")
-            return json.loads(resp.read())
+            payload = json.loads(resp.read())
+            if not isinstance(payload, dict):
+                raise RuntimeError(f"Invalid JSON-RPC response type: {type(payload).__name__}")
+            return payload
 
     def _call_tool(self, name: str, arguments: dict | None = None) -> object:
         response = self._post({
@@ -68,17 +101,27 @@ class TitanClient:
             "params": {"name": name, "arguments": arguments or {}},
         })
         if "error" in response:
-            raise RuntimeError(response["error"]["message"])
-        result = response.get("result", {})
-        structured = result.get("structuredContent")
-        if structured is not None:
-            return structured.get("result", structured)
-        content = result.get("content", [{}])
-        text = content[0].get("text", "") if content else ""
-        try:
-            return json.loads(text)
-        except (json.JSONDecodeError, TypeError):
-            return text
+            error_value = self._require_mapping(response["error"], "JSON-RPC error")
+            message_value = error_value.get("message")
+            if isinstance(message_value, str):
+                raise RuntimeError(message_value)
+            raise RuntimeError(f"Tool call failed without message for {name}")
+
+        result_value = response.get("result")
+        if result_value is None:
+            return None
+        if not isinstance(result_value, Mapping):
+            return result_value
+
+        structured_value = result_value.get("structuredContent")
+        if isinstance(structured_value, Mapping):
+            if "result" in structured_value:
+                return structured_value["result"]
+            return structured_value
+        if structured_value is not None:
+            return structured_value
+
+        return self._extract_text_result(result_value)
 
     def _list_tools_raw(self) -> list[dict]:
         response = self._post({
@@ -88,9 +131,16 @@ class TitanClient:
             "params": {},
         })
         if "error" in response:
-            raise RuntimeError(response["error"]["message"])
-        result = response.get("result", {})
-        return result.get("tools", []) or []
+            error_value = self._require_mapping(response["error"], "JSON-RPC error")
+            message_value = error_value.get("message")
+            if isinstance(message_value, str):
+                raise RuntimeError(message_value)
+            raise RuntimeError("tools/list failed without message")
+        result_value = self._require_mapping(response.get("result"), "tools/list result")
+        tools_value = result_value.get("tools")
+        if isinstance(tools_value, list):
+            return [tool for tool in tools_value if isinstance(tool, dict)]
+        return []
 
     def _init_async(self) -> None:
         try:
@@ -150,6 +200,9 @@ class TitanClient:
         headers = self._headers({"Accept": "text/event-stream"})
         if self._last_event_id:
             headers["Last-Event-ID"] = str(self._last_event_id)
+        if not host:
+            raise RuntimeError("Invalid MCP URL, missing hostname")
+        
         conn = http.client.HTTPConnection(host, port, timeout=None)
         try:
             conn.request("GET", parsed.path or "/mcp", headers=headers)
@@ -199,7 +252,7 @@ class TitanClient:
     def status(self) -> dict:
         return self._call_tool("status")  # type: ignore[return-value]
 
-    def get_positions(self, brief: bool = True) -> list[dict]:
+    def get_positions(self, brief: bool = True) -> list[PositionBriefDict]:
         return self._call_tool("get_positions", {"brief": brief})  # type: ignore[return-value]
 
     def list_tools(self) -> list[dict]:
@@ -208,13 +261,13 @@ class TitanClient:
     def call_tool(self, name: str, arguments: dict | None = None) -> object:
         return self._call_tool(name, arguments)  # type: ignore[return-value]
 
-    def get_closed_positions(self, limit: int = 200) -> list[dict]:
+    def get_closed_positions(self, limit: int = 200) -> list[TradeRecordDict]:
         return self._call_tool("get_closed_positions", {"limit": limit})  # type: ignore[return-value]
 
-    def get_signals(self, min_score: float = 0.0) -> list[dict]:
+    def get_signals(self, min_score: float = 0.0) -> list[SignalDict]:
         return self._call_tool("get_signals", {"min_score": min_score})  # type: ignore[return-value]
 
-    def get_signal_history(self, limit: int = 200, min_score: float = 0.0, cid: str | None = None) -> list[dict]:
+    def get_signal_history(self, limit: int = 200, min_score: float = 0.0, cid: str | None = None) -> list[SignalDict]:
         args: dict = {"limit": limit, "min_score": min_score}
         if cid:
             args["cid"] = cid
@@ -223,19 +276,19 @@ class TitanClient:
     def get_rejects(self) -> list[str]:
         return self._call_tool("get_rejects")  # type: ignore[return-value]
 
-    def get_alerts(self) -> list[dict]:
+    def get_alerts(self) -> list[AlertDict]:
         return self._call_tool("get_alerts")  # type: ignore[return-value]
 
-    def get_whales(self) -> list[dict]:
+    def get_whales(self) -> list[WhaleDict]:
         return self._call_tool("get_whales")  # type: ignore[return-value]
 
-    def get_pnl_summary(self) -> dict:
+    def get_pnl_summary(self) -> PnlSummaryDict:
         return self._call_tool("get_pnl_summary")  # type: ignore[return-value]
 
-    def get_trade_history(self) -> list[dict]:
+    def get_trade_history(self) -> list[TradeRecordDict]:
         return self._call_tool("get_trade_history")  # type: ignore[return-value]
 
-    def get_trade_stats(self) -> dict:
+    def get_trade_stats(self) -> TradeStatsDict:
         return self._call_tool("get_trade_stats")  # type: ignore[return-value]
 
     def get_config(self) -> dict:
@@ -250,10 +303,10 @@ class TitanClient:
     def get_status(self) -> dict:
         return self._call_tool("get_status")  # type: ignore[return-value]
 
-    def get_portfolio_overview(self) -> dict:
+    def get_portfolio_overview(self) -> PortfolioOverviewDict:
         return self._call_tool("get_portfolio_overview")  # type: ignore[return-value]
 
-    def get_recent_errors(self, limit: int = 20) -> list[dict]:
+    def get_recent_errors(self, limit: int = 20) -> list[ErrorDict]:
         return self._call_tool("get_recent_errors", {"limit": limit})  # type: ignore[return-value]
 
     def force_cycle(self) -> None:
