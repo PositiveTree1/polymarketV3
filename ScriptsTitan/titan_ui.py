@@ -78,19 +78,7 @@ TITAN_ASCII = [
 
 _ngrok_url = None  # Global for the dashboard tunnel
 
-BOOT_STEPS = [
-    ("Initialising auto paper trading engine",  0.18),
-    ("Loading verified whale roster",           0.22),
-    ("Calibrating drift detection matrices",    0.18),
-    ("Setting up P&L graph renderer",           0.20),
-    ("Connecting to Polymarket CLOB feed",       0.20),
-    ("Arming exit-monitoring sentinels",         0.18),
-    ("Loading saved P&L state from disk",        0.22),
-    ("TITAN ONLINE — Follow The Whale",         0.10),
-]
-
-
-def show_loading_screen(root, on_complete):
+def show_loading_screen(root, api, on_complete):
     frame = tk.Frame(root, bg="#080810")
     frame.place(relx=0, rely=0, relwidth=1, relheight=1)
     inner = tk.Frame(frame, bg="#080810")
@@ -123,7 +111,17 @@ def show_loading_screen(root, on_complete):
 
     SPINNERS    = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
     spin_idx    = [0]
-    total_steps = len(BOOT_STEPS)
+
+    BOOT_TASKS = [
+        ("Checking engine status...", lambda: api.get_status()),
+        ("Loading P&L and bankroll state...", lambda: api.get_pnl_summary()),
+        ("Fetching verified whale roster...", lambda: api.get_whales()),
+        ("Syncing open positions...", lambda: api.get_positions(brief=False)),
+        ("Downloading latest signals...", lambda: api.get_signals()),
+        ("TITAN ONLINE — Follow The Whale", lambda: None),
+    ]
+    total_steps = len(BOOT_TASKS)
+    current_step = [0]
 
     def draw_bar(fraction):
         pb_canvas.delete("all")
@@ -136,33 +134,43 @@ def show_loading_screen(root, on_complete):
         pb_canvas.create_text(210, 8, text=f"{int(fraction*100)}%",
                                fill="#ffffff", font=("Courier", 8))
 
-    def animate_step(step_idx, sub_frame):
+    def update_ui():
+        step_idx = current_step[0]
         if step_idx >= total_steps:
             status_var.set("  ✅  ALL SYSTEMS NOMINAL")
             draw_bar(1.0)
             tick_var.set("")
             root.after(600, lambda: (frame.destroy(), on_complete()))
             return
-        label, duration = BOOT_STEPS[step_idx]
-        total_sub = 12
-        if sub_frame > total_sub:
-            animate_step(step_idx + 1, 0)
-            return
-        frac    = step_idx / total_steps + (1.0 / total_steps) * (sub_frame / total_sub)
+
+        frac = step_idx / total_steps
         draw_bar(frac)
         spinner = SPINNERS[spin_idx[0] % len(SPINNERS)]
         spin_idx[0] += 1
-        if step_idx == total_steps - 1 and sub_frame > total_sub // 2:
+        label = BOOT_TASKS[step_idx][0]
+
+        if step_idx == total_steps - 1:
             status_var.set(f"  🚀  {label}")
             tick_var.set("━" * 48)
         else:
-            status_var.set(f"  {spinner}  {label}...")
+            status_var.set(f"  {spinner}  {label}")
             tick_var.set("")
-        delay_ms = int(duration * 1000 / total_sub)
-        root.after(delay_ms, lambda: animate_step(step_idx, sub_frame + 1))
+
+        root.after(80, update_ui)
+
+    def run_tasks():
+        for i, (label, task) in enumerate(BOOT_TASKS):
+            current_step[0] = i
+            try:
+                task()
+            except Exception:
+                pass
+            time.sleep(0.3)  # Small visual delay so the user can read the step
+        current_step[0] = total_steps
 
     draw_bar(0.0)
-    root.after(120, lambda: animate_step(0, 0))
+    threading.Thread(target=run_tasks, daemon=True).start()
+    root.after(80, update_ui)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2768,7 +2776,7 @@ def run_ui(api: TitanBackend) -> None:
             threading.Thread(target=lambda: http.server.HTTPServer(('127.0.0.1', 8080), DashboardHandler).serve_forever(), daemon=True).start()
     
 
-    show_loading_screen(root, on_boot_complete)
+    show_loading_screen(root, api, on_boot_complete)
     root.mainloop()
 
 
