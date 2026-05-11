@@ -308,6 +308,7 @@ def run_ui(api: TitanBackend) -> None:
             self.bind("<ButtonRelease-1>", self._drag_end)
             self.bind("<Left>", self._on_left)
             self.bind("<Right>", self._on_right)
+            self.bind("<Enter>", lambda e: self.focus_set())
 
         def _mark_dirty(self) -> None:
             self._dirty = True

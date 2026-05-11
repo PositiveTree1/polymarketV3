@@ -5,6 +5,8 @@ __pycache__/
 .env
 *.json
 *.db
+*.db-wal
+*.db-shm
 !titan_config.json
 !titan_config_*.json
 !titan_whales_*.json
