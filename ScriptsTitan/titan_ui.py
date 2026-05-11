@@ -278,143 +278,542 @@ def run_ui(api: TitanBackend) -> None:
     # ═══════════════════════════════════════════════════════════════════════════════
     #  POSITION CHART
     # ═══════════════════════════════════════════════════════════════════════════════
-    class PositionChart(tk.Canvas):
-        PAD_X, PAD_Y = 60, 28
-    
-        def __init__(self, parent, **kwargs):
-            super().__init__(parent, bg="#050510", highlightthickness=1,
-                             highlightbackground="#1a2a4a", **kwargs)
-            self._history     = []
-            self._title       = ""
-            self._entry_price = 0.0
-            self._empty_message = "Select a position to view its live price chart"
-            self._zoom_start  = 0
-            self._dirty       = False
-            self._last_len    = 0
+    # ───────────────────────────────────────────────────────────────────────────────
+    #  BaseChart — shared zoom, pan, crosshair for all canvas charts
+    # ───────────────────────────────────────────────────────────────────────────────
+    class BaseChart(tk.Canvas):
+        PAD_L: int = 64
+        PAD_R: int = 20
+        PAD_T: int = 20
+        PAD_B: int = 40
+        MIN_VISIBLE_POINTS: int = 4
+
+        def __init__(self, parent, bg: str, hl: str, **kwargs):
+            super().__init__(parent, bg=bg, highlightthickness=1,
+                             highlightbackground=hl, takefocus=1, **kwargs)
+            self._history: list[tuple[float, float]] = []
+            self._view_start: int = 0
+            self._view_size: int = 0
+            self._selector_index: int = 0
+            self._last_len: int = 0
+            self._last_val: float = 0.0
+            self._dirty: bool = False
+            self._drag_x: int | None = None
+            self._drag_view_start: int = 0
             self.bind("<Configure>", lambda e: self._mark_dirty())
             self.bind("<MouseWheel>", self._on_scroll)
-            self.bind("<Motion>",     self._on_motion)
-            self.bind("<Leave>",      lambda e: self.delete("crosshair"))
-    
-        def _mark_dirty(self): self._dirty = True
-    
+            self.bind("<Motion>", self._on_motion)
+            self.bind("<ButtonPress-1>", self._drag_start)
+            self.bind("<B1-Motion>", self._drag_move)
+            self.bind("<ButtonRelease-1>", self._drag_end)
+            self.bind("<Left>", self._on_left)
+            self.bind("<Right>", self._on_right)
+
+        def _mark_dirty(self) -> None:
+            self._dirty = True
+
+        def _visible_count(self) -> int:
+            n = len(self._history)
+            if n == 0:
+                return 0
+            if self._view_size <= 0 or self._view_size > n:
+                return n
+            return max(min(self.MIN_VISIBLE_POINTS, n), self._view_size)
+
+        def _max_view_start(self) -> int:
+            visible_count = self._visible_count()
+            return max(0, len(self._history) - visible_count)
+
+        def _clamp_state(self) -> None:
+            n = len(self._history)
+            if n == 0:
+                self._view_start = 0
+                self._view_size = 0
+                self._selector_index = 0
+                return
+            self._selector_index = max(0, min(self._selector_index, n - 1))
+            visible_count = self._visible_count()
+            self._view_size = visible_count
+            self._view_start = max(0, min(self._view_start, n - visible_count))
+
+        def _reset_view(self) -> None:
+            self._view_start = 0
+            self._view_size = len(self._history)
+            self._selector_index = max(0, len(self._history) - 1)
+            self._clamp_state()
+
+        def _keep_selector_visible(self) -> None:
+            self._clamp_state()
+            visible_count = self._visible_count()
+            if visible_count == 0:
+                return
+            if self._selector_index < self._view_start:
+                self._view_start = self._selector_index
+            elif self._selector_index >= self._view_start + visible_count:
+                self._view_start = self._selector_index - visible_count + 1
+            self._clamp_state()
+
+        def _center_view_on_selector(self) -> None:
+            self._clamp_state()
+            visible_count = self._visible_count()
+            if visible_count == 0:
+                return
+            self._view_start = self._selector_index - (visible_count // 2)
+            self._clamp_state()
+
+        def _visible(self) -> list[tuple[float, float]]:
+            self._clamp_state()
+            visible_count = self._visible_count()
+            return self._history[self._view_start:self._view_start + visible_count]
+
+        def _selector_visible_index(self) -> int | None:
+            visible_count = self._visible_count()
+            if visible_count == 0:
+                return None
+            selector_visible_index = self._selector_index - self._view_start
+            if 0 <= selector_visible_index < visible_count:
+                return selector_visible_index
+            return None
+
+        def _selector_index_from_x(self, x: int) -> int | None:
+            visible = self._visible()
+            if not visible:
+                return None
+            plot_w = (self.winfo_width() or 600) - self.PAD_L - self.PAD_R
+            if plot_w <= 0:
+                return None
+            relative_x = max(0, min(plot_w, x - self.PAD_L))
+            visible_index = int(round(relative_x / max(plot_w, 1) * max(len(visible) - 1, 0)))
+            return self._view_start + visible_index
+
+        def _move_selector(self, step: int) -> None:
+            if not self._history:
+                return
+            self._selector_index = max(0, min(self._selector_index + step, len(self._history) - 1))
+            self._keep_selector_visible()
+            self._redraw()
+
+        def _on_left(self, event) -> str:
+            self._move_selector(-1)
+            return "break"
+
+        def _on_right(self, event) -> str:
+            self._move_selector(1)
+            return "break"
+
+        def _on_scroll(self, event) -> None:
+            n = len(self._history)
+            if n < 2:
+                return
+            visible_count = self._visible_count()
+            step = max(1, visible_count // 5)
+            if event.delta > 0:
+                self._view_size = max(min(self.MIN_VISIBLE_POINTS, n), visible_count - step)
+            else:
+                self._view_size = min(n, visible_count + step)
+            self._center_view_on_selector()
+            self._redraw()
+
+        def _drag_start(self, event) -> None:
+            self.focus_set()
+            selector_index = self._selector_index_from_x(event.x)
+            if selector_index is not None:
+                self._selector_index = selector_index
+            self._keep_selector_visible()
+            self._drag_x = event.x
+            self._drag_view_start = self._view_start
+            self._redraw()
+
+        def _drag_move(self, event) -> None:
+            if self._drag_x is None:
+                return
+            n = len(self._history)
+            if n < 2:
+                return
+            plot_w = (self.winfo_width() or 600) - self.PAD_L - self.PAD_R
+            if plot_w <= 0:
+                return
+            visible_count = self._visible_count()
+            if visible_count >= n:
+                return
+            px_per_pt = plot_w / max(visible_count - 1, 1)
+            delta_pts = int(round((self._drag_x - event.x) / max(px_per_pt, 1)))
+            new_start = max(0, min(self._drag_view_start + delta_pts, n - visible_count))
+            if new_start != self._view_start:
+                self._view_start = new_start
+                self._redraw()
+
+        def _drag_end(self, event) -> None:
+            self._drag_x = None
+
+        def _on_motion(self, event) -> None:
+            if self._drag_x is not None:
+                return
+            selector_index = self._selector_index_from_x(event.x)
+            if selector_index is None or selector_index == self._selector_index:
+                return
+            self._selector_index = selector_index
+            self._keep_selector_visible()
+            self._redraw()
+
+        # subclasses override these two
+        def _crosshair_label(self, ts: float, v: float) -> str:
+            return f"${v:.4f}"
+
+        def _crosshair_color(self, v: float) -> str:
+            return "#00ff88"
+
+        def _redraw(self): ...
+
+    # ───────────────────────────────────────────────────────────────────────────────
+    #  PositionChart
+    # ───────────────────────────────────────────────────────────────────────────────
+    class PositionChart(BaseChart):
+        PAD_L, PAD_R, PAD_T, PAD_B = 60, 20, 28, 40
+
+        def __init__(self, parent, **kwargs):
+            super().__init__(parent, bg="#050510", hl="#1a2a4a", **kwargs)
+            self._title       : str   = ""
+            self._entry_price : float = 0.0
+            self._empty_message: str  = "Select a position to view its live price chart"
+
         def load(self, history, title, entry_price, empty_message=None):
-            new_len = len(history) if history else 0
-            if (history != self._history or title != self._title or
-                    entry_price != self._entry_price or new_len != self._last_len or
-                    empty_message != self._empty_message):
-                self._history     = list(history) if history else []
-                self._title       = title
-                self._entry_price = entry_price
-                self._empty_message = empty_message or "Select a position to view its live price chart"
-                self._last_len    = new_len
-                self._zoom_start  = 0
-                self._dirty       = True
+            new_len  = len(history) if history else 0
+            new_msg  = empty_message or "Select a position to view its live price chart"
+            new_last = history[-1][1] if history else 0.0
+            track_latest = self._selector_index >= max(self._last_len - 1, 0)
+            position_changed = (title != self._title or entry_price != self._entry_price)
+            data_changed     = (new_len != self._last_len or new_last != self._last_val
+                                or new_msg != self._empty_message)
+            if position_changed or data_changed:
+                self._history       = list(history) if history else []
+                self._title         = title
+                self._entry_price   = entry_price
+                self._empty_message = new_msg
+                self._last_len      = new_len
+                self._last_val      = new_last
+                if position_changed:
+                    self._reset_view()
+                elif track_latest and self._history:
+                    self._selector_index = len(self._history) - 1
+                    self._keep_selector_visible()
+                else:
+                    self._clamp_state()
+                self._dirty         = True
             if self._dirty:
                 self._redraw()
                 self._dirty = False
-    
-        def _on_scroll(self, event):
-            n = len(self._history)
-            if n < 4: return
-            step = max(1, n // 8)
-            if event.delta > 0: self._zoom_start = min(self._zoom_start + step, n - 4)
-            else:                self._zoom_start = max(0, self._zoom_start - step)
-            self._redraw()
-    
-        def _on_motion(self, event):
-            self.delete("crosshair")
-            visible = self._history[self._zoom_start:]
-            if len(visible) < 2: return
-            self.update_idletasks()
-            w  = self.winfo_width()  or 600
-            h  = self.winfo_height() or 220
-            px, py = self.PAD_X, self.PAD_Y
-            prices = [p[1] for p in visible]
-            lo, hi = min(prices), max(prices)
-            if hi == lo: hi += 0.01; lo -= 0.01
-            chart_w = w - 2*px
-            if chart_w <= 0: return
-            idx = max(0, min(len(visible)-1, int((event.x - px) / chart_w * (len(visible)-1))))
-            p   = visible[idx][1]
-            cy  = h - (py + (h - 2*py) * ((p - lo) / (hi - lo)))
-            self.create_line(event.x, py, event.x, h-py, fill="#334455", tags="crosshair")
-            self.create_line(px, cy, w-px, cy, fill="#334455", dash=(2,4), tags="crosshair")
-            entry_pnl = (p - self._entry_price) / max(self._entry_price, 0.001) * 100
-            lbl = f"${p:.4f}  ({entry_pnl:+.1f}%)"
-            bw  = len(lbl)*7 + 8
-            self.create_rectangle(event.x+4, cy-10, event.x+4+bw, cy+10,
-                                   fill="#0d1a2a", outline="#1a3a5a", tags="crosshair")
-            color = "#00ff55" if entry_pnl >= 0 else "#ff5555"
-            self.create_text(event.x+7, cy, text=lbl, fill=color,
-                             font=mono_sm, anchor="w", tags="crosshair")
-    
+
+        def _crosshair_label(self, ts, v):
+            pct = (v - self._entry_price) / max(self._entry_price, 0.001) * 100
+            return f"${v:.4f}  ({pct:+.1f}%)"
+
+        def _crosshair_color(self, v):
+            return "#00ff55" if v >= self._entry_price else "#ff5555"
+
         def _redraw(self):
             self.delete("chart"); self.delete("crosshair")
             self.update_idletasks()
-            w  = self.winfo_width()  or 600
-            h  = self.winfo_height() or 220
-            px, py = self.PAD_X, self.PAD_Y
-            visible = self._history[self._zoom_start:]
+            w, h = self.winfo_width() or 600, self.winfo_height() or 220
+            pl, pr, pt, pb = self.PAD_L, self.PAD_R, self.PAD_T, self.PAD_B
+            visible = self._visible()
             if not visible:
-                self.create_text(w//2, h//2,
-                    text=self._empty_message,
+                self.create_text(w//2, h//2, text=self._empty_message,
                     fill="#334455", font=mono, tags="chart")
                 return
             prices = [p[1] for p in visible]
             times  = [p[0] for p in visible]
             lo, hi = min(prices), max(prices)
             if hi == lo: hi += 0.005; lo -= 0.005
-            def gx(i): return px + (i / max(len(visible)-1, 1)) * (w - 2*px)
-            def gy(v): return h - (py + (h - 2*py) * ((v - lo) / (hi - lo)))
+            def gx(i): return pl + (i / max(len(visible)-1, 1)) * (w - pl - pr)
+            def gy(v): return h - pb - (h - pt - pb) * ((v - lo) / (hi - lo))
             for pv in [lo, lo+(hi-lo)*0.25, lo+(hi-lo)*0.5, lo+(hi-lo)*0.75, hi]:
                 yv = gy(pv)
-                self.create_line(px, yv, w-px, yv, fill="#0d142a", dash=(2,4), tags="chart")
-                self.create_text(px-4, yv, text=f"{pv:.4f}", fill="#334455",
+                self.create_line(pl, yv, w-pr, yv, fill="#0d142a", dash=(2,4), tags="chart")
+                self.create_text(pl-4, yv, text=f"{pv:.4f}", fill="#334455",
                                  anchor="e", font=mono_xs, tags="chart")
             n_lbl = min(6, len(visible))
             for j in range(n_lbl):
-                idx = int(j / max(n_lbl-1,1) * (len(visible)-1))
-                ts  = time.strftime("%H:%M", time.localtime(times[idx]))
-                self.create_text(gx(idx), h-py+12, text=ts, fill="#334455",
-                                 font=mono_xs, tags="chart")
+                idx = int(j / max(n_lbl-1, 1) * (len(visible)-1))
+                self.create_text(gx(idx), h-pb+12,
+                    text=time.strftime("%H:%M", time.localtime(times[idx])),
+                    fill="#334455", font=mono_xs, tags="chart")
             ey = gy(self._entry_price)
-            if py < ey < h-py:
-                self.create_line(px, ey, w-px, ey, fill="#665500", dash=(4,4), tags="chart")
-                self.create_text(px-4, ey, text=f"{self._entry_price:.4f}",
+            if pt < ey < h-pb:
+                self.create_line(pl, ey, w-pr, ey, fill="#665500", dash=(4,4), tags="chart")
+                self.create_text(pl-4, ey, text=f"{self._entry_price:.4f}",
                                  fill="#998833", anchor="e", font=mono_xs, tags="chart")
             if len(prices) >= 2:
-                poly = [px, h-py]
+                poly = [pl, h-pb]
                 for i, p in enumerate(prices): poly += [gx(i), gy(p)]
-                poly += [gx(len(prices)-1), h-py]
-                fill_col = "#001a0d" if prices[-1] >= self._entry_price else "#1a0000"
-                self.create_polygon(poly, fill=fill_col, outline="", smooth=False, tags="chart")
+                poly += [gx(len(prices)-1), h-pb]
+                self.create_polygon(poly,
+                    fill="#001a0d" if prices[-1] >= self._entry_price else "#1a0000",
+                    outline="", smooth=False, tags="chart")
             coords = []
             for i, p in enumerate(prices): coords += [gx(i), gy(p)]
             if len(coords) >= 4:
-                cp       = prices[-1]
-                line_col = "#00ff88" if cp >= self._entry_price else "#ff5555"
-                self.create_line(coords, fill=line_col, width=2, smooth=len(prices)>=6, tags="chart")
+                cp = prices[-1]
+                self.create_line(coords,
+                    fill="#00ff88" if cp >= self._entry_price else "#ff5555",
+                    width=2, smooth=len(prices)>=6, tags="chart")
             bx, by = gx(0), gy(prices[0])
             self.create_text(bx, by-14, text="▲ BUY", fill="#ffdd00", font=mono_sm, tags="chart")
             self.create_oval(bx-4, by-4, bx+4, by+4, fill="#ffdd00", outline="", tags="chart")
             cp = prices[-1]
-            dpx_c, dpy_c = gx(len(prices)-1), gy(cp)
+            ex, ey2 = gx(len(prices)-1), gy(cp)
             dot_col = "#00ff88" if cp >= self._entry_price else "#ff5555"
-            self.create_oval(dpx_c-5, dpy_c-5, dpx_c+5, dpy_c+5,
-                             fill=dot_col, outline="#ffffff", width=1, tags="chart")
+            self.create_oval(ex-5, ey2-5, ex+5, ey2+5, fill=dot_col, outline="#ffffff", width=1, tags="chart")
             pct   = (cp - self._entry_price) / max(self._entry_price, 0.001) * 100
             color = "#00ff55" if pct >= 0 else "#ff5555"
-            self.create_text(px, 10, text=f"📈 {self._title[:60]}",
+            selector_visible_index = self._selector_visible_index()
+            if selector_visible_index is not None:
+                selector_ts, selector_price = visible[selector_visible_index]
+                selector_x = gx(selector_visible_index)
+                selector_y = gy(selector_price)
+                self.create_line(selector_x, pt, selector_x, h-pb, fill="#556677",
+                                 dash=(4, 4), tags="crosshair")
+                self.create_line(pl, selector_y, w-pr, selector_y, fill="#334455",
+                                 dash=(2, 4), tags="crosshair")
+                selector_label = self._crosshair_label(selector_ts, selector_price)
+                selector_color = self._crosshair_color(selector_price)
+                box_w = len(selector_label) * 7 + 8
+                label_x = min(selector_x + 6, w - box_w - 4)
+                self.create_rectangle(label_x, selector_y-10, label_x+box_w, selector_y+10,
+                                      fill="#0d1a2a", outline="#1a3a5a", tags="crosshair")
+                self.create_text(label_x+4, selector_y, text=selector_label, fill=selector_color,
+                                 font=mono_sm, anchor="w", tags="crosshair")
+            self.create_text(pl, pt, text=f"📈 {self._title[:60]}",
                              fill="#00ff88", anchor="w", font=bold_hd, tags="chart")
-            self.create_text(w-px, 10,
+            self.create_text(w-pr, pt,
                              text=f"Now ${cp:.4f}  ({pct:+.1f}%)   Entry ${self._entry_price:.4f}",
                              fill=color, anchor="e", font=mono_sm, tags="chart")
             self.create_text(w//2, h-8,
-                             text=f"↔ {len(visible)}/{len(self._history)} pts | Scroll=zoom | Hover=crosshair",
+                             text=f"↔ {len(visible)}/{len(self._history)} pts | Scroll=zoom on selector | ← → move | Drag=pan",
                              fill="#334455", font=mono_xs, tags="chart")
-    
-    
+
+    # ───────────────────────────────────────────────────────────────────────────────
+    #  PnLChart
+    # ───────────────────────────────────────────────────────────────────────────────
+    class PnLChart(BaseChart):
+        PAD_L, PAD_R, PAD_T, PAD_B = 64, 20, 20, 40
+
+        def __init__(self, parent, **kwargs):
+            super().__init__(parent, bg="#06060f", hl="#1a1a30", **kwargs)
+            self._bankroll_start: float = 0.0
+
+        def load(self, history: list[tuple[float, float]], bankroll_start: float) -> None:
+            new_len  = len(history)
+            new_last = history[-1][1] if history else 0.0
+            track_latest = self._selector_index >= max(self._last_len - 1, 0)
+            if (new_len != self._last_len or new_last != self._last_val
+                    or bankroll_start != self._bankroll_start):
+                self._history        = list(history)
+                self._bankroll_start = bankroll_start
+                self._last_len       = new_len
+                self._last_val       = new_last
+                if self._view_size == 0:
+                    self._reset_view()
+                elif track_latest and self._history:
+                    self._selector_index = len(self._history) - 1
+                    self._keep_selector_visible()
+                else:
+                    self._clamp_state()
+                self._dirty          = True
+            if self._dirty:
+                self._redraw()
+                self._dirty = False
+
+        def _crosshair_label(self, ts, v):
+            from datetime import datetime as _dt
+            diff = v - self._bankroll_start
+            return f"{_dt.fromtimestamp(ts).strftime('%m/%d %H:%M')}  ${v:.4f}  ({diff:+.4f})"
+
+        def _crosshair_color(self, v):
+            return "#00ff55" if v >= self._bankroll_start else "#ff5555"
+
+        def _redraw(self):
+            self.delete("chart"); self.delete("crosshair")
+            self.update_idletasks()
+            w, h = self.winfo_width() or 600, self.winfo_height() or 220
+            pl, pr, pt, pb = self.PAD_L, self.PAD_R, self.PAD_T, self.PAD_B
+            plot_w, plot_h = w - pl - pr, h - pt - pb
+            visible = self._visible()
+            if len(visible) < 2:
+                self.create_text(w//2, h//2,
+                    text="No data yet — graph appears after first equity point",
+                    fill="#334433", font=("Courier", 10), anchor="center", tags="chart")
+                return
+            timestamps = [ts for ts, _ in visible]
+            vals       = [v  for _,  v in visible]
+            lo, hi = min(vals), max(vals)
+            spread = max(hi - lo, 0.5)
+            lo -= spread * 0.1; hi += spread * 0.1
+            t_min, t_max = timestamps[0], timestamps[-1]
+            t_span = max(t_max - t_min, 1)
+            def to_x(ts): return pl + ((ts - t_min) / t_span) * plot_w
+            def to_y(v):  return pt + (1 - (v - lo) / (hi - lo)) * plot_h
+            for i in range(7):
+                val = lo + (hi - lo) * i / 6
+                y   = to_y(val)
+                self.create_line(pl, y, w-pr, y, fill="#1a1a28", dash=(2,4), tags="chart")
+                self.create_text(pl-4, y, text=f"${val:.3f}",
+                                  fill="#335544", font=("Courier", 8), anchor="e", tags="chart")
+            if lo <= self._bankroll_start <= hi:
+                y0 = to_y(self._bankroll_start)
+                self.create_line(pl, y0, w-pr, y0, fill="#2a4a2a", dash=(4,3), tags="chart")
+                self.create_text(pl-4, y0, text="START", fill="#2a6a2a",
+                                  font=("Courier", 7), anchor="e", tags="chart")
+            from datetime import datetime as _dt
+            fmt = "%H:%M" if (t_span / 3600) < 20 else "%m/%d %H:%M"
+            for i in range(5):
+                frac    = i / 4
+                ts_tick = t_min + frac * t_span
+                x_tick  = pl + frac * plot_w
+                self.create_line(x_tick, pt+plot_h, x_tick, pt+plot_h+4, fill="#335544", tags="chart")
+                self.create_text(x_tick, pt+plot_h+14,
+                    text=_dt.fromtimestamp(ts_tick).strftime(fmt),
+                    fill="#335544", font=("Courier", 7), anchor="center", tags="chart")
+            poly = [pl, to_y(vals[0])]
+            for ts, v in zip(timestamps, vals): poly += [to_x(ts), to_y(v)]
+            poly += [to_x(timestamps[-1]), pt+plot_h, pl, pt+plot_h]
+            self.create_polygon(poly,
+                fill="#001a0a" if vals[-1] >= self._bankroll_start else "#1a0000",
+                outline="", smooth=False, tags="chart")
+            for i in range(1, len(vals)):
+                self.create_line(
+                    to_x(timestamps[i-1]), to_y(vals[i-1]),
+                    to_x(timestamps[i]),   to_y(vals[i]),
+                    fill="#00ff55" if vals[i] >= vals[i-1] else "#ff5555",
+                    width=2, tags="chart")
+            self.create_oval(pl-3, to_y(vals[0])-3, pl+3, to_y(vals[0])+3,
+                              fill="#aaaaaa", outline="", tags="chart")
+            last_v    = vals[-1]
+            x_end, y_end = to_x(timestamps[-1]), to_y(last_v)
+            cur_color = "#00ff55" if last_v >= self._bankroll_start else "#ff5555"
+            self.create_oval(x_end-4, y_end-4, x_end+4, y_end+4,
+                              fill=cur_color, outline="#ffffff", tags="chart")
+            selector_visible_index = self._selector_visible_index()
+            if selector_visible_index is not None:
+                selector_ts, selector_val = visible[selector_visible_index]
+                selector_x = to_x(selector_ts)
+                selector_y = to_y(selector_val)
+                self.create_line(selector_x, pt, selector_x, h-pb, fill="#556677",
+                                 dash=(4, 4), tags="crosshair")
+                self.create_line(pl, selector_y, w-pr, selector_y, fill="#334455",
+                                 dash=(2, 4), tags="crosshair")
+                selector_label = self._crosshair_label(selector_ts, selector_val)
+                selector_color = self._crosshair_color(selector_val)
+                box_w = len(selector_label) * 7 + 8
+                label_x = min(selector_x + 6, w - box_w - 4)
+                self.create_rectangle(label_x, selector_y-10, label_x+box_w, selector_y+10,
+                                      fill="#0d1a2a", outline="#1a3a5a", tags="crosshair")
+                self.create_text(label_x+4, selector_y, text=selector_label, fill=selector_color,
+                                 font=mono_sm, anchor="w", tags="crosshair")
+            diff = last_v - self._bankroll_start
+            self.create_text(min(x_end+8, w-220), y_end,
+                text=f"${last_v:.3f} ({diff:+.3f})",
+                fill=cur_color, font=("Courier", 9), anchor="w", tags="chart")
+            self.create_text(w//2, h-8,
+                text=f"↔ {len(visible)}/{len(self._history)} pts | Scroll=zoom on selector | ← → move | Drag=pan",
+                fill="#334455", font=("Courier", 7), anchor="center", tags="chart")
+
+    # ───────────────────────────────────────────────────────────────────────────────
+    #  ChartFrame — reusable wrapper: canvas chart + collapsible data panel
+    # ───────────────────────────────────────────────────────────────────────────────
+    class ChartFrame(tk.Frame):
+        """
+        Hosts any tk.Canvas-based chart plus a toggleable right-side data panel.
+        Usage:
+            cf = ChartFrame(parent, get_data_rows=lambda: [("label","value"), ...])
+            canvas = tk.Canvas(cf.chart_area, ...)
+            canvas.pack(fill="both", expand=True)
+            cf.btn_bar   # tk.Frame — add extra buttons here
+        Call cf.refresh_panel() to sync the panel without flicker.
+        """
+        _PANEL_W = 200
+
+        def __init__(self, parent, get_data_rows, col_headers=("Date / Label", "Value"), **kwargs):
+            super().__init__(parent, bg="#080810", **kwargs)
+            self._get_data_rows  = get_data_rows
+            self._panel_visible  = False
+            self._last_row_count = 0
+
+            # Outer horizontal container (chart | panel)
+            self._outer = tk.Frame(self, bg="#080810")
+            self._outer.pack(fill="both", expand=True)
+
+            # Chart area — caller packs their canvas here
+            self.chart_area = tk.Frame(self._outer, bg="#080810")
+            self.chart_area.pack(side="left", fill="both", expand=True)
+
+            # Data panel (hidden by default)
+            self._panel = tk.Frame(self._outer, bg="#0a0a1a", width=self._PANEL_W)
+            self._panel.pack_propagate(False)
+
+            cols = col_headers
+            self._tree = ttk.Treeview(self._panel, columns=cols, show="headings", height=20)
+            self._tree.heading(cols[0], text=cols[0])
+            self._tree.heading(cols[1], text=cols[1])
+            self._tree.column(cols[0], width=110, anchor="center")
+            self._tree.column(cols[1], width=80,  anchor="center")
+            self._tree.tag_configure("pos", foreground="#00ff55", background="#001800")
+            self._tree.tag_configure("neg", foreground="#ff5555", background="#1a0000")
+            self._tree.tag_configure("neu", foreground="#aaaaaa", background="#0a0a1a")
+            vsb = tk.Scrollbar(self._panel, command=self._tree.yview)
+            self._tree.configure(yscrollcommand=vsb.set)
+            vsb.pack(side="right", fill="y")
+            self._tree.pack(fill="both", expand=True)
+
+            # Button bar below the chart area
+            self.btn_bar = tk.Frame(self, bg="#080810")
+            self.btn_bar.pack(fill="x")
+
+            self._toggle_btn = tk.Button(
+                self.btn_bar, text="▶  Data",
+                bg="#0d0d22", fg="#00aaff", activebackground="#1a1a33",
+                activeforeground="#00ccff", relief="flat", bd=0,
+                font=("Courier", 8), padx=8, pady=2,
+                command=self.toggle_panel,
+            )
+            self._toggle_btn.pack(side="left")
+
+        def toggle_panel(self):
+            if self._panel_visible:
+                self._panel.pack_forget()
+                self._panel_visible  = False
+                self._last_row_count = 0
+                self._toggle_btn.config(text="▶  Data")
+            else:
+                self._panel.pack(side="left", fill="y", padx=(4, 0), in_=self._outer)
+                self._panel_visible  = True
+                self._last_row_count = 0
+                self._toggle_btn.config(text="◀  Data")
+                self._do_refresh()
+
+        def refresh_panel(self):
+            if self._panel_visible:
+                self._do_refresh()
+
+        def _do_refresh(self):
+            rows = self._get_data_rows()
+            if len(rows) == self._last_row_count:
+                return
+            # Only append new rows — never clear, prevents cursor jump
+            n_existing = len(self._tree.get_children())
+            new_rows   = rows[n_existing:]
+            for label, value in new_rows:
+                try:
+                    fv = float(value.replace("$", "").replace("%", "").replace("+", ""))
+                    tag = "pos" if fv > 0 else ("neg" if fv < 0 else "neu")
+                except ValueError:
+                    tag = "neu"
+                self._tree.insert("", "end", values=(label, value), tags=(tag,))
+            self._last_row_count = len(rows)
+            children = self._tree.get_children()
+            if children:
+                self._tree.see(children[-1])
+
     # ═══════════════════════════════════════════════════════════════════════════════
     #  TAB 1: LIVE SIGNALS
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -847,10 +1246,12 @@ def run_ui(api: TitanBackend) -> None:
             if history:
                 _last_chart_warn[0] = ""
                 pos_graph.load(history, title, entry_price)
+                pos_chart_frame.refresh_panel()
                 return
 
             detail = str(pos.get("price_history_error") or "Closed position has no chart history.")
             pos_graph.load([], title, entry_price, detail)
+            pos_chart_frame.refresh_panel()
             warn_msg = f"Closed chart empty: {title[:80]} [{outcome}] | {detail}"
             if _last_chart_warn[0] != warn_msg:
                 pos_log_write(warn_msg, "WARN")
@@ -863,11 +1264,13 @@ def run_ui(api: TitanBackend) -> None:
                 if str(pos.get("outcome", "")) == outcome:
                     _last_chart_warn[0] = ""
                     pos_graph.load(pos.get("price_history", []), title, pos.get("entry_price", 0))
+                    pos_chart_frame.refresh_panel()
                     return
 
         _last_chart_warn[0] = ""
         pos_graph.load([], mkt_name, 0.0, f"Open position match not found for {mkt_name[:48]} [{outcome}].")
-    
+        pos_chart_frame.refresh_panel()
+
     def _find_selected_closed_position() -> TradeRecordDict | None:
         sel = pos_tree.selection()
         if not sel:
@@ -905,15 +1308,26 @@ def run_ui(api: TitanBackend) -> None:
     pos_split = tk.Frame(tab_positions, bg="#080810")
     pos_split.pack(fill="both", expand=True, padx=4)
     
-    pos_chart_frame = tk.Frame(pos_split, bg="#080810")
+    def _pos_chart_data_rows():
+        from datetime import datetime as _dt
+        hist = pos_graph._history
+        if not hist:
+            return []
+        entry = pos_graph._entry_price
+        return [
+            (_dt.fromtimestamp(ts).strftime("%m/%d %H:%M"), f"${v:.4f}  ({(v-entry)/max(entry,0.001)*100:+.1f}%)")
+            for ts, v in hist
+        ]
+
+    pos_chart_frame = ChartFrame(pos_split, get_data_rows=_pos_chart_data_rows,
+                                 col_headers=("Time", "Price / P&L"))
     pos_chart_frame.pack(side="left", fill="both", expand=True)
-    
-    pos_graph = PositionChart(pos_chart_frame, height=240)
+
+    pos_graph = PositionChart(pos_chart_frame.chart_area, height=240)
     pos_graph.pack(fill="both", expand=True, padx=2, pady=2)
     _last_chart_warn = [""]
-    
-    pos_btn_bar = tk.Frame(pos_chart_frame, bg="#080810")
-    pos_btn_bar.pack(fill="x")
+
+    pos_btn_bar = pos_chart_frame.btn_bar
     
     def _open_selected_market():
         sel = pos_tree.selection()
@@ -1022,12 +1436,23 @@ def run_ui(api: TitanBackend) -> None:
         stat_vars[key] = sv
         tk.Label(f, textvariable=sv, fg=color, bg="#0d0d1a", font=bold_hd).pack()
     
-    graph_frame  = tk.Frame(tab_pnl, bg="#080810")
-    graph_frame.pack(fill="both", expand=True, padx=8, pady=4)
-    graph_canvas = tk.Canvas(graph_frame, bg="#06060f", highlightthickness=1,
-                              highlightbackground="#1a1a30")
-    graph_canvas.pack(fill="both", expand=True)
-    
+    def _pnl_chart_data_rows():
+        from datetime import datetime as _dt
+        pnl_summary = api.get_pnl_summary()
+        eq_hist      = pnl_summary["equity_history"]
+        bankroll_start = pnl_summary["bankroll_start"]
+        return [
+            (_dt.fromtimestamp(ts).strftime("%m/%d %H:%M"), f"${v - bankroll_start:+.4f}")
+            for ts, v in eq_hist
+        ]
+
+    pnl_chart_frame = ChartFrame(tab_pnl, get_data_rows=_pnl_chart_data_rows,
+                                 col_headers=("Date", "P&L $"))
+    pnl_chart_frame.pack(fill="both", expand=True, padx=8, pady=(4,0))
+
+    pnl_graph = PnLChart(pnl_chart_frame.chart_area)
+    pnl_graph.pack(fill="both", expand=True)
+
     hist_cols = ("Time","Type","Market","Side","WEntry$","Entry$","Exit$","P&L$","P&L%","Via","Bankroll$")
     hist_tree = ttk.Treeview(tab_pnl, columns=hist_cols, show="headings", height=7)
     hw = {"Time":65,"Type":48,"Market":240,"Side":90,"WEntry$":68,
@@ -1066,100 +1491,10 @@ def run_ui(api: TitanBackend) -> None:
                 return
     
     hist_tree.bind("<Double-1>", _on_hist_double_click)
-    
-    
+
     def draw_pnl_graph():
-        from datetime import datetime as _dt
-        graph_canvas.delete("all")
-        w = graph_canvas.winfo_width()
-        h = graph_canvas.winfo_height()
-        if w < 10 or h < 10: return
-
-        eq_hist = api.get_pnl_summary()["equity_history"]
-        if len(eq_hist) < 2:
-            graph_canvas.create_text(w//2, h//2,
-                text="No data yet — graph appears after first equity point",
-                fill="#334433", font=("Courier", 10), anchor="center")
-            return
-        timestamps = [ts for ts, _ in eq_hist]
-        points     = [v  for _,  v in eq_hist]
-
-        if len(points) < 2: return
-
-        pad_l, pad_r, pad_t, pad_b = 60, 20, 20, 40
-        plot_w = w - pad_l - pad_r
-        plot_h = h - pad_t - pad_b
-
-        min_v = min(points); max_v = max(points)
-        spread = max(max_v - min_v, 0.5)
-        min_v -= spread * 0.1; max_v += spread * 0.1
-
-        t_min = timestamps[0]; t_max = timestamps[-1]
-        t_span = max(t_max - t_min, 1)
-
-        def to_x(ts): return pad_l + ((ts - t_min) / t_span) * plot_w
-        def to_y(v):  return pad_t + (1 - (v - min_v) / (max_v - min_v)) * plot_h
-
-        # y gridlines + labels
-        for i in range(7):
-            val = min_v + (max_v - min_v) * i / 6
-            y   = to_y(val)
-            graph_canvas.create_line(pad_l, y, w-pad_r, y, fill="#1a1a28", dash=(2,4))
-            graph_canvas.create_text(pad_l-4, y, text=f"${val:.3f}",
-                                      fill="#335544", font=("Courier", 8), anchor="e")
-
-        _pnl = api.get_pnl_summary()
-        # bankroll-start baseline
-        y0 = to_y(_pnl["bankroll_start"])
-        graph_canvas.create_line(pad_l, y0, w-pad_r, y0, fill="#2a4a2a", dash=(4,3))
-
-        # x-axis datetime labels (5 ticks)
-        span_h = t_span / 3600
-        fmt    = "%H:%M" if span_h < 20 else "%m/%d %H:%M"
-        for i in range(5):
-            frac = i / 4
-            ts_tick = t_min + frac * t_span
-            x_tick  = pad_l + frac * plot_w
-            graph_canvas.create_line(x_tick, pad_t + plot_h, x_tick, pad_t + plot_h + 4, fill="#335544")
-            graph_canvas.create_text(x_tick, pad_t + plot_h + 14,
-                text=_dt.fromtimestamp(ts_tick).strftime(fmt),
-                fill="#335544", font=("Courier", 7), anchor="center")
-
-        # filled area
-        poly_pts = [pad_l, to_y(points[0])]
-        for ts, v in zip(timestamps, points): poly_pts += [to_x(ts), to_y(v)]
-        poly_pts += [to_x(timestamps[-1]), pad_t+plot_h, pad_l, pad_t+plot_h]
-        last_v   = points[-1]
-        fill_col = "#001a0a" if last_v >= _pnl["bankroll_start"] else "#1a0000"
-        graph_canvas.create_polygon(poly_pts, fill=fill_col, outline="", smooth=False)
-
-        # line segments
-        for i in range(1, len(points)):
-            x1 = to_x(timestamps[i-1]); y1 = to_y(points[i-1])
-            x2 = to_x(timestamps[i]);   y2 = to_y(points[i])
-            color = "#00ff55" if points[i] >= points[i-1] else "#ff5555"
-            graph_canvas.create_line(x1, y1, x2, y2, fill=color, width=2)
-
-        # start dot
-        graph_canvas.create_oval(pad_l-3, to_y(points[0])-3, pad_l+3, to_y(points[0])+3,
-                                  fill="#aaaaaa", outline="")
-        # end dot + label
-        x_end     = to_x(timestamps[-1])
-        y_end     = to_y(last_v)
-        cur_color = "#00ff55" if last_v >= _pnl["bankroll_start"] else "#ff5555"
-        graph_canvas.create_oval(x_end-4, y_end-4, x_end+4, y_end+4,
-                                  fill=cur_color, outline="#ffffff")
-
-        diff = last_v - _pnl["bankroll_start"]
-        open_value = sum(
-            pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0)
-            for pos in _open_pos_dict().values()
-        )
-        label = f"${last_v:.3f} ({diff:+.3f})"
-        if open_value > 0:
-            label += f"  [${_pnl["bankroll"]:.2f} cash + ${open_value:.2f} positions]"
-        graph_canvas.create_text(min(x_end+8, w-200), y_end,
-            text=label, fill=cur_color, font=("Courier", 9), anchor="w")
+        pnl_summary = api.get_pnl_summary()
+        pnl_graph.load(pnl_summary["equity_history"], pnl_summary["bankroll_start"])
     
     
     def refresh_pnl_tab():
@@ -1213,7 +1548,8 @@ def run_ui(api: TitanBackend) -> None:
                 ), tags=(tag,))
     
         draw_pnl_graph()
-    
+        pnl_chart_frame.refresh_panel()
+
     
     # ═══════════════════════════════════════════════════════════════════════════════
     #  TAB 5: WHALE ROSTER

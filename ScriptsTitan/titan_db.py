@@ -373,7 +373,7 @@ def save_rejects(rejects: list[str], ts: float) -> None:
         )
 
 
-def _decode_signal_row_payload(data: str) -> SignalDict | None:
+def _decode_signal_row_payload(data: str) -> "SignalDict | None":
     import json
 
     decoded = json.loads(data)
@@ -403,7 +403,7 @@ def load_latest_signals(limit: int = 200) -> list["SignalDict"]:
             "SELECT data FROM signals WHERE ts = ? ORDER BY id ASC LIMIT ?",
             (latest_ts, limit),
         ).fetchall()
-    signals: list[SignalDict] = []
+    signals: list["SignalDict"] = []
     for row in rows:
         signal_data = _decode_signal_row_payload(str(row[0]))
         if signal_data is not None:
@@ -421,7 +421,7 @@ def load_signal_history(limit: int = 200, min_score: float = 0.0, cid: str | Non
     with _connect() as cx:
         rows = cx.execute(query, (limit,)).fetchall()
 
-    out: list[SignalDict] = []
+    out: list["SignalDict"] = []
     for snapshot_ts, data in reversed(rows):
         typed_sig = _decode_signal_row_payload(str(data))
         if typed_sig is None:

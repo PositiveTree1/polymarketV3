@@ -245,7 +245,7 @@ class TitanAPI:
             "bankroll_start": BANKROLL_START,
             "session_pnl": env.session_pnl,
             "total_pnl": env.paper_bankroll - BANKROLL_START,
-            "equity_history": env.equity_history[-50:] if env.equity_history else [],
+            "equity_history": env.equity_history[-2000:] if env.equity_history else [],
             "cooldown_cids": dict(env.cooldown_cids),
             "active_market_cids": list(env.active_market_cids),
             "watchlist_size": len(env.watchlist),
