@@ -295,23 +295,21 @@ def check_whale_exits(cid_to_wallet_sets: dict, entry_times: dict | None = None)
 
     cid_wallet_buy_cash: dict = {}
     for key, pos in S.env().open_positions.items():
-        cid = pos.get("cid", key[0])
-        whale_buy_cash = pos.get("whale_buy_cash", {})
-        if whale_buy_cash:
-            cid_wallet_buy_cash[cid] = whale_buy_cash
+        cid = pos.cid or key[0]
+        if pos.whale_buy_cash:
+            cid_wallet_buy_cash[cid] = pos.whale_buy_cash
         else:
-            for w in pos.get("elite_wallets", []):
+            for w in pos.elite_wallets:
                 w_lower = w.lower()
                 if cid not in cid_wallet_buy_cash:
                     cid_wallet_buy_cash[cid] = {}
-                cid_wallet_buy_cash[cid][w_lower] = pos.get("bet", 0)
+                cid_wallet_buy_cash[cid][w_lower] = pos.bet
 
     asset_to_cid: dict = {}
     for key, pos in S.env().open_positions.items():
-        cid = pos.get("cid", key[0])
-        asset = pos.get("asset", "")
-        if asset:
-            asset_to_cid[asset] = cid
+        cid = pos.cid or key[0]
+        if pos.asset:
+            asset_to_cid[pos.asset] = cid
 
     for wallet in all_wallets:
         sells = fetch_wallet_sells(wallet, global_cutoff, limit=200)

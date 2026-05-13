@@ -162,7 +162,7 @@ def _handle_ws_resolution(token_id: str, price: float, event_type: str, raw: dic
     for (pos_cid, pos_outcome), pos in S.env().open_positions.items():
         if pos_cid == cid:
             outcome = pos_outcome
-            title   = pos.get("title", "?")
+            title   = pos.title or "?"
             break
 
     ws_resolved_cids[cid] = {
@@ -363,7 +363,7 @@ def sync_open_positions():
     Call this once on startup after load_state(), and again whenever a position opens.
     """
     for (cid, outcome), pos in S.env().open_positions.items():
-        asset = pos.get("asset", "")
+        asset = pos.asset
         tokens = []
         if asset:
             tokens.append(asset)

@@ -1,4 +1,4 @@
-"""
+﻿"""
 TITAN — Auto paper trading. Single-wallet edition. v10.
 
 EXIT PHILOSOPHY — FOLLOW THE WHALE (UPDATED v10):
@@ -22,81 +22,16 @@ v10 CHANGES:
 
 import time
 from datetime import datetime
-from typing import TypedDict
 import titan_state as S
 from titan_config import *
 import titan_config as C
+from titan_position import Position, get_effective_stop_loss
 from titan_market  import fetch_position_price_history, get_market, get_outcome_price, is_market_resolving, Market
 from titan_signals import classify_market, estimate_expected_value, _KNOWN_HEDGE_WALLETS, Signal
 from titan_wallet  import is_hft_wallet, record_whale_trade_performance
 from titan_persistence import save_state, save_whale_roster_async
 import titan_db as DB
 
-
-class _PositionRequired(TypedDict):
-    # ── identity ──────────────────────────────────────────────────────────────
-    title:              str
-    slug:               str
-    cid:                str
-    asset:              str
-    event_slug:         str
-    outcome:            str
-    mkt_type:           str
-    is_sports:          bool
-    market_url:         str
-
-    # ── strategy ─────────────────────────────────────────────────────────────
-    strategy:           str
-    tier:               str
-    stop_loss_pct:      float | None
-    score:              float
-    conviction_detail:  str
-    is_hft:             bool
-    is_conviction:      bool
-
-    # ── entry ─────────────────────────────────────────────────────────────────
-    entry_price:        float
-    cur_price:          float
-    avg_entry:          float
-    shares:             float
-    bet:                float
-    entry_ts:           float
-    entry_ts_str:       str
-    entry_ts_iso:       str
-    entry_date:         str
-    entry_time:         str
-
-    # ── whale info ────────────────────────────────────────────────────────────
-    whale_wallets:      list[str]
-    elite_wallets:      list[str]
-    elite_names:        list[str]
-    whale_buy_cash:     dict[str, float]
-    n_elite:            int
-    n_confluence:       int
-    ver_flow:           float
-
-    # ── market snapshot ───────────────────────────────────────────────────────
-    liq:                float
-    volume:             float
-    hrs_left:           float | None
-    end_date:           str
-
-    # ── runtime state ─────────────────────────────────────────────────────────
-    price_history:      list[tuple[float, float]]
-    peak_pnl_pct:       float
-    market_fail_count:  int
-    exits:              list
-    reason:             str | None
-    ev_info:            dict
-    entry_audit:        dict
-
-
-class Position(_PositionRequired, total=False):
-    # ── strategy-specific extras (optional) ───────────────────────────────────
-    whale_avg_entry:    float
-    drift_discount_pct: float | None
-    source_recent_wr:   float | None
-    price_history_source: str
 
 # Optional: resolution monitor (lazy import to avoid circular)
 def _get_ws_monitor():
@@ -180,28 +115,28 @@ def _get_current_price(pos: Position) -> tuple:
     Returns (price, is_resolving).
     """
     from titan_market import fetch_position_price_fast
-    cid     = pos.get("cid")
-    outcome = pos.get("outcome", "")
-    asset   = pos.get("asset", "")
-    title   = pos.get("title", "")
-    stale_price = pos.get("cur_price", pos.get("entry_price", 0.5))
+    cid     = pos.cid
+    outcome = pos.outcome
+    asset   = pos.asset
+    title   = pos.title
+    stale_price = pos.cur_price or pos.entry_price or 0.5
 
     fast_price = fetch_position_price_fast(cid, asset, outcome)
     if fast_price is not None:
         resolving = fast_price <= 0.03 or fast_price >= 0.97
-        pos["market_fail_count"] = 0
+        pos.market_fail_count = 0
         return fast_price, resolving
 
     cached = S.market_cache.get(cid)
     if cached and (time.time() - cached.get("ts", 0)) > C.MARKET_TTL:
         S.market_cache.pop(cid, None)
 
-    mkt, err = get_market(cid, title, asset=asset, slug=pos.get("slug", ""))
+    mkt, err = get_market(cid, title, asset=asset, slug=pos.slug)
     if not mkt:
-        pos["market_fail_count"] = pos.get("market_fail_count", 0) + 1
+        pos.market_fail_count += 1
         return stale_price, False
 
-    pos["market_fail_count"] = 0
+    pos.market_fail_count = 0
     resolving = is_market_resolving(mkt)
 
     if asset:
@@ -215,23 +150,6 @@ def _get_current_price(pos: Position) -> tuple:
     cur = get_outcome_price(mkt, outcome, asset=asset)
     return cur, resolving
 
-
-def _get_effective_stop_loss(pos: Position) -> float | None:
-    """
-    v10: Get the effective stop loss percentage for an open position.
-    Priority:
-      1. Per-position stop_loss_pct (set from signal's strategy config at entry)
-      2. Global STOP_LOSS_PCT if STOP_LOSS_ENABLED
-      3. None (no stop)
-    """
-    # Per-position stop loss from signal strategy config
-    pos_sl = pos.get("stop_loss_pct")
-    if pos_sl is not None:
-        return float(pos_sl)
-    # Fall back to global config if enabled
-    if C.STOP_LOSS_ENABLED:
-        return float(C.STOP_LOSS_PCT)
-    return None
 
 
 def _dt_fields(ts: float) -> dict:
@@ -256,15 +174,6 @@ def _with_latest_price_point(points: list[tuple[float, float]], now_t: float, pr
         points.append((now_t, price))
     return points
 
-
-def _set_position_price_history(pos: Position, points: list[tuple[float, float]], source: str) -> None:
-    pos["price_history"] = points
-    pos["price_history_source"] = source
-    S._log(
-        f"  Price history source [{source}] for {pos.get('title', '?')[:30]} "
-        f"asset={str(pos.get('asset', ''))[:20]} points={len(points)}",
-        "DIAG",
-    )
 
 
 def _build_market_url(event_slug: str = "", slug: str = "") -> str:
@@ -416,45 +325,45 @@ def _build_entry_audit(sig: Signal, cur: float, shares: float, bet: float, ev_in
 def _build_exit_audit(pos: Position, cur: float, pnl_pct: float, reason: str, now_t: float,
                       exit_proceeds: float, pnl_usdc_net: float) -> dict:
     dtf = _dt_fields(now_t)
-    hold_minutes = (now_t - pos.get("entry_ts", now_t)) / 60
+    hold_minutes = (now_t - pos.entry_ts) / 60
     http_traces = _collect_action_http_traces(
         since_ts=max(0.0, now_t - 30),
-        cid=pos.get("cid", ""),
-        asset=pos.get("asset", ""),
-        slug=pos.get("slug", ""),
-        event_slug=pos.get("event_slug", ""),
+        cid=pos.cid,
+        asset=pos.asset,
+        slug=pos.slug,
+        event_slug=pos.event_slug,
         limit=12,
     )
     return {
         "captured_at": dtf,
-        "market_url": pos.get("market_url") or _build_market_url(pos.get("event_slug", ""), pos.get("slug", "")),
+        "market_url": pos.market_url or _build_market_url(pos.event_slug, pos.slug),
         "exit_reason": reason,
         "hold_minutes": round(hold_minutes, 2),
         "pricing_snapshot": {
-            "entry_price": pos.get("entry_price"),
+            "entry_price": pos.entry_price,
             "exit_price": cur,
-            "shares": pos.get("shares"),
-            "bet": pos.get("bet"),
-            "gross_exit_value": round(cur * pos.get("shares", 0), 6),
+            "shares": pos.shares,
+            "bet": pos.bet,
+            "gross_exit_value": round(cur * pos.shares, 6),
             "net_exit_proceeds": round(exit_proceeds, 6),
             "fee_rate": TAKER_FEE_RATE,
             "pnl_usdc": round(pnl_usdc_net, 4),
             "pnl_pct": round(pnl_pct * 100, 2),
-            "peak_pnl_pct": pos.get("peak_pnl_pct"),
+            "peak_pnl_pct": pos.peak_pnl_pct,
         },
         "market_snapshot": {
-            "liq": pos.get("liq"),
-            "volume": pos.get("volume"),
-            "hrs_left": pos.get("hrs_left"),
-            "end_date": pos.get("end_date"),
-            "cur_price": pos.get("cur_price", cur),
-            "market_fail_count": pos.get("market_fail_count", 0),
+            "liq": pos.liq,
+            "volume": pos.volume,
+            "hrs_left": pos.hrs_left,
+            "end_date": pos.end_date,
+            "cur_price": pos.cur_price or cur,
+            "market_fail_count": pos.market_fail_count,
         },
-        "wallet_snapshot": _compact_wallet_snapshot(pos.get("elite_wallets", [])),
-        "price_history_tail": list(pos.get("price_history", [])[-120:]),
+        "wallet_snapshot": _compact_wallet_snapshot(pos.elite_wallets),
+        "price_history_tail": list(pos.price_history[-120:]),
         "http_traces": http_traces,
         "decision_summary": (
-            f"SELL {pos.get('outcome', '')} via {pos.get('strategy', '?')} "
+            f"SELL {pos.outcome} via {pos.strategy} "
             f"reason={reason} exit={cur:.4f} pnl={pnl_pct*100:+.1f}%"
         ),
     }
@@ -494,24 +403,22 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
     # STEP 1: Check exits on open positions
     # ─────────────────────────────────────────────────────────────────────────
     for key, pos in list(S.env().open_positions.items()):
-        cid      = pos.get("cid", key[0])
-        entry    = pos["entry_price"]
-        bet      = pos["bet"]
-        shares   = pos["shares"]
-        entry_ts = pos.get("entry_ts", 0)
+        cid      = pos.cid or key[0]
+        entry    = pos.entry_price
+        bet      = pos.bet
+        shares   = pos.shares
+        entry_ts = pos.entry_ts
 
         hold_minutes = (now_t - entry_ts) / 60
         if hold_minutes < C.MIN_HOLD_MINUTES:
             continue
 
         cur, resolving = _get_current_price(pos)
-        pos["cur_price"] = cur
+        pos.cur_price = cur
 
-        if "price_history" not in pos:
-            pos["price_history"] = []
-        pos["price_history"].append((now_t, cur))
-        if len(pos["price_history"]) > 1440:
-            del pos["price_history"][:-1440]
+        pos.price_history.append((now_t, cur))
+        if len(pos.price_history) > 1440:
+            del pos.price_history[:-1440]
 
         pnl_pct = (cur - entry) / max(entry, 0.001)
         reason  = None
@@ -523,11 +430,11 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             if ws_res:
                 ws_price = ws_res.get("price", cur)
                 cur = ws_price
-                pos["cur_price"] = cur
+                pos.cur_price = cur
                 pnl_pct = (cur - entry) / max(entry, 0.001)
                 reason = f"WS_RESOLVED price={cur:.4f} via={ws_res.get('event_type','?')}"
                 S._log(
-                    f"  📡 WS exit triggered: {pos.get('title','?')[:35]} "
+                    f"  📡 WS exit triggered: {pos.title[:35]} "
                     f"@ {cur:.4f} P&L={pnl_pct*100:+.1f}%",
                     "INFO"
                 )
@@ -539,7 +446,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         # (b) WHALE EXIT — follow the whale
         elif C.WHALE_EXIT_SELL and whale_exits.get(cid):
             exiting         = set(whale_exits[cid])
-            elite_entry_set = set(w.lower() for w in pos.get("elite_wallets", []))
+            elite_entry_set = set(w.lower() for w in pos.elite_wallets)
             matched_elite   = list(exiting & elite_entry_set)
 
             if matched_elite:
@@ -550,7 +457,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
                              (_wp.get("hft") or is_hft_wallet(_wp)))
                 ]
                 if non_hft_exiting:
-                    whale_losing = cur < pos.get("entry_price", entry) * 0.92
+                    whale_losing = cur < pos.entry_price * 0.92
                     early_noise  = whale_losing and pnl_pct > -0.05 and hold_minutes < 20
                     if not early_noise:
                         matched_names = [
@@ -560,19 +467,19 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
                         reason = f"WHALE_SOLD {matched_names}"
                     else:
                         S._log(
-                            f"  🐋 Early noise exit ignored: {pos['title'][:30]} "
+                            f"  🐋 Early noise exit ignored: {pos.title[:30]} "
                             f"pnl={pnl_pct*100:+.1f}% hold={hold_minutes:.0f}min",
                             "DIAG"
                         )
                 else:
                     hft_names = [S.env().wallet_cache.get(w, {}).get("name", w[:10]) for w in matched_elite[:2]]
-                    S._log(f"  ⚡ HFT/market-maker exit ignored: {hft_names} on {pos['title'][:30]}", "DIAG")
+                    S._log(f"  ⚡ HFT/market-maker exit ignored: {hft_names} on {pos.title[:30]}", "DIAG")
 
         # (c) PROFIT TARGET
         elif not reason and getattr(C, "PROFIT_TARGET_ENABLED", True) and pnl_pct >= C.PROFIT_TARGET_PCT:
             reason = f"PROFIT_TARGET {pnl_pct*100:.1f}%"
             S._log(
-                f"  💰 Profit target: {pos.get('title','?')[:35]} "
+                f"  💰 Profit target: {pos.title[:35]} "
                 f"P&L={pnl_pct*100:+.1f}% (target={C.PROFIT_TARGET_PCT*100:.0f}%)",
                 "INFO"
             )
@@ -583,65 +490,61 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         # consensus_basket has stop_loss_pct=-0.35 → soft -35% stop
         # Global STOP_LOSS_PCT is used if per-signal has no config
         if not reason:
-            eff_sl = _get_effective_stop_loss(pos)
+            eff_sl = get_effective_stop_loss(pos)
             if eff_sl is not None and pnl_pct <= eff_sl:
-                strat_tag = pos.get("strategy", "?")[:2].upper()
+                strat_tag = pos.strategy[:2].upper()
                 reason = f"STOP_LOSS[{strat_tag}] {pnl_pct*100:.1f}% (limit={eff_sl*100:.0f}%)"
                 S._log(
-                    f"  🛑 Stop loss [{strat_tag}]: {pos.get('title','?')[:35]} "
+                    f"  🛑 Stop loss [{strat_tag}]: {pos.title[:35]} "
                     f"P&L={pnl_pct*100:+.1f}% (limit={eff_sl*100:.0f}%)",
                     "INFO"
                 )
 
         # (e) Expiring soon
         if not reason:
-            mkt_check, _ = get_market(cid, pos.get("title"), asset=pos.get("asset",""), slug=pos.get("slug",""))
+            mkt_check, _ = get_market(cid, pos.title, asset=pos.asset, slug=pos.slug)
             if mkt_check:
-                pos["market_fail_count"] = 0
+                pos.market_fail_count = 0
                 hrs = mkt_check.get("hrs_left")
                 if hrs is not None and hrs < max(MIN_HOURS_LEFT, 0.35):
                     reason = "EXPIRING_SOON"
             else:
-                pos["market_fail_count"] = pos.get("market_fail_count", 0) + 1
-                fail_count = pos["market_fail_count"]
+                pos.market_fail_count += 1
+                fail_count = pos.market_fail_count
                 if fail_count >= 3:
-                    real_p = _try_fetch_resolution_price(
-                        cid, pos.get("asset", ""), pos.get("outcome", "")
-                    )
+                    real_p = _try_fetch_resolution_price(cid, pos.asset, pos.outcome)
                     if real_p is not None:
                         cur = real_p
-                        pos["cur_price"] = cur
+                        pos.cur_price = cur
                         pnl_pct = (cur - entry) / max(entry, 0.001)
                         if real_p <= 0.03 or real_p >= 0.97:
                             reason = f"MARKET_RESOLVED_CONFIRMED cur={cur:.3f}"
                             S._log(
-                                f"  📡 Fast resolution check: {pos.get('title','?')[:35]} @ ${cur:.4f}",
+                                f"  📡 Fast resolution check: {pos.title[:35]} @ ${cur:.4f}",
                                 "INFO"
                             )
                 if fail_count >= 10:
-                    stale_p = pos.get("cur_price", 0.5)
+                    stale_p = pos.cur_price
                     if stale_p <= 0.05 or stale_p >= 0.95:
                         reason = "MARKET_RESOLVED_OR_GONE"
                     elif fail_count >= 20:
-                        real_exit_price = _try_fetch_resolution_price(
-                            cid, pos.get("asset", ""), pos.get("outcome", "")
-                        )
+                        real_exit_price = _try_fetch_resolution_price(cid, pos.asset, pos.outcome)
                         if real_exit_price is not None:
                             cur = real_exit_price
-                            pos["cur_price"] = cur
+                            pos.cur_price = cur
                             pnl_pct = (cur - entry) / max(entry, 0.001)
                             S._log(
                                 f"  📡 Resolution price fetched from Data API: "
-                                f"{pos.get('title','?')[:30]} @ ${cur:.4f}",
+                                f"{pos.title[:30]} @ ${cur:.4f}",
                                 "INFO"
                             )
                         else:
-                            cur = pos.get("entry_price", entry)
-                            pos["cur_price"] = cur
+                            cur = pos.entry_price
+                            pos.cur_price = cur
                             pnl_pct = 0.0
                             S._log(
                                 f"  ⚠ MARKET_GONE with no real price — exiting at entry "
-                                f"to avoid phantom PnL: {pos.get('title','?')[:30]}",
+                                f"to avoid phantom PnL: {pos.title[:30]}",
                                 "WARN"
                             )
                         reason = "MARKET_GONE"
@@ -654,53 +557,50 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         if not reason and pnl_pct <= -0.70 and hold_minutes > 3:
             reason = f"CATASTROPHIC_LOSS {pnl_pct*100:.1f}% cur={cur:.3f}"
             S._log(
-                f"  🛑 Catastrophic loss guard: {pos.get('title','?')[:35]} "
+                f"  🛑 Catastrophic loss guard: {pos.title[:35]} "
                 f"P&L={pnl_pct*100:+.1f}% cur=${cur:.4f}",
                 "WARN"
             )
 
         # (h) STALE TREND REVERSAL EXIT
         if not reason and hold_minutes > 45:
-            price_hist = pos.get("price_history", [])
-            if len(price_hist) >= 4:
-                recent_prices = [p for _, p in price_hist[-4:]]
+            if len(pos.price_history) >= 4:
+                recent_prices = [p for _, p in pos.price_history[-4:]]
                 if all(recent_prices[i] <= recent_prices[i-1] for i in range(1, 4)):
                     trend_drop = (recent_prices[0] - recent_prices[-1]) / max(recent_prices[0], 0.01)
                     if trend_drop > 0.08 and pnl_pct < -0.15:
                         reason = f"STALE_TREND_REVERSAL drop={trend_drop*100:.0f}% pnl={pnl_pct*100:.0f}%"
                         S._log(
-                            f"  📉 Stale trend reversal exit: {pos.get('title','?')[:35]} "
+                            f"  📉 Stale trend reversal exit: {pos.title[:35]} "
                             f"P&L={pnl_pct*100:+.1f}% price drop={trend_drop*100:.0f}%",
                             "INFO"
                         )
 
         # (i) Stale-price resolution check
-        if not reason and pos.get("market_fail_count", 0) >= 5:
-            stale_p = pos.get("cur_price", 0.5)
+        if not reason and pos.market_fail_count >= 5:
+            stale_p = pos.cur_price
             if 0.05 < stale_p < 0.95:
-                real_p = _try_fetch_resolution_price(
-                    cid, pos.get("asset", ""), pos.get("outcome", "")
-                )
+                real_p = _try_fetch_resolution_price(cid, pos.asset, pos.outcome)
                 if real_p is not None and (real_p >= 0.97 or real_p <= 0.03):
                     cur = real_p
-                    pos["cur_price"] = cur
+                    pos.cur_price = cur
                     pnl_pct = (cur - entry) / max(entry, 0.001)
                     reason = f"MARKET_RESOLVED_CONFIRMED cur={cur:.3f}"
                     S._log(
                         f"  📡 Stale-price resolution confirmed: "
-                        f"{pos.get('title','?')[:35]} @ ${cur:.4f} (was ${stale_p:.4f})",
+                        f"{pos.title[:35]} @ ${cur:.4f} (was ${stale_p:.4f})",
                         "INFO"
                     )
 
         if reason:
-            pos["reason"] = reason
+            pos.reason = reason
             to_close.append((key, pos, cur, pnl_pct, reason))
 
     # Process closes
     for key, pos, cur, pnl_pct, reason in to_close:
         cid_out       = key[0]
-        shares        = pos["shares"]
-        bet           = pos["bet"]
+        shares        = pos.shares
+        bet           = pos.bet
         exit_proceeds = cur * shares * (1 - TAKER_FEE_RATE)
         pnl_usdc_net  = exit_proceeds - bet
         sell_dtf      = _dt_fields(now_t)
@@ -710,12 +610,12 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         S.env().session_pnl    += pnl_usdc_net
 
         trade_record = {
-            "cid":           pos.get("cid", key[0]),
-            "asset":         pos.get("asset", ""),
+            "cid":           pos.cid or key[0],
+            "asset":         pos.asset,
             "type":          "SELL",
-            "title":         pos["title"],
-            "outcome":       pos["outcome"],
-            "entry_price":   pos["entry_price"],
+            "title":         pos.title,
+            "outcome":       pos.outcome,
+            "entry_price":   pos.entry_price,
             "exit_price":    cur,
             "shares":        shares,
             "bet":           bet,
@@ -727,29 +627,24 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             "ts_iso":        sell_dtf["ts_iso"],
             "date":          sell_dtf["date"],
             "time":          sell_dtf["time"],
-            "entry_ts":      pos.get("entry_ts"),
-            "entry_ts_str":  pos.get("entry_ts_str"),
-            "entry_ts_iso":  pos.get("entry_ts_iso"),
-            "entry_date":    pos.get("entry_date"),
-            "entry_time":    pos.get("entry_time"),
+            "entry_ts":      pos.entry_ts,
             "exit_ts":       now_t,
             "exit_ts_str":   sell_dtf["ts_str"],
             "exit_ts_iso":   sell_dtf["ts_iso"],
             "exit_date":     sell_dtf["date"],
             "exit_time":     sell_dtf["time"],
             "bankroll":      round(S.env().paper_bankroll, 4),
-            "tier":          pos.get("tier", "?"),
-            "strategy":      pos.get("strategy", "?"),
-            "elite_wallets": pos.get("elite_wallets", []),
-            "whale_buy_cash": pos.get("whale_buy_cash", {}),
+            "tier":          pos.tier,
+            "strategy":      pos.strategy,
+            "elite_wallets": pos.elite_wallets,
+            "whale_buy_cash": pos.whale_buy_cash,
             "whale_names":   [
                 S.env().wallet_cache.get(w, {}).get("name", w[:10]+"…")
-                for w in pos.get("elite_wallets", [])[:3]
+                for w in pos.elite_wallets[:3]
             ],
-            "avg_entry":     pos.get("avg_entry", pos.get("entry_price", 0)),
-            "market_url":    pos.get("market_url"),
-            # price_history is stored in titan_state.db (price_history table)
-            "entry_audit":   pos.get("entry_audit"),
+            "avg_entry":     pos.avg_entry or pos.entry_price,
+            "market_url":    pos.market_url,
+            "entry_audit":   pos.entry_audit,
             "exit_audit":    exit_audit,
         }
         DB.append_trade(trade_record)
@@ -764,14 +659,14 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         if _ws_unsub:
             _ws_unsub.unsubscribe_position(cid_out)
 
-        record_whale_trade_performance(pos.get("elite_wallets", []), pnl_usdc_net, won=(pnl_usdc_net >= 0))
+        record_whale_trade_performance(pos.elite_wallets, pnl_usdc_net, won=(pnl_usdc_net >= 0))
 
         emoji = "✅" if pnl_usdc_net >= 0 else "❌"
         whale_str = ", ".join(trade_record["whale_names"])
-        strat_tag = pos.get("strategy", "?")[:2].upper()
+        strat_tag = pos.strategy[:2].upper()
         events.append((
             "CLOSE",
-            f"{emoji} SELL [{strat_tag}]: {pos['title'][:30]} [{pos['outcome']}] "
+            f"{emoji} SELL [{strat_tag}]: {pos.title[:30]} [{pos.outcome}] "
             f"@ ${cur:.4f} | P&L ${pnl_usdc_net:+.3f} ({pnl_pct*100:+.1f}%) | {reason} | via {whale_str}",
             "#00ff55" if pnl_usdc_net >= 0 else "#ff5555"
         ))
@@ -790,21 +685,20 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
 
     open_event_slugs: dict = {}
     for pos in S.env().open_positions.values():
-        es = pos.get("event_slug", "")
-        if es:
-            open_event_slugs[es] = open_event_slugs.get(es, 0) + 1
+        if pos.event_slug:
+            open_event_slugs[pos.event_slug] = open_event_slugs.get(pos.event_slug, 0) + 1
     opening_event_slugs: dict = {}
 
     whale_position_counts: dict = {}
     for pos in S.env().open_positions.values():
-        for w in pos.get("elite_wallets", []):
+        for w in pos.elite_wallets:
             whale_position_counts[w] = whale_position_counts.get(w, 0) + 1
     opening_whale_counts: dict = {}
 
     # v10: Track open positions per strategy
     open_per_strategy: dict = {}
     for pos in S.env().open_positions.values():
-        strat = pos.get("strategy", "consensus_basket").split("+")[0]
+        strat = pos.strategy.split("+")[0] or "consensus_basket"
         open_per_strategy[strat] = open_per_strategy.get(strat, 0) + 1
 
     for sig in signals:
@@ -832,7 +726,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         strat_max = int(strat_cfg.get("max_positions", C.MAX_OPEN_POSITIONS))
         cur_strat_open = open_per_strategy.get(strat, 0)
         opening_strat  = sum(1 for s in opening_this_cycle
-                             if S.env().open_positions.get(s, {}).get("strategy", "").startswith(strat))
+                             if (p := S.env().open_positions.get(s)) and p.strategy.startswith(strat))
         if cur_strat_open + opening_strat >= strat_max:
             S._log(f"  🚫 Strategy [{strat}] at capacity ({strat_max} positions)", "DIAG")
             continue
@@ -960,62 +854,51 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         entry_audit = _build_entry_audit(sig, cur, shares, bet, ev_info, now_t, S.env().paper_bankroll)
 
         price_history = _with_latest_price_point(fetch_position_price_history(asset), now_t, cur)
-        pos: Position = {
-            "title":             title,
-            "slug":              resolved_slug,
-            "cid":               cid,
-            "asset":             asset,
-            "event_slug":        event_slug,
-            "outcome":           outcome,
-            "tier":              tier,
-            "strategy":          strat,   # v10: track which strategy opened this position
-            "stop_loss_pct":     sig_stop_loss,  # v10: per-signal stop loss
-            "score":             sig.score,
-            "entry_price":       cur,
-            "cur_price":         cur,
-            "shares":            shares,
-            "bet":               bet,
-            "entry_ts":          now_t,
-            "entry_ts_str":      buy_dtf["ts_str"],
-            "entry_ts_iso":      buy_dtf["ts_iso"],
-            "entry_date":        buy_dtf["date"],
-            "entry_time":        buy_dtf["time"],
-            "whale_wallets":     all_whale_addrs,
-            "elite_wallets":     elite_wallet_addrs,
-            "elite_names":       elite_names,
-            "whale_buy_cash":    whale_buy_cash,
-            "n_elite":           sig.n_elite,
-            "n_confluence":      sig.n_confluence,
-            "is_hft":            sig.is_hft,
-            "is_conviction":     is_conviction,
-            "mkt_type":          mkt_type,
-            "is_sports":         sig.is_sports,
-            "conviction_detail": sig.conviction_detail,
-            "ev_info":           ev_info,
-            "avg_entry":         sig.avg_entry,
-            "ver_flow":          sig.ver_flow,
-            "exits":             [],
-            "reason":            None,
-            "market_fail_count": 0,
-            "price_history":     price_history,
-            "peak_pnl_pct":      0.0,
-            "liq":               sig.mkt.get("liq", 0),
-            "volume":            sig.mkt.get("volume", 0),
-            "hrs_left":          sig.mkt.get("hrs_left"),
-            "end_date":          sig.mkt.get("end_date", ""),
-            "market_url":        market_url,
-            "entry_audit":       entry_audit,
-        }
-        _set_position_price_history(pos, price_history, "clob_api_open")
-
-        # v10: drift_discount strategy — store whale avg entry for reference
-        if strat == "drift_discount":
-            pos["whale_avg_entry"] = sig.avg_entry
-            pos["drift_discount_pct"] = sig.drift_discount_pct
-
-        # v10: recent_form strategy — store source whale recent win rate
-        if strat == "recent_form":
-            pos["source_recent_wr"] = sig.source_recent_wr
+        pos = Position(
+            key=               str(key),
+            title=             title,
+            slug=              resolved_slug,
+            cid=               cid,
+            asset=             asset,
+            event_slug=        event_slug,
+            outcome=           outcome,
+            tier=              tier,
+            strategy=          strat,
+            stop_loss_pct=     sig_stop_loss or 0.0,
+            score=             sig.score,
+            entry_price=       cur,
+            cur_price=         cur,
+            current_price=     cur,
+            shares=            shares,
+            bet=               bet,
+            entry_ts=          now_t,
+            whale_wallets=     all_whale_addrs,
+            elite_wallets=     elite_wallet_addrs,
+            elite_names=       elite_names,
+            whale_buy_cash=    whale_buy_cash,
+            n_elite=           sig.n_elite,
+            n_confluence=      sig.n_confluence,
+            is_hft=            sig.is_hft,
+            is_conviction=     is_conviction,
+            mkt_type=          mkt_type,
+            is_sports=         sig.is_sports,
+            conviction_detail= sig.conviction_detail,
+            ev_info=           ev_info,
+            avg_entry=         sig.avg_entry,
+            ver_flow=          sig.ver_flow,
+            market_fail_count= 0,
+            peak_pnl_pct=      0.0,
+            liq=               float(sig.mkt.get("liq") or 0),
+            volume=            float(sig.mkt.get("volume") or 0),
+            hrs_left=          float(sig.mkt.get("hrs_left") or 0),
+            end_date=          str(sig.mkt.get("end_date", "")),
+            market_url=        market_url,
+            entry_audit=       entry_audit,
+            whale_avg_entry=   sig.avg_entry if strat == "drift_discount" else 0.0,
+            drift_discount_pct=float(sig.drift_discount_pct or 0) if strat == "drift_discount" else 0.0,
+            source_recent_wr=  float(sig.source_recent_wr or 0) if strat == "recent_form" else 0.0,
+        )
+        pos.set_price_history(price_history, "clob_api_open")
 
         S.env().open_positions[key]    = pos
         S.env().active_market_cids.add(cid)

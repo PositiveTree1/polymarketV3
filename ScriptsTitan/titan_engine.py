@@ -143,7 +143,7 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
     # Whale exit monitoring
     cid_to_wallet_sets = {cid: set(ws) for cid, ws in S.env().position_whale_map.items()}
     entry_times = {
-        pos.get("cid", key[0]): pos.get("entry_ts", 0)
+        (pos.cid or key[0]): pos.entry_ts
         for key, pos in S.env().open_positions.items()
     }
     whale_exits = {}
@@ -152,8 +152,8 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
     elif S.env().open_positions:
         rebuilt = {}
         for key, pos in S.env().open_positions.items():
-            cid = pos.get("cid", key[0])
-            whales = set(pos.get("elite_wallets", []) + pos.get("whale_wallets", []))
+            cid = pos.cid or key[0]
+            whales = set(pos.elite_wallets + pos.whale_wallets)
             if whales:
                 rebuilt[cid] = whales
         if rebuilt:
@@ -186,7 +186,7 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
 
     # Sample portfolio equity every cycle
     open_value = sum(
-        pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0)
+        (pos.cur_price or pos.entry_price) * pos.shares
         for pos in S.env().open_positions.values()
     )
     current_equity = S.env().paper_bankroll + open_value
@@ -386,7 +386,7 @@ def get_system_snapshot() -> str:
     total_pnl = S.env().paper_bankroll - BANKROLL_START
     win_rate  = st.win_rate * 100
     open_value = sum(
-        pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0)
+        (pos.cur_price or pos.entry_price) * pos.shares
         for pos in S.env().open_positions.values()
     )
     current_equity = S.env().paper_bankroll + open_value
@@ -406,16 +406,16 @@ def get_system_snapshot() -> str:
         "", "[OPEN POSITIONS]",
     ]
     for key, pos in S.env().open_positions.items():
-        entry = pos.get("entry_price", 0)
-        cur   = pos.get("cur_price", entry)
+        entry = pos.entry_price
+        cur   = pos.cur_price or entry
         pnl   = (cur - entry) / max(entry, 0.001) * 100
-        held  = (time.time() - pos.get("entry_ts", time.time())) / 60
-        hft   = "⚡" if pos.get("is_hft") else ""
-        conv  = "💎" if pos.get("is_conviction") else ""
-        strat = pos.get("strategy", "?")[:2].upper()
+        held  = (time.time() - pos.entry_ts) / 60 if pos.entry_ts else 0.0
+        hft   = "⚡" if pos.is_hft else ""
+        conv  = "💎" if pos.is_conviction else ""
+        strat = pos.strategy[:2].upper()
         lines.append(
-            f"  {conv}{hft}[{pos.get('tier','?')}|{strat}] {pos.get('title','?')[:44]} / {key[1] if isinstance(key,tuple) else '?'}"
-            f"  P&L:{pnl:+.1f}%  Held:{held:.0f}min  ${pos.get('bet',0):.2f}"
+            f"  {conv}{hft}[{pos.tier}|{strat}] {pos.title[:44]} / {key[1] if isinstance(key,tuple) else '?'}"
+            f"  P&L:{pnl:+.1f}%  Held:{held:.0f}min  ${pos.bet:.2f}"
         )
     lines += ["", "[ELITE ROSTER]"]
     elites = sorted(

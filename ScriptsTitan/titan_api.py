@@ -3,11 +3,13 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 from typing import TYPE_CHECKING, Callable, TypedDict
+from titan_position import normalize_closed_position
 
 if TYPE_CHECKING:
     from titan_signals import SignalDict
+    from titan_position import Position
     from titan_types import (
-        AlertDict, ErrorDict, PositionBriefDict, WhaleDict,
+        AlertDict, ErrorDict, WhaleDict,
         PnlSummaryDict, TradeStatsDict, PortfolioOverviewDict, TradeRecordDict,
     )
 
@@ -22,6 +24,7 @@ class EngineStatus(TypedDict):
     watchlist_size:     int
     recent_error_count: int
     auth_enabled:       bool
+
 
 
 # ── decorator ─────────────────────────────────────────────────────────────────
@@ -116,83 +119,34 @@ class TitanAPI:
         }
 
     @mcp_tool(
-        description=(
-            "Returns open Polymarket positions. "
-            "brief=true (default): clean summary fields only. "
-            "brief=false: full raw position dict."
-        ),
-        input_schema={
-            "brief": {"type": "boolean", "description": "Return summary fields only (default true)"},
-        },
+        description="Returns open Polymarket positions as consolidated position dicts.",
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_positions(self, brief: bool = True) -> list[PositionBriefDict]:
+    def get_positions(self) -> list[Position]:
         import titan_state as _TS
-        import titan_db as _DB
-        from titan_market import fetch_position_price_history
-        positions = []
-        for k, v in _TS.env().open_positions.items():
-            if brief:
-                entry = v.get("entry_price", 0)
-                cur   = v.get("cur_price", entry)
-                shares = v.get("shares", 0)
-                held_min = round((time.time() - v.get("entry_ts", time.time())) / 60, 1)
-                pnl_usd = round((cur - entry) * shares, 4)
-                pnl_pct = round((cur - entry) / max(entry, 0.001) * 100, 2)
-                whales = v.get("elite_names") or [w[:10] for w in v.get("elite_wallets", [])]
-                positions.append({
-                    "key": str(k),
-                    "title": v.get("title", ""),
-                    "outcome": v.get("outcome", ""),
-                    "strategy": v.get("strategy", ""),
-                    "tier": v.get("tier", ""),
-                    "entry_price": entry,
-                    "current_price": cur,
-                    "bet": v.get("bet", 0),
-                    "shares": shares,
-                    "pnl_pct": pnl_pct,
-                    "pnl_usd": pnl_usd,
-                    "held_minutes": held_min,
-                    "source_whales": whales,
-                    "risk_flag": v.get("risk_flag", ""),
-                })
-            else:
-                if v.get("price_history") and not v.get("price_history_source"):
-                    v["price_history_source"] = "unknown_existing"
-                if not v.get("price_history"):
-                    asset = str(v.get("asset", "") or "")
-                    if asset:
-                        price_history = fetch_position_price_history(asset)
-                        if price_history:
-                            v["price_history"] = price_history
-                            v["price_history_source"] = "clob_api_lazy"
-                            _TS._log(
-                                f"📈 Price history source [clob_api_lazy] for {str(v.get('title', '?'))[:30]} "
-                                f"asset={asset[:20]} points={len(price_history)}",
-                                "DIAG",
-                            )
-                            _DB.upsert_price_history(asset, price_history)
-                positions.append({"key": str(k), **v})
+        from titan_position import Position as _Position
+        positions: list[_Position] = []
+        for v in _TS.env().open_positions.values():
+            if not isinstance(v, _Position):
+                _TS._log(f"⚠ open_positions contains non-Position value: {type(v)} — skipping", "WARN")
+                continue
+            v.ensure_price_history()
+            positions.append(v)
         return positions
 
     @mcp_tool(
-        description="Returns closed positions (SELL records) enriched with price_history from DB.",
+        description="Returns closed positions as consolidated position dicts enriched with price_history from DB.",
         input_schema={"limit": {"type": "integer", "description": "Max number of closed positions to return (default 200)"}},
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_closed_positions(self, limit: int = 200) -> list[TradeRecordDict]:
+    def get_closed_positions(self, limit: int = 200) -> list[Position]:
         import titan_db as _DB
         sells = [t for t in _DB.load_trade_history(limit=limit) if t.get("type") == "SELL"]
-        result = []
+        result: list[Position] = []
         for t in reversed(sells):
             asset = str(t.get("asset") or "")
             ph = _DB.load_price_history(asset) if asset else []
-            result.append({
-                **t,
-                "price_history": ph,
-                "price_history_source": "db_closed" if ph else "none",
-                "price_history_error": "old trade, no asset" if not asset else None,
-            })
+            result.append(normalize_closed_position(t, ph))
         return result
 
     @mcp_tool(
@@ -298,7 +252,7 @@ class TitanAPI:
         from titan_config import BANKROLL_START
         env = _TS.env()
         open_value = sum(
-            pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0)
+            (pos.cur_price or pos.entry_price) * pos.shares
             for pos in env.open_positions.values()
         )
         recent_errors = sum(1 for l in env.SYSTEM_LOGS[-50:] if "ERROR" in l or "CRITICAL" in l)
@@ -586,18 +540,18 @@ class TitanAPI:
         if _w().open_positions:
             for key, pos in _w().open_positions.items():
                 cid, outcome = key if isinstance(key, tuple) else (str(key), "?")
-                entry    = pos.get("entry_price", 0)
-                cur      = pos.get("cur_price", entry)
+                entry    = pos.entry_price
+                cur      = pos.cur_price or entry
                 pnl_pct  = (cur - entry) / max(entry, 0.001) * 100
-                pnl_abs  = (cur - entry) * pos.get("shares", 0)
-                held_min = (_t.time() - pos.get("entry_ts", _t.time())) / 60
-                whales   = pos.get("elite_names", []) or [w[:10]+"…" for w in pos.get("elite_wallets", [])]
+                pnl_abs  = (cur - entry) * pos.shares
+                held_min = (_t.time() - pos.entry_ts) / 60 if pos.entry_ts else 0.0
+                whales   = pos.elite_names or [w[:10]+"…" for w in pos.elite_wallets]
                 lines.append(
-                    f"  [{pos.get('tier','?')}|{pos.get('score',0):.0f}pt|{'HFT' if pos.get('is_hft') else '-'}] "
-                    f"{pos.get('title','?')[:60]} [{outcome}] "
-                    f"WEntry=${pos.get('avg_entry',entry):.4f} Entry=${entry:.4f} Now=${cur:.4f} "
-                    f"PnL={pnl_pct:+.1f}%(${pnl_abs:+.3f}) Bet=${pos.get('bet',0):.2f} "
-                    f"Shares={pos.get('shares',0):.2f} Held={held_min:.0f}m via={','.join(whales)}"
+                    f"  [{pos.tier}|{pos.score:.0f}pt|{'HFT' if pos.is_hft else '-'}] "
+                    f"{pos.title[:60]} [{outcome}] "
+                    f"WEntry=${pos.avg_entry or entry:.4f} Entry=${entry:.4f} Now=${cur:.4f} "
+                    f"PnL={pnl_pct:+.1f}%(${pnl_abs:+.3f}) Bet=${pos.bet:.2f} "
+                    f"Shares={pos.shares:.2f} Held={held_min:.0f}m via={','.join(whales)}"
                 )
         else:
             lines.append("  (no open positions)")
@@ -686,18 +640,18 @@ class TitanAPI:
         if _w().open_positions:
             for key, pos in _w().open_positions.items():
                 cid, outcome = key if isinstance(key, tuple) else (str(key), "?")
-                entry    = pos.get("entry_price", 0)
-                cur      = pos.get("cur_price", entry)
+                entry    = pos.entry_price
+                cur      = pos.cur_price or entry
                 pnl_pct  = (cur - entry) / max(entry, 0.001) * 100
-                pnl_abs  = (cur - entry) * pos.get("shares", 0)
-                held_min = (_t.time() - pos.get("entry_ts", _t.time())) / 60
-                whales   = pos.get("elite_names", []) or [w[:10]+"…" for w in pos.get("elite_wallets", [])]
+                pnl_abs  = (cur - entry) * pos.shares
+                held_min = (_t.time() - pos.entry_ts) / 60 if pos.entry_ts else 0.0
+                whales   = pos.elite_names or [w[:10]+"…" for w in pos.elite_wallets]
                 lines += [
-                    f"  [{pos.get('tier','?')}] {pos.get('title','?')[:60]}",
-                    f"    Outcome: {outcome}  Score: {pos.get('score',0):.0f}  HFT: {'YES' if pos.get('is_hft') else 'NO'}",
-                    f"    Whale Entry: ${pos.get('avg_entry',entry):.4f}  Our Entry: ${entry:.4f}  "
+                    f"  [{pos.tier}] {pos.title[:60]}",
+                    f"    Outcome: {outcome}  Score: {pos.score:.0f}  HFT: {'YES' if pos.is_hft else 'NO'}",
+                    f"    Whale Entry: ${pos.avg_entry or entry:.4f}  Our Entry: ${entry:.4f}  "
                     f"Now: ${cur:.4f}  P&L: {pnl_pct:+.1f}% (${pnl_abs:+.3f})",
-                    f"    Bet: ${pos.get('bet',0):.2f}  Shares: {pos.get('shares',0):.2f}  "
+                    f"    Bet: ${pos.bet:.2f}  Shares: {pos.shares:.2f}  "
                     f"Held: {held_min:.0f}min",
                     f"    Elite Whales: {', '.join(whales)}",
                     sep2,

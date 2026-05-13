@@ -13,54 +13,22 @@ from titan_config import STATE_FILE, WHALE_FILE, STATE_DB, BANKROLL_START, SEED_
 from titan_wallet import WalletProfile
 
 
-def _format_ts_str(ts_value: float | int | str | None) -> str | None:
-    try:
-        if ts_value is None:
-            return None
-        return datetime.fromtimestamp(float(ts_value)).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return None
-
-
-def _normalize_ts_fields(record: dict, field_pairs: list[tuple[str, str]]) -> dict:
-    normalized = dict(record)
-    for ts_field, ts_str_field in field_pairs:
-        formatted = _format_ts_str(normalized.get(ts_field))
-        if formatted is not None:
-            normalized[ts_str_field] = formatted
-    return normalized
-
-
-def _set_position_price_history(pos: dict, points: list[tuple[float, float]], source: str) -> None:
-    pos["price_history"] = points
-    pos["price_history_source"] = source
-    S._log(
-        f"📈 Price history source [{source}] for {str(pos.get('title', '?'))[:30]} "
-        f"asset={str(pos.get('asset', ''))[:20]} points={len(points)}",
-        "DIAG",
-    )
-
-
 def save_state():
     try:
         env = S.env()
 
-        # Flush time-series data to SQLite before stripping from positions
         for pos in env.open_positions.values():
-            ph = pos.get("price_history")
-            asset = str(pos.get("asset", "") or "")
-            if ph and asset:
-                DB.upsert_price_history(asset, ph)
+            if pos.price_history and pos.asset:
+                DB.upsert_price_history(pos.asset, pos.price_history)
 
         if env.watchlist:
             DB.upsert_watchlist(env.watchlist)
 
-        # Build a lean copy of open_positions without price_history
         lean_positions = {}
         for k, pos in env.open_positions.items():
-            lean_pos = {key: val for key, val in pos.items() if key != "price_history"}
-            lean_pos = _normalize_ts_fields(lean_pos, [("entry_ts", "entry_ts_str")])
-            lean_positions[f"{k[0]}|||{k[1]}"] = lean_pos
+            d = pos.to_dict()
+            d.pop("price_history", None)
+            lean_positions[f"{k[0]}|||{k[1]}"] = d
 
         state = {
             "bankroll":           env.paper_bankroll,
@@ -151,33 +119,29 @@ def _load_trading_state():
             _rebuild_trade_stats(env)
             DB.upsert_trade_stats(env.trade_stats)
 
+        from titan_position import Position
         raw = state.get("open_positions", {})
         env.open_positions = {}
         skipped = 0
-        for composite_key, pos in raw.items():
+        for composite_key, pos_dict in raw.items():
             parts = composite_key.split("|||", 1)
             if len(parts) == 2:
-                env.open_positions[(parts[0], parts[1])] = pos
+                env.open_positions[(parts[0], parts[1])] = Position.from_dict(pos_dict)
             else:
                 skipped += 1
                 S._log(f"📂 Skipped malformed position key: {composite_key!r}", "WARN")
 
         for key, pos in env.open_positions.items():
-            cid = pos.get("cid", key[0])
-            env.active_market_cids.add(cid)
-            asset = str(pos.get("asset", "") or "")
+            env.active_market_cids.add(pos.cid or key[0])
+            asset = pos.asset
             ph = DB.load_price_history(asset) if asset else []
             price_history_source = "db_restore" if ph else "none"
-            if not ph:
-                if asset:
-                    ph = fetch_position_price_history(asset)
-                    if ph:
-                        DB.upsert_price_history(asset, ph)
-                        price_history_source = "clob_api_restore"
-            if ph:
-                _set_position_price_history(pos, ph, price_history_source)
-            else:
-                _set_position_price_history(pos, [], "none")
+            if not ph and asset:
+                ph = fetch_position_price_history(asset)
+                if ph:
+                    DB.upsert_price_history(asset, ph)
+                    price_history_source = "clob_api_restore"
+            pos.set_price_history(ph, price_history_source)
 
         n_pos = len(env.open_positions)
         if n_pos:

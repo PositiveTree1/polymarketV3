@@ -15,8 +15,9 @@ from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from titan_signals import SignalDict
+    from titan_position import Position
     from titan_types import (
-        AlertDict, ErrorDict, PositionBriefDict, WhaleDict,
+        AlertDict, ErrorDict, WhaleDict,
         PnlSummaryDict, TradeStatsDict, PortfolioOverviewDict, TradeRecordDict,
     )
 
@@ -252,8 +253,12 @@ class TitanClient:
     def status(self) -> dict:
         return self._call_tool("status")  # type: ignore[return-value]
 
-    def get_positions(self, brief: bool = True) -> list[PositionBriefDict]:
-        return self._call_tool("get_positions", {"brief": brief})  # type: ignore[return-value]
+    def get_positions(self) -> list[Position]:
+        from titan_position import Position as _Position
+        raw = self._call_tool("get_positions")
+        if isinstance(raw, list):
+            return [_Position.from_dict(p) if isinstance(p, dict) else p for p in raw]
+        return []
 
     def list_tools(self) -> list[dict]:
         return self._list_tools_raw()
@@ -261,8 +266,12 @@ class TitanClient:
     def call_tool(self, name: str, arguments: dict | None = None) -> object:
         return self._call_tool(name, arguments)  # type: ignore[return-value]
 
-    def get_closed_positions(self, limit: int = 200) -> list[TradeRecordDict]:
-        return self._call_tool("get_closed_positions", {"limit": limit})  # type: ignore[return-value]
+    def get_closed_positions(self, limit: int = 200) -> list[Position]:
+        from titan_position import Position as _Position
+        raw = self._call_tool("get_closed_positions", {"limit": limit})
+        if isinstance(raw, list):
+            return [_Position.from_dict(p) if isinstance(p, dict) else p for p in raw]
+        return []
 
     def get_signals(self, min_score: float = 0.0) -> list[SignalDict]:
         return self._call_tool("get_signals", {"min_score": min_score})  # type: ignore[return-value]

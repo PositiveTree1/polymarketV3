@@ -19,23 +19,6 @@ class ErrorDict(TypedDict):
     message: str
 
 
-class PositionBriefDict(TypedDict):
-    key:          str
-    title:        str
-    outcome:      str
-    strategy:     str
-    tier:         str
-    entry_price:  float
-    current_price: float
-    bet:          float
-    shares:       float
-    pnl_pct:      float
-    pnl_usd:      float
-    held_minutes: float
-    source_whales: list[str]
-    risk_flag:    str
-
-
 class WhaleDict(TypedDict):
     # identity (key injected by get_whales)
     wallet:             str
@@ -134,6 +117,8 @@ class _TradeRecordRequired(TypedDict):
 
 
 class TradeRecordDict(_TradeRecordRequired, total=False):
+    slug:           str
+    event_slug:     str
     exit_price:     float
     exit_ts:        float
     pnl_usdc:       float

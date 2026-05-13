@@ -51,14 +51,13 @@ class TelegramNotifier:
             print(f"Telegram connection error: {e}")
             return False
 
-    def notify_buy(self, pos: dict, s_name: str = "Whale Mode"):
-        """Send formatted buy alert."""
-        title   = self._escape(pos.get('title', 'Unknown Market')[:80])
-        side    = self._escape(pos.get('outcome', '?'))
-        entry   = self._escape(f"{pos.get('entry_price', 0):.4f}")
-        bet     = self._escape(f"{pos.get('bet', 0):.2f}")
-        tier    = self._escape(pos.get('tier', 'SINGLE'))
-        score   = self._escape(f"{pos.get('score', 0):.0f}")
+    def notify_buy(self, pos, s_name: str = "Whale Mode"):
+        title   = self._escape(pos.title[:80])
+        side    = self._escape(pos.outcome)
+        entry   = self._escape(f"{pos.entry_price:.4f}")
+        bet     = self._escape(f"{pos.bet:.2f}")
+        tier    = self._escape(pos.tier or "SINGLE")
+        score   = self._escape(f"{pos.score:.0f}")
         s_name_e = self._escape(s_name)
         
         # Use raw f-strings to allow backslashes for Telegram MarkdownV2 escaping
@@ -74,13 +73,12 @@ class TelegramNotifier:
         )
         return self._send(msg)
 
-    def notify_sell(self, pos: dict, pnl_usdc: float, pnl_pct: float, s_name: str = "Whale Mode"):
-        """Send formatted sell/exit alert."""
-        title   = self._escape(pos.get('title', 'Unknown Market')[:80])
-        side    = self._escape(pos.get('outcome', '?'))
+    def notify_sell(self, pos, pnl_usdc: float, pnl_pct: float, s_name: str = "Whale Mode"):
+        title   = self._escape(pos.title[:80])
+        side    = self._escape(pos.outcome)
         emoji   = "✅" if pnl_usdc >= 0 else "❌"
         verdict = "PROFIT" if pnl_usdc >= 0 else "LOSS"
-        reason  = self._escape(pos.get('reason', 'Target reached'))
+        reason  = self._escape(pos.reason or "Target reached")
         pnl_s   = self._escape(f"{pnl_usdc:+.4f}")
         pct_s   = self._escape(f"{pnl_pct*100:+.1f}")
         s_name_e = self._escape(s_name)

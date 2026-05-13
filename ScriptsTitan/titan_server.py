@@ -301,8 +301,14 @@ def _dispatch(body: dict, sid: str | None, api: TitanAPI) -> dict | None:
         if isinstance(result, str):
             return _ok(rid, _text_result(result))
         if isinstance(result, (list, dict)):
-            structured = {"result": result} if isinstance(result, list) else result
-            text = json.dumps(result, indent=2, default=str)
+            from titan_position import Position as _Position
+            if isinstance(result, list):
+                serializable = [v.to_dict() if isinstance(v, _Position) else v for v in result]
+                structured: dict = {"result": serializable}
+                text = json.dumps(serializable, indent=2, default=str)
+            else:
+                structured = result
+                text = json.dumps(result, indent=2, default=str)
             return _ok(rid, _text_result(text, structured))
         return _ok(rid, _text_result(str(result)))
 

@@ -15,7 +15,7 @@ from titan_config import *
 if TYPE_CHECKING:
     from titan_wallet import WalletProfile
     from titan_market import Market
-    from titan_trader import Position
+    from titan_position import Position
     from titan_signals import Signal
 
 _local = threading.local()

@@ -17,7 +17,7 @@ import importlib
 import json
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from titan_protocol import TitanBackend
 import os
 import webbrowser
@@ -26,7 +26,7 @@ from titan_ui_charts import PnLChart, PositionChart, init_chart_fonts
 
 if TYPE_CHECKING:
     from titan_signals import SignalDict
-    from titan_types import TradeRecordDict
+    from titan_position import Position
 
 try:
     import pyperclip
@@ -119,7 +119,7 @@ def show_loading_screen(root, api, on_complete):
         ("Checking engine status...", lambda: api.get_status()),
         ("Loading P&L and bankroll state...", lambda: api.get_pnl_summary()),
         ("Fetching verified whale roster...", lambda: api.get_whales()),
-        ("Syncing open positions...", lambda: api.get_positions(brief=False)),
+        ("Syncing open positions...", lambda: api.get_positions()),
         ("Downloading latest signals...", lambda: api.get_signals()),
         ("TITAN ONLINE — Follow The Whale", lambda: None),
     ]
@@ -181,15 +181,14 @@ def show_loading_screen(root, api, on_complete):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def run_ui(api: TitanBackend) -> None:
-    import ast as _ast
     _cfg: dict = {}
 
-    def _open_pos_dict() -> dict:
+    def _open_positions() -> list[Position]:
         try:
-            return {_ast.literal_eval(p["key"]): p for p in api.get_positions(brief=False)}
+            return api.get_positions()
         except Exception as e:
             _log_ui_error("open positions cache", e)
-            return {}
+            return []
     def _wallet_cache() -> dict:
         try:
             return {w["wallet"]: w for w in api.get_whales()}
@@ -500,91 +499,88 @@ def run_ui(api: TitanBackend) -> None:
     pos_tree.pack(fill="x", padx=4, pady=(4,2))
     
     
-    def show_position_detail(key, pos):
+    def show_position_detail(pos: Position) -> None:
         """Show a floating detail popup for an open position."""
         import time as _t
         win = tk.Toplevel(root)
-        win.title(f"Position Detail — {pos.get('title','')[:50]}")
+        win.title(f"Position Detail — {pos.title[:50]}")
         win.configure(bg="#060615")
         win.geometry("820x640")
         win.resizable(True, True)
-    
+
         mono10  = font.Font(family="Courier", size=10)
         mono9   = font.Font(family="Courier", size=9)
         bold11  = font.Font(family="Courier", size=11, weight="bold")
         bold9   = font.Font(family="Courier", size=9, weight="bold")
-    
-        entry    = pos.get("entry_price", 0)
-        w_entry  = pos.get("avg_entry", entry)
-        cur      = pos.get("cur_price", entry)
-        shares   = pos.get("shares", 0)
-        bet      = pos.get("bet", 0)
+
+        entry    = pos.entry_price
+        w_entry  = pos.avg_entry or entry
+        cur      = pos.cur_price or entry
+        shares   = pos.shares
+        bet      = pos.bet
         pnl_pct  = (cur - entry) / max(entry, 0.001) * 100
         pnl_usd  = (cur - entry) * shares
-        hold_min = (_t.time() - pos.get("entry_ts", _t.time())) / 60
-        title    = pos.get("title", "")
-        outcome  = pos.get("outcome", key[1] if isinstance(key, tuple) else "")
-        cid      = pos.get("cid", key[0] if isinstance(key, tuple) else "")
-        slug     = pos.get("slug", "") or pos.get("event_slug", "")
-        entry_ts = pos.get("entry_ts")
-        entry_ts_text = str(pos.get("entry_ts_str", "") or "")
-        if not entry_ts_text and isinstance(entry_ts, (int, float)) and float(entry_ts) > 0:
-            entry_ts_text = datetime.fromtimestamp(float(entry_ts)).strftime("%Y-%m-%d %H:%M:%S")
-    
+        hold_min = (_t.time() - pos.entry_ts) / 60 if pos.entry_ts else 0.0
+        title    = pos.title
+        outcome  = pos.outcome or (key[1] if isinstance(key, tuple) else "")
+        cid      = pos.cid or (key[0] if isinstance(key, tuple) else "")
+        slug     = pos.slug or pos.event_slug
+        entry_ts_text = pos.entry_dt.strftime("%Y-%m-%d %H:%M:%S") if pos.entry_dt else ""
+
         # Header
         hf = tk.Frame(win, bg="#0a0a20", pady=8)
         hf.pack(fill="x", padx=8, pady=(8,0))
         pnl_color = "#00ff55" if pnl_pct >= 0 else "#ff5555"
-        tier_icon = "💎" if pos.get("is_conviction") else ("⚡" if pos.get("is_hft") else "")
-        tk.Label(hf, text=f"{tier_icon}[{pos.get('tier','?')}]  {title}",
+        tier_icon = "💎" if pos.is_conviction else ("⚡" if pos.is_hft else "")
+        tk.Label(hf, text=f"{tier_icon}[{pos.tier}]  {title}",
                  fg="#00aaff", bg="#0a0a20", font=bold11, wraplength=780, justify="left").pack(anchor="w", padx=12)
         if entry_ts_text:
             tk.Label(hf, text=f"ENTRY TIME  {entry_ts_text}",
                      fg="#ffdd44", bg="#0a0a20", font=bold11, wraplength=780, justify="left").pack(anchor="w", padx=12, pady=(2,0))
-        tk.Label(hf, text=f"Side: {outcome}   Score: {pos.get('score',0):.0f}pts   CID: {cid[:30]}…",
+        tk.Label(hf, text=f"Side: {outcome}   Score: {pos.score:.0f}pts   CID: {cid[:30]}…",
                  fg="#556677", bg="#0a0a20", font=mono9).pack(anchor="w", padx=12)
-    
+
         # Stats grid
         sf2 = tk.Frame(win, bg="#060615")
         sf2.pack(fill="x", padx=8, pady=6)
-    
+
         def stat_cell(parent, label, value, color="#aaaacc", col=0, row=0):
             f = tk.Frame(parent, bg="#0d0d20", bd=1, relief="solid")
             f.grid(row=row, column=col, padx=4, pady=3, sticky="nsew")
             tk.Label(f, text=label, fg="#445566", bg="#0d0d20", font=mono9, pady=2).pack()
             tk.Label(f, text=value, fg=color, bg="#0d0d20", font=bold9, pady=2).pack()
-    
+
         stats_data = [
-            ("Whale Entry",   f"${w_entry:.4f}",          "#ffaa44"),
-            ("Our Entry",     f"${entry:.4f}",             "#aaaaff"),
-            ("Current Price", f"${cur:.4f}",               pnl_color),
-            ("P&L $",         f"${pnl_usd:+.4f}",          pnl_color),
-            ("P&L %",         f"{pnl_pct:+.2f}%",          pnl_color),
-            ("Bet Size",      f"${bet:.2f}",               "#00aaff"),
-            ("Shares",        f"{shares:.2f}",             "#aaaacc"),
-            ("Held",          f"{hold_min:.0f} min",       "#888888"),
-            ("Liq",           f"${pos.get('liq',0):,.0f}", "#446688"),
-            ("Score",         f"{pos.get('score',0):.0f}", "#ffdd44"),
-            ("Tier",          pos.get('tier','?'),          "#ff8844"),
-            ("Type",          "HFT⚡" if pos.get('is_hft') else ("💎CONVICTION" if pos.get('is_conviction') else "STANDARD"), "#aaaacc"),
+            ("Whale Entry",   f"${w_entry:.4f}",      "#ffaa44"),
+            ("Our Entry",     f"${entry:.4f}",         "#aaaaff"),
+            ("Current Price", f"${cur:.4f}",           pnl_color),
+            ("P&L $",         f"${pnl_usd:+.4f}",      pnl_color),
+            ("P&L %",         f"{pnl_pct:+.2f}%",      pnl_color),
+            ("Bet Size",      f"${bet:.2f}",           "#00aaff"),
+            ("Shares",        f"{shares:.2f}",         "#aaaacc"),
+            ("Held",          f"{hold_min:.0f} min",   "#888888"),
+            ("Liq",           f"${pos.liq:,.0f}",      "#446688"),
+            ("Score",         f"{pos.score:.0f}",      "#ffdd44"),
+            ("Tier",          pos.tier,                "#ff8844"),
+            ("Type",          "HFT⚡" if pos.is_hft else ("💎CONVICTION" if pos.is_conviction else "STANDARD"), "#aaaacc"),
         ]
         for i, (lbl, val, col) in enumerate(stats_data):
             sf2.columnconfigure(i % 4, weight=1)
             stat_cell(sf2, lbl, val, col, i % 4, i // 4)
-    
+
         # Whales
         wf = tk.Frame(win, bg="#060615")
         wf.pack(fill="x", padx=8)
         tk.Label(wf, text="WHALE WALLETS", fg="#00ff88", bg="#060615", font=bold9).pack(anchor="w", padx=4, pady=(4,2))
         seen_wallets: set[str] = set()
         elite_wallets: list[str] = []
-        for wallet_addr in list(pos.get("elite_wallets", [])) + list(pos.get("whale_wallets", [])):
+        for wallet_addr in pos.elite_wallets + pos.whale_wallets:
             wallet_key = str(wallet_addr).lower()
             if wallet_key in seen_wallets:
                 continue
             seen_wallets.add(wallet_key)
             elite_wallets.append(str(wallet_addr))
-        elite_names   = pos.get("elite_names", [])
+        elite_names = pos.elite_names
         for i, w_addr in enumerate(elite_wallets[:8]):
             name  = (elite_names[i] if i < len(elite_names) else None) or _wallet_cache().get(w_addr, {}).get("name", w_addr[:16]+"…")
             prof  = _wallet_cache().get(w_addr, {})
@@ -643,7 +639,7 @@ def run_ui(api: TitanBackend) -> None:
             h = chart_canvas.winfo_height()
             if w < 20 or h < 20:
                 return
-            ph = pos.get("price_history", [])
+            ph = pos.price_history
             if len(ph) < 2:
                 chart_canvas.create_text(w//2, h//2, text="Insufficient price history",
                                          fill="#334455", font=mono9)
@@ -815,8 +811,8 @@ def run_ui(api: TitanBackend) -> None:
         bold9 = font.Font(family="Courier", size=9, weight="bold")
         bold11 = font.Font(family="Courier", size=11, weight="bold")
 
-        score = float(whale.get("score", 0.0) or 0.0)
-        total_pnl = float(whale.get("total_pnl", 0.0) or 0.0)
+        score = cast(float, whale["score"])
+        total_pnl = cast(float, whale["total_pnl"])
         pnl_color = "#00ff55" if total_pnl >= 0 else "#ff5555"
         verified = bool(whale.get("verified"))
         elite = bool(whale.get("elite"))
@@ -843,15 +839,15 @@ def run_ui(api: TitanBackend) -> None:
 
         stats_data = [
             ("Score", f"{score:.2f}", "#ffdd44"),
-            ("Win Rate", f"{float(whale.get('win_rate', 0.0) or 0.0) * 100:.0f}%", "#00ff88"),
-            ("Wilson LB", f"{float(whale.get('wilson_lb', 0.0) or 0.0) * 100:.0f}%", "#88ccff"),
-            ("Resolved", f"{int(whale.get('n_resolved', 0) or 0)}", "#aaaacc"),
-            ("Portfolio", f"${float(whale.get('total_value', 0.0) or 0.0):,.0f}", "#00aaff"),
+            ("Win Rate", f"{cast(float, whale['win_rate']) * 100:.0f}%", "#00ff88"),
+            ("Wilson LB", f"{cast(float, whale['wilson_lb']) * 100:.0f}%", "#88ccff"),
+            ("Resolved", f"{cast(int, whale['n_resolved'])}", "#aaaacc"),
+            ("Portfolio", f"${cast(float, whale['total_value']):,.0f}", "#00aaff"),
             ("PnL", f"${total_pnl:+,.0f}", pnl_color),
-            ("Avg Bet", f"${float(whale.get('avg_bet', 0.0) or 0.0):,.0f}", "#ffaa44"),
-            ("TPH", f"{float(whale.get('trades_per_hour', 0.0) or 0.0):.1f}", "#aaaacc"),
-            ("7d PnL", f"${float(whale.get('recent_pnl_7d', 0.0) or 0.0):+,.0f}", "#88ccff"),
-            ("30d PnL", f"${float(whale.get('recent_pnl_30d', 0.0) or 0.0):+,.0f}", "#88ccff"),
+            ("Avg Bet", f"${cast(float, whale['avg_bet']):,.0f}", "#ffaa44"),
+            ("TPH", f"{cast(float, whale['trades_per_hour']):.1f}", "#aaaacc"),
+            ("7d PnL", f"${(whale['recent_pnl_7d'] or 0.0):+,.0f}", "#88ccff"),
+            ("30d PnL", f"${(whale['recent_pnl_30d'] or 0.0):+,.0f}", "#88ccff"),
             ("Status", "ELITE" if elite else ("VERIFIED" if verified else "WATCH / REJECT"), "#ff8844"),
             ("Type", "HFT" if hft else "STANDARD", "#aaaacc"),
         ]
@@ -916,15 +912,15 @@ def run_ui(api: TitanBackend) -> None:
             return parts[1].strip()
         return raw
 
-    def _closed_position_selection_key(pos: TradeRecordDict) -> tuple[str, str, str, str]:
+    def _closed_position_selection_key(pos: Position) -> tuple[str, str, str, str]:
         return (
-            str(pos.get("cid") or ""),
-            str(pos.get("title") or ""),
-            str(pos.get("outcome") or ""),
-            str(pos.get("exit_ts") or pos.get("ts") or ""),
+            str(pos.cid or ""),
+            str(pos.title or ""),
+            str(pos.outcome or ""),
+            str(pos.exit_ts or ""),
         )
 
-    _closed_tree_items: dict[str, TradeRecordDict] = {}
+    _closed_tree_items: dict[str, Position] = {}
 
     def _load_selected_position_chart() -> None:
         sel = pos_tree.selection()
@@ -951,17 +947,17 @@ def run_ui(api: TitanBackend) -> None:
                     _last_chart_warn[0] = msg
                 return
 
-            history = pos.get("price_history", [])
-            entry_price = float(pos.get("entry_price") or 0.0)
-            title = str(pos.get("title", mkt_name))
+            history = pos.price_history
+            entry_price = pos.entry_price
+            title = pos.title or mkt_name
             if history:
                 _last_chart_warn[0] = ""
-                pos_graph.load(history, title, entry_price, entry_ts=float(pos.get("entry_ts") or 0) or None)
+                pos_graph.load(history, title, entry_price, entry_ts=pos.entry_ts or None)
                 pos_chart_frame.refresh_panel(reset=True)
                 return
 
-            detail = str(pos.get("price_history_error") or "Closed position has no chart history.")
-            pos_graph.load([], title, entry_price, detail, entry_ts=float(pos.get("entry_ts") or 0) or None)
+            detail = pos.price_history_error or "Closed position has no chart history."
+            pos_graph.load([], title, entry_price, detail, entry_ts=pos.entry_ts or None)
             pos_chart_frame.refresh_panel(reset=True)
             warn_msg = f"Closed chart empty: {title[:80]} [{outcome}] | {detail}"
             if _last_chart_warn[0] != warn_msg:
@@ -969,12 +965,12 @@ def run_ui(api: TitanBackend) -> None:
                 _last_chart_warn[0] = warn_msg
             return
 
-        for _, pos in _open_pos_dict().items():
-            title = str(pos.get("title", ""))
+        for pos in _open_positions():
+            title = pos.title
             if title[:48] in mkt_name or mkt_name[:30] in title:
-                if str(pos.get("outcome", "")) == outcome:
+                if pos.outcome == outcome:
                     _last_chart_warn[0] = ""
-                    pos_graph.load(pos.get("price_history", []), title, pos.get("entry_price", 0), entry_ts=float(pos.get("entry_ts") or 0) or None)
+                    pos_graph.load(pos.price_history, title, pos.entry_price, entry_ts=pos.entry_ts or None)
                     pos_chart_frame.refresh_panel(reset=True)
                     return
 
@@ -982,7 +978,7 @@ def run_ui(api: TitanBackend) -> None:
         pos_graph.load([], mkt_name, 0.0, f"Open position match not found for {mkt_name[:48]} [{outcome}].")
         pos_chart_frame.refresh_panel(reset=True)
 
-    def _find_selected_closed_position() -> TradeRecordDict | None:
+    def _find_selected_closed_position() -> Position | None:
         sel = pos_tree.selection()
         if not sel:
             return None
@@ -1002,15 +998,14 @@ def run_ui(api: TitanBackend) -> None:
             if pos:
                 show_trade_history_detail(pos)
             return
-        for key, pos in _open_pos_dict().items():
-            title_cmp = pos.get("title", "")
-            if title_cmp[:48] in mkt_name or mkt_name[:30] in title_cmp:
-                if pos.get("outcome", "") == outcome or outcome in pos.get("outcome", ""):
-                    show_position_detail(key, pos)
+        for pos in _open_positions():
+            if pos.title[:48] in mkt_name or mkt_name[:30] in pos.title:
+                if pos.outcome == outcome or outcome in pos.outcome:
+                    show_position_detail(pos)
                     return
-        for key, pos in _open_pos_dict().items():
-            if mkt_name[:20] in pos.get("title", ""):
-                show_position_detail(key, pos)
+        for pos in _open_positions():
+            if mkt_name[:20] in pos.title:
+                show_position_detail(pos)
                 return
 
     pos_tree.bind("<Double-1>", _on_pos_double_click)
@@ -1047,10 +1042,9 @@ def run_ui(api: TitanBackend) -> None:
             if vals:
                 mkt_name = str(vals[0]).replace('💎', '').replace('⚡', '')
                 outcome  = str(vals[1])
-                for key, pos in _open_pos_dict().items():
-                    title_cmp = pos.get('title', '')
-                    if title_cmp[:48] in mkt_name or mkt_name[:30] in title_cmp:
-                        slug = pos.get('slug', '') or pos.get('event_slug', '')
+                for pos in _open_positions():
+                    if pos.title[:48] in mkt_name or mkt_name[:30] in pos.title:
+                        slug = pos.slug or pos.event_slug
                         if slug:
                             webbrowser.open(f"https://polymarket.com/event/{slug}")
                             return
@@ -1062,11 +1056,11 @@ def run_ui(api: TitanBackend) -> None:
             vals = pos_tree.item(sel[0])['values']
             if vals:
                 mkt_name = str(vals[0]).replace('💎', '').replace('⚡', '')
-                for key, pos in _open_pos_dict().items():
-                    if pos.get('title', '')[:48] in mkt_name or mkt_name[:30] in pos.get('title', ''):
+                for pos in _open_positions():
+                    if pos.title[:48] in mkt_name or mkt_name[:30] in pos.title:
                         try:
                             root.clipboard_clear()
-                            root.clipboard_append(pos.get('title', mkt_name))
+                            root.clipboard_append(pos.title or mkt_name)
                             root.update()
                         except Exception as e:
                             _log_ui_error("copy selected position title", e, "WARN")
@@ -1212,17 +1206,16 @@ def run_ui(api: TitanBackend) -> None:
         st   = api.get_trade_stats()
         pnl  = api.get_pnl_summary()
         unrealised_pnl = sum(
-            (pos.get("cur_price", pos.get("entry_price", 0)) - pos.get("entry_price", 0))
-            * pos.get("shares", 0)
-            for pos in _open_pos_dict().values()
+            ((pos.cur_price or pos.entry_price) - pos.entry_price) * pos.shares
+            for pos in _open_positions()
         )
         realised_pnl = st["sum_pnl"]
         total_pnl    = realised_pnl + unrealised_pnl
         win_rate     = st["win_rate"] * 100
         avg_pnl      = total_pnl / max(st["sell_count"], 1)
         open_val     = sum(
-            pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0)
-            for pos in _open_pos_dict().values()
+            (pos.cur_price or pos.entry_price) * pos.shares
+            for pos in _open_positions()
         )
 
         stat_vars["total_pnl"].set(f"${total_pnl:+.4f}  (R:{realised_pnl:+.2f} U:{unrealised_pnl:+.2f})")
@@ -1354,7 +1347,9 @@ def run_ui(api: TitanBackend) -> None:
             pass
 
     def _log_ui_error(context: str, error: Exception, level: str = "ERR") -> None:
-        log(f"[{context}] {error}", level)
+        import traceback
+        tb = traceback.format_exc().strip()
+        log(f"[{context}] {error}\n{tb}", level)
     
     
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -1734,46 +1729,75 @@ def run_ui(api: TitanBackend) -> None:
         owner = parent if parent is not None else root
         detail_win = tk.Toplevel(root)
         detail_win.title(title[:80] if title else "Properties")
-        detail_win.configure(bg="#080810")
-        detail_win.geometry("600x550")
+        detail_win.configure(bg="#0d0d1a")
+        detail_win.geometry("660x520")
+        detail_win.resizable(True, True)
 
-        tk.Label(detail_win, text=title or "Properties", fg="#00ff88", bg="#080810",
-                 font=bold_hd, anchor="w", justify="left").pack(fill="x", padx=10, pady=(10, 4))
-        if subtitle:
-            tk.Label(detail_win, text=subtitle, fg="#556677", bg="#080810",
-                     font=mono_sm, anchor="w", justify="left").pack(fill="x", padx=10, pady=(0, 6))
+        # ── header bar ────────────────────────────────────────────────────────
+        hdr = tk.Frame(detail_win, bg="#0a0a20", pady=6)
+        hdr.pack(fill="x")
+        breadcrumb = title if not subtitle else f"{title.rsplit(' / ', 1)[0]}  ›  {subtitle}"
+        tk.Label(hdr, text=breadcrumb, fg="#00ff88", bg="#0a0a20",
+                 font=bold_hd, anchor="w").pack(side="left", padx=12)
+        tk.Label(hdr, text="✕", fg="#334455", bg="#0a0a20",
+                 font=bold_hd, cursor="hand2").pack(side="right", padx=10)
 
-        table_wrap = tk.Frame(detail_win, bg="#080810")
-        table_wrap.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        # thin separator
+        tk.Frame(detail_win, bg="#1a2a3a", height=1).pack(fill="x")
+
+        # ── treeview ──────────────────────────────────────────────────────────
+        prop_style = "Prop.Treeview"
+        sty = ttk.Style()
+        sty.configure(prop_style,
+            background="#0c0c1e", fieldbackground="#0c0c1e",
+            foreground="#aabbcc", font=mono, rowheight=24,
+            borderwidth=0)
+        sty.configure(f"{prop_style}.Heading",
+            background="#111128", foreground="#4488aa",
+            font=mono_sm, relief="flat")
+        sty.map(prop_style,
+            background=[("selected", "#1a2a4a")],
+            foreground=[("selected", "#00ff88")])
+
+        table_wrap = tk.Frame(detail_win, bg="#0c0c1e")
+        table_wrap.pack(fill="both", expand=True, padx=8, pady=8)
 
         preview_fields = _list_preview_columns(value)
         prop_cols = ("Property", *preview_fields) if preview_fields else ("Property", "Value")
-        prop_tree = ttk.Treeview(table_wrap, columns=prop_cols, show="headings")
-        prop_tree.heading("Property", text="Property")
-        prop_tree.column("Property", width=210, anchor="w", stretch=False)
+        prop_tree = ttk.Treeview(table_wrap, columns=prop_cols, show="headings", style=prop_style)
+        prop_tree.heading("Property", text="PROPERTY")
+        prop_tree.column("Property", width=200, minwidth=120, anchor="w", stretch=False)
         if preview_fields:
             for field_name in preview_fields:
-                prop_tree.heading(field_name, text=field_name)
-                prop_tree.column(field_name, width=150, anchor="w", stretch=True)
+                prop_tree.heading(field_name, text=field_name.upper())
+                prop_tree.column(field_name, width=140, anchor="w", stretch=True)
         else:
-            prop_tree.heading("Value", text="Value")
-            prop_tree.column("Value", width=730, anchor="w", stretch=True)
+            prop_tree.heading("Value", text="VALUE")
+            prop_tree.column("Value", width=420, anchor="w", stretch=True)
 
-        prop_vsb = tk.Scrollbar(table_wrap, command=prop_tree.yview)
-        prop_hsb = tk.Scrollbar(table_wrap, orient="horizontal", command=prop_tree.xview)
+        prop_vsb = tk.Scrollbar(table_wrap, orient="vertical", command=prop_tree.yview,
+                                bg="#0c0c1e", troughcolor="#0a0a1a", width=10)
+        prop_hsb = tk.Scrollbar(table_wrap, orient="horizontal", command=prop_tree.xview,
+                                bg="#0c0c1e", troughcolor="#0a0a1a", width=10)
         prop_tree.configure(yscrollcommand=prop_vsb.set, xscrollcommand=prop_hsb.set)
-
         prop_vsb.pack(side="right", fill="y")
         prop_hsb.pack(side="bottom", fill="x")
         prop_tree.pack(fill="both", expand=True)
 
+        # alternating row tags
+        prop_tree.tag_configure("odd",  background="#0c0c1e")
+        prop_tree.tag_configure("even", background="#0e0e22")
+        prop_tree.tag_configure("drillable", foreground="#55aadd")
+
         detail_items: dict[str, object] = {}
         if preview_fields and isinstance(value, list):
             for idx, item in enumerate(value):
+                tag = "odd" if idx % 2 == 0 else "even"
                 mapping = _previewable_mapping(item)
                 if mapping is None:
                     text, child_value = _describe_property_value(item)
-                    item_id = prop_tree.insert("", "end", values=(f"[{idx}]", text, "", "", "")[:len(prop_cols)])
+                    item_id = prop_tree.insert("", "end", tags=(tag,),
+                                               values=(f"[{idx}]", text, "", "", "")[:len(prop_cols)])
                     if child_value is not None:
                         detail_items[str(item_id)] = child_value
                     continue
@@ -1781,18 +1805,30 @@ def run_ui(api: TitanBackend) -> None:
                 for field_name in preview_fields:
                     raw_value = mapping.get(field_name)
                     text, child_value = _describe_property_value(raw_value)
-                    row_values.append(text if child_value is None else text)
-                item_id = prop_tree.insert("", "end", values=tuple(row_values))
+                    row_values.append(text)
+                item_id = prop_tree.insert("", "end", tags=(tag,), values=tuple(row_values))
                 detail_items[str(item_id)] = item
         else:
-            for row in _build_property_rows(value):
-                item_id = prop_tree.insert("", "end", values=(row.name, row.value_text))
+            for idx, row in enumerate(_build_property_rows(value)):
+                tag = "odd" if idx % 2 == 0 else "even"
+                if row.child_value is not None:
+                    tag = "drillable"
+                item_id = prop_tree.insert("", "end", tags=(tag,),
+                                           values=(row.name, row.value_text))
                 if row.child_value is not None:
                     detail_items[str(item_id)] = row.child_value
 
-        help_var = tk.StringVar(value="Double-click a row to inspect nested values.")
-        tk.Label(detail_win, textvariable=help_var, fg="#445566", bg="#080810",
-                 font=mono_sm, anchor="w").pack(fill="x", padx=10, pady=(0, 10))
+        # ── status bar ────────────────────────────────────────────────────────
+        tk.Frame(detail_win, bg="#1a2a3a", height=1).pack(fill="x")
+        status_bar = tk.Frame(detail_win, bg="#080816", pady=4)
+        status_bar.pack(fill="x")
+        help_var = tk.StringVar(value="↵ double-click a highlighted row to drill down")
+        tk.Label(status_bar, textvariable=help_var, fg="#334455", bg="#080816",
+                 font=mono_sm, anchor="w").pack(side="left", padx=10)
+        n = len(value) if isinstance(value, (list, dict)) else ""
+        if n:
+            tk.Label(status_bar, text=f"{n} items", fg="#223344", bg="#080816",
+                     font=mono_sm).pack(side="right", padx=10)
 
         def _open_selected_property(event: tk.Event[tk.Misc]) -> None:
             item_id = prop_tree.identify_row(event.y)
@@ -1806,7 +1842,7 @@ def run_ui(api: TitanBackend) -> None:
                 prop_tree.focus(item_id)
             child_value = detail_items.get(str(item_id))
             if child_value is None:
-                help_var.set("Selected property is a scalar value.")
+                help_var.set("scalar — no nested data")
                 return
             values = prop_tree.item(item_id).get("values", [])
             prop_name = str(values[0]) if values else "Property"
@@ -1821,9 +1857,7 @@ def run_ui(api: TitanBackend) -> None:
 
         if isinstance(owner, (tk.Tk, tk.Toplevel)):
             try:
-                owner_x = owner.winfo_rootx()
-                owner_y = owner.winfo_rooty()
-                detail_win.geometry(f"+{owner_x + 40}+{owner_y + 40}")
+                detail_win.geometry(f"+{owner.winfo_rootx() + 40}+{owner.winfo_rooty() + 40}")
             except Exception:
                 pass
         detail_win.lift()
@@ -1850,7 +1884,7 @@ def run_ui(api: TitanBackend) -> None:
         raw_txt.insert("1.0", json.dumps(value, indent=2, default=str))
         raw_txt.focus_set()
 
-    def show_market_detail(market: dict[str, object], signal_title: str = "") -> None:
+    def show_market_detail(market: dict[str, Any], signal_title: str = "") -> None:
         win = tk.Toplevel(root)
         market_title = str(market.get("title", signal_title or "Market"))
         market_slug = str(market.get("slug", ""))
@@ -1864,13 +1898,13 @@ def run_ui(api: TitanBackend) -> None:
         bold9 = font.Font(family="Courier", size=9, weight="bold")
         bold11 = font.Font(family="Courier", size=11, weight="bold")
 
-        liq = float(market.get("liq", 0.0) or 0.0)
-        volume = float(market.get("volume", 0.0) or 0.0)
-        yes_price = float(market.get("yes_price", 0.0) or 0.0)
-        no_price = float(market.get("no_price", 0.0) or 0.0)
+        liq       = float(market.get("liq") or 0.0)
+        volume    = float(market.get("volume") or 0.0)
+        yes_price = float(market.get("yes_price") or 0.0)
+        no_price  = float(market.get("no_price") or 0.0)
         hrs_left_obj = market.get("hrs_left")
         hrs_left_text = f"{float(hrs_left_obj):.1f}h" if isinstance(hrs_left_obj, (int, float)) else "—"
-        ts_value = float(market.get("ts", 0.0) or 0.0)
+        ts_value  = float(market.get("ts") or 0.0)
         ts_text = datetime.fromtimestamp(ts_value).strftime("%Y-%m-%d %H:%M:%S") if ts_value > 0 else "—"
 
         hf = tk.Frame(win, bg="#0a0a20", pady=8)
@@ -2332,33 +2366,29 @@ def run_ui(api: TitanBackend) -> None:
 
         if _show_closed[0]:
             _closed_tree_items.clear()
-            closed: list[TradeRecordDict] = api.get_closed_positions(limit=200)
+            closed: list[Position] = api.get_closed_positions(limit=200)
             for pos in closed:
-                entry   = pos.get("entry_price") or 0
-                w_entry = pos.get("avg_entry") or entry
-                exit_p  = pos.get("exit_price") or entry
-                pnl_usd = pos.get("pnl_usdc") or 0
-                pnl_pct = pos.get("pnl_pct") or ((exit_p - entry) / max(entry, 0.001) * 100)
-                entry_ts  = pos.get("entry_ts") or pos.get("ts", now_t)
-                exit_ts   = pos.get("exit_ts") or pos.get("ts", now_t)
-                hold_min  = (exit_ts - entry_ts) / 60
-                whale_str = ", ".join((pos.get("whale_names") or [])[:2])
+                entry   = pos.entry_price
+                w_entry = pos.avg_entry or entry
+                exit_p  = pos.exit_price or entry
+                pnl_usd = pos.pnl_usdc
+                pnl_pct = pos.pnl_pct or ((exit_p - entry) / max(entry, 0.001) * 100)
+                hold_min  = (pos.exit_ts - pos.entry_ts) / 60 if pos.exit_ts and pos.entry_ts else 0.0
+                whale_str = ", ".join(pos.whale_names[:2])
                 tag       = "CLOSED_WIN" if pnl_usd >= 0 else "CLOSED_LOSS"
-                reason    = pos.get("reason") or "CLOSED"
-                title_str = pos.get("title", "")
-                outcome_str = pos.get("outcome", "")
+                reason    = pos.reason or "CLOSED"
                 iid = pos_tree.insert("", "end", values=(
-                    title_str[:48],
-                    outcome_str,
+                    pos.title[:48],
+                    pos.outcome,
                     f"${w_entry:.4f}",
                     f"${entry:.4f}",
                     f"${exit_p:.4f}",
                     f"{pnl_pct:+.1f}%",
                     f"${pnl_usd:+.3f}",
-                    f"${pos.get('bet') or 0:.2f}",
+                    f"${pos.bet:.2f}",
                     f"{hold_min:.0f}m",
                     whale_str[:30],
-                    f"{pos.get('score') or 0:.0f}",
+                    f"{pos.score:.0f}",
                     reason[:18],
                 ), tags=(tag,))
                 _closed_tree_items[iid] = pos
@@ -2366,15 +2396,15 @@ def run_ui(api: TitanBackend) -> None:
             pos_var.set(f"Pos: {len(closed)} closed")
         else:
             _closed_tree_items.clear()
-            for key, pos in sorted(_open_pos_dict().items(),
-                                   key=lambda x: x[1].get("entry_ts", 0), reverse=True):
-                entry    = pos.get("entry_price", 0)
-                w_entry  = pos.get("avg_entry", entry)
-                cur      = pos.get("cur_price", entry)
-                shares   = pos.get("shares", 0)
+            for pos in sorted(_open_positions(),
+                              key=lambda x: x.entry_ts, reverse=True):
+                entry    = pos.entry_price
+                w_entry  = pos.avg_entry or entry
+                cur      = pos.cur_price or entry
+                shares   = pos.shares
                 pnl_pct  = (cur - entry) / max(entry, 0.001) * 100
                 pnl_usd  = (cur - entry) * shares
-                hold_min = (now_t - pos.get("entry_ts", now_t)) / 60
+                hold_min = (now_t - pos.entry_ts) / 60 if pos.entry_ts else 0.0
 
                 if hold_min < _cfg.get("MIN_HOLD_MINUTES", 15):
                     ws_str = f"🔒 HOLD {_cfg.get("MIN_HOLD_MINUTES", 15) - hold_min:.0f}m"
@@ -2392,20 +2422,20 @@ def run_ui(api: TitanBackend) -> None:
                     ws_str = "→ Holding"
                     tag    = "NEUTRAL"
 
-                elite_names = pos.get("elite_names", [])
-                if not elite_names:
-                    elite_names = [_wallet_cache().get(w, {}).get("name", w[:10]+"…")
-                                  for w in pos.get("elite_wallets", [])[:3]]
+                elite_names = pos.elite_names or [
+                    _wallet_cache().get(w, {}).get("name", w[:10]+"…")
+                    for w in pos.elite_wallets[:3]
+                ]
                 whale_str = ", ".join(elite_names[:2])
-                if pos.get("n_confluence", 0):
-                    whale_str += f" +{pos['n_confluence']}conf"
-                if pos.get("is_hft"):
+                if pos.n_confluence:
+                    whale_str += f" +{pos.n_confluence}conf"
+                if pos.is_hft:
                     whale_str = "⚡" + whale_str
 
-                hft_tag   = "⚡" if pos.get("is_hft") else ""
-                conv_tag  = "💎" if pos.get("is_conviction") else ""
-                title_str = f"{conv_tag}{hft_tag}{pos.get('title','')}"
-                outcome_str = pos.get("outcome","")
+                hft_tag   = "⚡" if pos.is_hft else ""
+                conv_tag  = "💎" if pos.is_conviction else ""
+                title_str = f"{conv_tag}{hft_tag}{pos.title}"
+                outcome_str = pos.outcome
 
                 iid = pos_tree.insert("", "end", values=(
                     title_str[:48],
@@ -2415,15 +2445,15 @@ def run_ui(api: TitanBackend) -> None:
                     f"${cur:.4f}",
                     f"{pnl_pct:+.1f}%",
                     f"${pnl_usd:+.3f}",
-                    f"${pos.get('bet',0):.2f}",
+                    f"${pos.bet:.2f}",
                     f"{hold_min:.0f}m",
                     whale_str[:30],
-                    f"{pos.get('score',0):.0f}",
+                    f"{pos.score:.0f}",
                     ws_str,
                 ), tags=(tag,))
                 new_item_map[(title_str[:30], outcome_str)] = iid
 
-            pos_var.set(f"Pos: {len(_open_pos_dict())} open")
+            pos_var.set(f"Pos: {len(_open_positions())} open")
 
         if prev_sel_key and prev_sel_key in new_item_map:
             iid_to_select = new_item_map[prev_sel_key]
@@ -2513,7 +2543,7 @@ def run_ui(api: TitanBackend) -> None:
             f"  Session P&L:  ${api.get_pnl_summary()["session_pnl"]:+.4f}\n"
             f"  Total P&L:    ${total_pnl:+.4f}\n"
             f"  Trades:       {n_sells} closed  WR:{wr_pct:.0f}% ({wins_n}W/{n_sells - wins_n}L)\n"
-            f"  Open:         {len(_open_pos_dict())} positions\n\n"
+            f"  Open:         {len(_open_positions())} positions\n\n"
             f"TRADE FEED (this cycle)\n{'─'*50}\n"
             f"  Total: {len(trades)}  hot:{hot_t}  hft_spikes:{hft_t}\n"
             f"  Verified: {len(ver)}  Elite: {len(elites)}  Watchlist: {api.get_pnl_summary()['watchlist_size']}\n"
@@ -2582,12 +2612,11 @@ def run_ui(api: TitanBackend) -> None:
     
     def on_position_open_cb(pos):
         def _update():
-            elite_names = pos.get("elite_names", [])
-            whale_str   = ", ".join(elite_names[:3]) or "?"
+            whale_str = ", ".join(pos.elite_names[:3]) or "?"
             pos_log_write(
-                f"🛒 AUTO-BUY: {pos['title'][:80]} [{pos['outcome']}] "
-                f"@ ${pos['entry_price']:.4f} (whale entry ${pos.get('avg_entry',pos['entry_price']):.4f}) "
-                f"| ${pos['bet']:.2f} | [{pos['tier']} {pos['score']:.0f}pts] "
+                f"🛒 AUTO-BUY: {pos.title[:80]} [{pos.outcome}] "
+                f"@ ${pos.entry_price:.4f} (whale entry ${pos.avg_entry or pos.entry_price:.4f}) "
+                f"| ${pos.bet:.2f} | [{pos.tier} {pos.score:.0f}pts] "
                 f"| via {whale_str}",
                 "BUY"
             )
@@ -2601,12 +2630,12 @@ def run_ui(api: TitanBackend) -> None:
         def _update():
             tag   = "SELL_W" if pnl_usdc >= 0 else "SELL_L"
             emoji = "✅" if pnl_usdc >= 0 else "❌"
-            whale_str = ", ".join(pos.get("elite_names", [])[:2]) or "?"
+            whale_str = ", ".join(pos.elite_names[:2]) or "?"
             pos_log_write(
-                f"{emoji} AUTO-SELL: {pos['title'][:80]} [{pos['outcome']}] "
-                f"| Entry ${pos['entry_price']:.4f} → Exit ${pos.get('cur_price',0):.4f} "
+                f"{emoji} AUTO-SELL: {pos.title[:80]} [{pos.outcome}] "
+                f"| Entry ${pos.entry_price:.4f} → Exit ${pos.cur_price:.4f} "
                 f"| P&L ${pnl_usdc:+.4f} ({pnl_pct*100:+.1f}%) "
-                f"| {pos.get('reason','')} | via {whale_str}",
+                f"| {pos.reason} | via {whale_str}",
                 tag
             )
         root.after(0, _update)
@@ -2648,8 +2677,8 @@ def run_ui(api: TitanBackend) -> None:
             except Exception as e: data["pnl"] = {}; log(f"[fetch pnl] {e}", "ERR")
             try: data["logs"]     = api.get_logs(lines=600)
             except Exception as e: data["logs"] = ""; log(f"[fetch logs] {e}", "ERR")
-            try: data["pos"]      = _open_pos_dict()
-            except Exception as e: data["pos"] = {}; log(f"[fetch pos] {e}", "ERR")
+            try: data["pos"]      = _open_positions()
+            except Exception as e: data["pos"] = []; log(f"[fetch pos] {e}", "ERR")
             try: data["wallets"]  = _wallet_cache()
             except Exception as e: data["wallets"] = {}; log(f"[fetch wallets] {e}", "ERR")
             if not _show_signal_history[0]:
@@ -2727,8 +2756,8 @@ def run_ui(api: TitanBackend) -> None:
         cycle_var.set(f"Cycle: {_cycle_num[0]}")
 
         open_value = sum(
-            p.get("cur_price", p.get("entry_price", 0)) * p.get("shares", 0)
-            for p in pos.values()
+            (p.cur_price or p.entry_price) * p.shares
+            for p in pos
         )
         bankroll   = pnl.get("bankroll", 0.0)
         bk_start   = pnl.get("bankroll_start", 0.0)
@@ -2798,17 +2827,15 @@ def run_ui(api: TitanBackend) -> None:
                 if positions:
                     updated = False
                     for key, pos in positions:
-                        cid = pos.get("cid", key[0])
-                        outcome = pos.get("outcome", key[1])
-                        asset = pos.get("asset", "")
+                        cid = pos.cid or key[0]
+                        outcome = pos.outcome or key[1]
+                        asset = pos.asset
                         fast_p = fetch_position_price_fast(cid, asset, outcome)
-                        if fast_p is not None and fast_p != pos.get("cur_price"):
-                            pos["cur_price"] = fast_p
-                            if "price_history" not in pos:
-                                pos["price_history"] = []
-                            pos["price_history"].append((time.time(), fast_p))
-                            if len(pos["price_history"]) > 2880:
-                                del pos["price_history"][:-2880]
+                        if fast_p is not None and fast_p != pos.cur_price:
+                            pos.cur_price = fast_p
+                            pos.price_history.append((time.time(), fast_p))
+                            if len(pos.price_history) > 2880:
+                                del pos.price_history[:-2880]
                             updated = True
                     if updated:
                         _pending_update[0] = True
@@ -2820,8 +2847,8 @@ def run_ui(api: TitanBackend) -> None:
                 if now - _last_equity_record[0] >= 5.0:
                     _last_equity_record[0] = now
                     open_val = sum(
-                        p.get("cur_price", p.get("entry_price", 0)) * p.get("shares", 0)
-                        for p in _open_pos_dict().values()
+                        (p.cur_price or p.entry_price) * p.shares
+                        for p in _open_positions()
                     )
                     eq = api.get_pnl_summary()["bankroll"] + open_val
                     # Only append if changed by > $0.005 OR it has been > 60s since last record
@@ -2990,7 +3017,7 @@ def run_ui(api: TitanBackend) -> None:
                         signals: list[SignalDict] = _last_signals[:15] if _last_signals else []
     
                         # Calculate equity
-                        open_value = sum(pos.get("cur_price", pos.get("entry_price", 0)) * pos.get("shares", 0) for pos in _open_pos_dict().values())
+                        open_value = sum((pos.cur_price or pos.entry_price) * pos.shares for pos in _open_positions())
                         total_equity = api.get_pnl_summary()["bankroll"] + open_value
     
                         data = {
@@ -3000,7 +3027,7 @@ def run_ui(api: TitanBackend) -> None:
                                 "bankroll": api.get_pnl_summary()["bankroll"],
                                 "start_bankroll": api.get_pnl_summary()["bankroll_start"],
                                 "session_pnl": api.get_pnl_summary()["session_pnl"],
-                                "open_pos_count": len(_open_pos_dict()),
+                                "open_pos_count": len(_open_positions()),
                                 "total_trades": api.get_trade_stats()["sell_count"]
                             },
                             "pnl_history": [round(v, 4) for _, v in (api.get_pnl_summary()["equity_history"][-200:] if api.get_pnl_summary()["equity_history"] else [])],
@@ -3011,11 +3038,11 @@ def run_ui(api: TitanBackend) -> None:
                                 {"question": s.get("title", ""), "outcome": s.get("outcome", ""), "suggested_bet": s.get("bet", 0), "current_price": s.get("cur", 0), "ev_edge": _signal_ev_pct(s) / 100, "confluence_count": s.get("n_confluence", 0)} for s in signals
                             ],
                             "open_positions": [
-                                {"title": p.get("title", ""), "outcome": p.get("outcome", ""), "entry": p.get("entry_price", 0), "cur": p.get("cur_price", 0), "shares": p.get("shares", 0), "pnl": (p.get("cur_price",0) - p.get("entry_price",0)) * p.get("shares",0)}
-                                for p in sorted(_open_pos_dict().values(), key=lambda x: x.get("entry_ts", 0), reverse=True)
+                                {"title": p.title, "outcome": p.outcome, "entry": p.entry_price, "cur": p.cur_price, "shares": p.shares, "pnl": ((p.cur_price or 0) - p.entry_price) * p.shares}
+                                for p in sorted(_open_positions(), key=lambda x: x.entry_ts, reverse=True)
                             ],
                             "history": [
-                                {"title": p.get("title", ""), "outcome": p.get("outcome", ""), "pnl": p.get("pnl_usdc", 0), "pct": (p.get("pnl_pct") or 0) / 100}
+                                {"title": p.title, "outcome": p.outcome, "pnl": p.pnl_usdc, "pct": (p.pnl_pct or 0) / 100}
                                 for p in api.get_closed_positions(limit=10)
                             ]
                         }

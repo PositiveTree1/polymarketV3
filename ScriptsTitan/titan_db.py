@@ -62,6 +62,8 @@ def init_db(db_path: str) -> None:
                 asset           TEXT,
                 type            TEXT     NOT NULL,
                 title           TEXT,
+                slug            TEXT,
+                event_slug      TEXT,
                 outcome         TEXT,
                 entry_price     REAL,
                 exit_price      REAL,
@@ -220,6 +222,10 @@ def _migrate_add_columns(cx: sqlite3.Connection) -> None:
     existing = {row[1] for row in cx.execute("PRAGMA table_info(trade_history)").fetchall()}
     if "asset" not in existing:
         cx.execute("ALTER TABLE trade_history ADD COLUMN asset TEXT")
+    if "slug" not in existing:
+        cx.execute("ALTER TABLE trade_history ADD COLUMN slug TEXT")
+    if "event_slug" not in existing:
+        cx.execute("ALTER TABLE trade_history ADD COLUMN event_slug TEXT")
 
 
 def _price_history_uses_asset_key(cx: sqlite3.Connection) -> bool:
@@ -575,7 +581,7 @@ def get_schema_description() -> str:
 # ── trade_history ────────────────────────────────────────────────────────────
 
 _TRADE_SCALAR_COLS = (
-    "cid", "asset", "type", "title", "outcome", "entry_price", "exit_price",
+    "cid", "asset", "type", "title", "slug", "event_slug", "outcome", "entry_price", "exit_price",
     "shares", "bet", "pnl_usdc", "pnl_pct", "reason", "ts", "ts_str",
     "bankroll", "tier", "strategy", "stop_loss_pct", "avg_entry",
     "score", "n_confluence", "is_conviction", "market_url",
@@ -593,6 +599,8 @@ def _trade_to_row(trade: dict) -> tuple:
         trade.get("asset"),
         trade.get("type", ""),
         trade.get("title"),
+        trade.get("slug"),
+        trade.get("event_slug"),
         trade.get("outcome"),
         trade.get("entry_price"),
         trade.get("exit_price"),
@@ -654,6 +662,8 @@ def _row_to_trade(row: sqlite3.Row, wallets: list[dict], audits: list[dict]) -> 
         "asset": _as_str(row_data.get("asset")),
         "type": _as_str(row_data.get("type")),
         "title": _as_str(row_data.get("title")),
+        "slug": _as_str(row_data.get("slug")),
+        "event_slug": _as_str(row_data.get("event_slug")),
         "outcome": _as_str(row_data.get("outcome")),
         "entry_price": _as_float(row_data.get("entry_price")),
         "shares": _as_float(row_data.get("shares")),
