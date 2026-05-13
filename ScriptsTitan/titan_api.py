@@ -8,9 +8,10 @@ from titan_position import normalize_closed_position
 if TYPE_CHECKING:
     from titan_signals import SignalDict
     from titan_position import Position
+    from titan_trade import TradeRecord
     from titan_types import (
         AlertDict, ErrorDict, WhaleDict,
-        PnlSummaryDict, TradeStatsDict, PortfolioOverviewDict, TradeRecordDict,
+        PnlSummaryDict, TradeStatsDict, PortfolioOverviewDict,
     )
 
 
@@ -141,10 +142,10 @@ class TitanAPI:
     )
     def get_closed_positions(self, limit: int = 200) -> list[Position]:
         import titan_db as _DB
-        sells = [t for t in _DB.load_trade_history(limit=limit) if t.get("type") == "SELL"]
+        sells = [t for t in _DB.load_trade_history(limit=limit) if t.type == "SELL"]
         result: list[Position] = []
         for t in reversed(sells):
-            asset = str(t.get("asset") or "")
+            asset = t.asset
             ph = _DB.load_price_history(asset) if asset else []
             result.append(normalize_closed_position(t, ph))
         return result
@@ -316,7 +317,7 @@ class TitanAPI:
         description="Returns the full trade history (buys and sells).",
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_trade_history(self) -> list[TradeRecordDict]:
+    def get_trade_history(self) -> list[TradeRecord]:
         import titan_db as _DB
         return _DB.load_trade_history()
 
@@ -591,14 +592,14 @@ class TitanAPI:
         recent_trades = _DB.load_trade_history(limit=100)
         lines.append("[TRADE HISTORY (last 100)]")
         for t in recent_trades:
-            typ     = t.get("type", "?")
-            icon    = "BUY" if typ == "BUY" else ("WIN" if (t.get("pnl_usdc") or 0) >= 0 else "LOSS")
-            pnl_str = f" PnL=${t.get('pnl_usdc',0):+.4f}({t.get('pnl_pct',0):+.1f}%)" if typ == "SELL" else ""
-            whale_str = ",".join(t.get("whale_names", [])[:2]) or "?"
+            typ     = t.type or "?"
+            icon    = "BUY" if typ == "BUY" else ("WIN" if (t.pnl_usdc or 0) >= 0 else "LOSS")
+            pnl_str = f" PnL=${(t.pnl_usdc or 0):+.4f}({(t.pnl_pct or 0):+.1f}%)" if typ == "SELL" else ""
+            whale_str = ",".join(t.whale_names[:2]) or "?"
             lines.append(
-                f"  [{icon}|{t.get('tier','?')}] {t.get('ts_str','?')} "
-                f"{t.get('title','')[:40]} [{t.get('outcome','')}] "
-                f"Entry=${t.get('entry_price',0):.4f} Bet=${t.get('bet',0):.2f}"
+                f"  [{icon}|{t.tier or '?'}] {t.ts_str or '?'} "
+                f"{t.title[:40]} [{t.outcome}] "
+                f"Entry=${t.entry_price:.4f} Bet=${t.bet:.2f}"
                 f"{pnl_str} via={whale_str}"
             )
         if not recent_trades:
@@ -697,14 +698,14 @@ class TitanAPI:
         recent_trades2 = _DB2.load_trade_history(limit=100)
         lines.append("┌─ TRADE HISTORY (last 100) ──────────────────────────────────────────┐")
         for t in recent_trades2:
-            typ  = t.get("type", "?")
-            icon = "🛒" if typ == "BUY" else ("✅" if (t.get("pnl_usdc") or 0) >= 0 else "❌")
-            pnl_str = f"P&L ${t.get('pnl_usdc',0):+.4f} ({t.get('pnl_pct',0):+.1f}%)" if typ == "SELL" else ""
-            whale_str = ", ".join(t.get("whale_names", [])[:2]) or "?"
+            typ  = t.type or "?"
+            icon = "🛒" if typ == "BUY" else ("✅" if (t.pnl_usdc or 0) >= 0 else "❌")
+            pnl_str = f"P&L ${(t.pnl_usdc or 0):+.4f} ({(t.pnl_pct or 0):+.1f}%)" if typ == "SELL" else ""
+            whale_str = ", ".join(t.whale_names[:2]) or "?"
             lines.append(
-                f"  {icon} {t.get('ts_str','?')}  {typ:<4}  [{t.get('tier','?')}]  "
-                f"{t.get('title','')[:36]}  [{t.get('outcome','')}]"
-                f"  Entry:${t.get('entry_price',0):.4f}  Bet:${t.get('bet',0):.2f}"
+                f"  {icon} {t.ts_str or '?'}  {typ:<4}  [{t.tier or '?'}]  "
+                f"{t.title[:36]}  [{t.outcome}]"
+                f"  Entry:${t.entry_price:.4f}  Bet:${t.bet:.2f}"
                 f"  {pnl_str}  via:{whale_str}"
             )
         if not recent_trades2:

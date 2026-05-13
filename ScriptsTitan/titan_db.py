@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Iterator, cast
 if TYPE_CHECKING:
     from titan_state import TradeStats
     from titan_signals import SignalDict
-    from titan_types import TradeRecordDict
+from titan_trade import TradeRecord
 
 _DB_PATH: str = ""
 
@@ -589,43 +589,43 @@ _TRADE_SCALAR_COLS = (
 )
 
 
-def _trade_to_row(trade: dict) -> tuple:
-    ts_raw = trade.get("ts")
+def _trade_to_row(trade: TradeRecord) -> tuple:
+    ts_raw = trade.ts
     ts = _ts_to_dt(float(ts_raw)) if ts_raw is not None else _ts_to_dt(0.0)
-    entry_ts_raw = trade.get("entry_ts")
-    exit_ts_raw = trade.get("exit_ts")
+    entry_ts_raw = trade.entry_ts
+    exit_ts_raw = trade.exit_ts
     return (
-        trade.get("cid"),
-        trade.get("asset"),
-        trade.get("type", ""),
-        trade.get("title"),
-        trade.get("slug"),
-        trade.get("event_slug"),
-        trade.get("outcome"),
-        trade.get("entry_price"),
-        trade.get("exit_price"),
-        trade.get("shares"),
-        trade.get("bet"),
-        trade.get("pnl_usdc"),
-        trade.get("pnl_pct"),
-        trade.get("reason"),
+        trade.cid,
+        trade.asset,
+        trade.type,
+        trade.title,
+        trade.slug,
+        trade.event_slug,
+        trade.outcome,
+        trade.entry_price,
+        trade.exit_price,
+        trade.shares,
+        trade.bet,
+        trade.pnl_usdc,
+        trade.pnl_pct,
+        trade.reason,
         ts,
-        trade.get("ts_str"),
-        trade.get("bankroll"),
-        trade.get("tier"),
-        trade.get("strategy"),
-        trade.get("stop_loss_pct"),
-        trade.get("avg_entry"),
-        trade.get("score"),
-        trade.get("n_confluence"),
-        int(trade.get("is_conviction") or 0),
-        trade.get("market_url"),
+        trade.ts_str,
+        trade.bankroll,
+        trade.tier,
+        trade.strategy,
+        trade.stop_loss_pct,
+        trade.avg_entry,
+        trade.score,
+        trade.n_confluence,
+        int(trade.is_conviction),
+        trade.market_url,
         _ts_to_dt(float(entry_ts_raw)) if entry_ts_raw is not None else None,
         _ts_to_dt(float(exit_ts_raw)) if exit_ts_raw is not None else None,
     )
 
 
-def _row_to_trade(row: sqlite3.Row, wallets: list[dict], audits: list[dict]) -> "TradeRecordDict":
+def _row_to_trade(row: sqlite3.Row, wallets: list[dict], audits: list[dict]) -> "TradeRecord":
     row_data = dict(row)
 
     def _as_str(value: object) -> str:
@@ -657,59 +657,59 @@ def _row_to_trade(row: sqlite3.Row, wallets: list[dict], audits: list[dict]) -> 
         if wallet.get("cash") is not None
     }
 
-    trade: TradeRecordDict = {
-        "cid": _as_str(row_data.get("cid")),
-        "asset": _as_str(row_data.get("asset")),
-        "type": _as_str(row_data.get("type")),
-        "title": _as_str(row_data.get("title")),
-        "slug": _as_str(row_data.get("slug")),
-        "event_slug": _as_str(row_data.get("event_slug")),
-        "outcome": _as_str(row_data.get("outcome")),
-        "entry_price": _as_float(row_data.get("entry_price")),
-        "shares": _as_float(row_data.get("shares")),
-        "bet": _as_float(row_data.get("bet")),
-        "ts": _dt_to_ts(str(ts_value)) if ts_value else 0.0,
-        "ts_str": _as_str(row_data.get("ts_str")),
-        "bankroll": _as_float(row_data.get("bankroll")),
-        "tier": _as_str(row_data.get("tier")),
-        "strategy": _as_str(row_data.get("strategy")),
-        "score": _as_float(row_data.get("score")),
-        "n_confluence": _as_int(row_data.get("n_confluence")),
-        "is_conviction": bool(row_data.get("is_conviction")),
-        "market_url": _as_str(row_data.get("market_url")),
-        "entry_ts": _dt_to_ts(str(entry_ts_value)) if entry_ts_value else 0.0,
-        "elite_wallets": elite_wallets,
-        "whale_names": whale_names,
-        "whale_buy_cash": whale_buy_cash,
-    }
+    trade = TradeRecord(
+        cid=_as_str(row_data.get("cid")),
+        asset=_as_str(row_data.get("asset")),
+        type=_as_str(row_data.get("type")),
+        title=_as_str(row_data.get("title")),
+        slug=_as_str(row_data.get("slug")),
+        event_slug=_as_str(row_data.get("event_slug")),
+        outcome=_as_str(row_data.get("outcome")),
+        entry_price=_as_float(row_data.get("entry_price")),
+        shares=_as_float(row_data.get("shares")),
+        bet=_as_float(row_data.get("bet")),
+        ts=_dt_to_ts(str(ts_value)) if ts_value else 0.0,
+        ts_str=_as_str(row_data.get("ts_str")),
+        bankroll=_as_float(row_data.get("bankroll")),
+        tier=_as_str(row_data.get("tier")),
+        strategy=_as_str(row_data.get("strategy")),
+        score=_as_float(row_data.get("score")),
+        n_confluence=_as_int(row_data.get("n_confluence")),
+        is_conviction=bool(row_data.get("is_conviction")),
+        market_url=_as_str(row_data.get("market_url")),
+        entry_ts=_dt_to_ts(str(entry_ts_value)) if entry_ts_value else 0.0,
+        elite_wallets=elite_wallets,
+        whale_names=whale_names,
+        whale_buy_cash=whale_buy_cash,
+    )
 
     if row_data.get("exit_price") is not None:
-        trade["exit_price"] = float(row_data["exit_price"])
+        trade.exit_price = float(row_data["exit_price"])
     if exit_ts_value:
-        trade["exit_ts"] = _dt_to_ts(str(exit_ts_value))
+        trade.exit_ts = _dt_to_ts(str(exit_ts_value))
     if row_data.get("pnl_usdc") is not None:
-        trade["pnl_usdc"] = float(row_data["pnl_usdc"])
+        trade.pnl_usdc = float(row_data["pnl_usdc"])
     if row_data.get("pnl_pct") is not None:
-        trade["pnl_pct"] = float(row_data["pnl_pct"])
+        trade.pnl_pct = float(row_data["pnl_pct"])
     if row_data.get("reason") is not None:
-        trade["reason"] = str(row_data["reason"])
+        trade.reason = str(row_data["reason"])
     if row_data.get("stop_loss_pct") is not None:
-        trade["stop_loss_pct"] = float(row_data["stop_loss_pct"])
+        trade.stop_loss_pct = float(row_data["stop_loss_pct"])
     if row_data.get("avg_entry") is not None:
-        trade["avg_entry"] = float(row_data["avg_entry"])
+        trade.avg_entry = float(row_data["avg_entry"])
 
     for audit in audits:
         audit_type = str(audit["audit_type"])
         audit_data = json.loads(str(audit["data"]))
         if audit_type == "entry_audit":
-            trade["entry_audit"] = audit_data
+            trade.entry_audit = audit_data
         elif audit_type == "exit_audit":
-            trade["exit_audit"] = audit_data
+            trade.exit_audit = audit_data
 
     return trade
 
 
-def append_trade(trade: dict) -> None:
+def append_trade(trade: TradeRecord) -> None:
     if not _DB_PATH:
         return
     with _connect() as cx:
@@ -721,9 +721,9 @@ def append_trade(trade: dict) -> None:
         )
         trade_id = cur.lastrowid
 
-        wallets = trade.get("elite_wallets") or []
-        names = trade.get("whale_names") or []
-        cash_map = trade.get("whale_buy_cash") or {}
+        wallets = trade.elite_wallets
+        names = trade.whale_names
+        cash_map = trade.whale_buy_cash
         wallet_rows = [
             (trade_id, w, names[i] if i < len(names) else None, cash_map.get(w))
             for i, w in enumerate(wallets)
@@ -734,8 +734,7 @@ def append_trade(trade: dict) -> None:
                 wallet_rows,
             )
 
-        for audit_type in ("entry_audit", "exit_audit"):
-            audit_data = trade.get(audit_type)
+        for audit_type, audit_data in (("entry_audit", trade.entry_audit), ("exit_audit", trade.exit_audit)):
             if audit_data is not None:
                 cx.execute(
                     "INSERT INTO trade_history_audit (trade_id, audit_type, data) VALUES (?, ?, ?)",
@@ -743,14 +742,14 @@ def append_trade(trade: dict) -> None:
                 )
 
 
-def bulk_insert_trades(trades: list[dict]) -> None:
+def bulk_insert_trades(trades: list[TradeRecord]) -> None:
     if not trades or not _DB_PATH:
         return
     for trade in trades:
         append_trade(trade)
 
 
-def load_trade_history(limit: int = 5000) -> list["TradeRecordDict"]:
+def load_trade_history(limit: int = 5000) -> list["TradeRecord"]:
     if not _DB_PATH:
         return []
     with _connect() as cx:

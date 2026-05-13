@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from dataclasses import asdict, is_dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from pathlib import Path
@@ -95,6 +96,22 @@ class _SessionManager:
 
 
 _sessions = _SessionManager()
+
+
+def _to_serializable(value: object) -> object:
+    from titan_position import Position as _Position
+
+    if isinstance(value, _Position):
+        return value.to_dict()
+    if is_dataclass(value) and not isinstance(value, type):
+        return asdict(value)
+    if isinstance(value, list):
+        return [_to_serializable(item) for item in value]
+    if isinstance(value, tuple):
+        return [_to_serializable(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _to_serializable(item) for key, item in value.items()}
+    return value
 
 
 # ── tool registry (built from @mcp_tool decorators) ──────────────────────────
@@ -300,15 +317,14 @@ def _dispatch(body: dict, sid: str | None, api: TitanAPI) -> dict | None:
             return _ok(rid, _text_result(f"{tool_name} completed."))
         if isinstance(result, str):
             return _ok(rid, _text_result(result))
-        if isinstance(result, (list, dict)):
-            from titan_position import Position as _Position
-            if isinstance(result, list):
-                serializable = [v.to_dict() if isinstance(v, _Position) else v for v in result]
+        serializable = _to_serializable(result)
+        if isinstance(serializable, (list, dict)):
+            if isinstance(serializable, list):
                 structured: dict = {"result": serializable}
                 text = json.dumps(serializable, indent=2, default=str)
             else:
-                structured = result
-                text = json.dumps(result, indent=2, default=str)
+                structured = serializable
+                text = json.dumps(serializable, indent=2, default=str)
             return _ok(rid, _text_result(text, structured))
         return _ok(rid, _text_result(str(result)))
 

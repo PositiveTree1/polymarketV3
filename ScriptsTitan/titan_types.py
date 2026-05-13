@@ -8,6 +8,7 @@ Import with TYPE_CHECKING to avoid runtime circular imports:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import TypedDict
 
 
@@ -92,43 +93,5 @@ class PortfolioOverviewDict(TypedDict):
     recent_error_count: int
 
 
-class _TradeRecordRequired(TypedDict):
-    cid:          str
-    asset:        str
-    type:         str          # "BUY" | "SELL"
-    title:        str
-    outcome:      str
-    entry_price:  float
-    shares:       float
-    bet:          float
-    ts:           float
-    ts_str:       str
-    bankroll:     float
-    tier:         str
-    strategy:     str
-    score:        float
-    n_confluence: int
-    is_conviction: bool
-    market_url:   str
-    entry_ts:     float
-    elite_wallets: list[str]
-    whale_names:  list[str]
-    whale_buy_cash: dict[str, float]
 
-
-class TradeRecordDict(_TradeRecordRequired, total=False):
-    slug:           str
-    event_slug:     str
-    exit_price:     float
-    exit_ts:        float
-    pnl_usdc:       float
-    pnl_pct:        float
-    reason:         str
-    stop_loss_pct:  float
-    avg_entry:      float
-    entry_audit:    dict
-    exit_audit:     dict
-    # get_closed_positions extras
-    price_history:          list[tuple[float, float]]
-    price_history_source:   str
-    price_history_error:    str | None
+    

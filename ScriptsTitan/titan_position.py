@@ -8,7 +8,7 @@ import titan_state as S
 import titan_config as C
 
 if TYPE_CHECKING:
-    from titan_types import TradeRecordDict
+    from titan_trade import TradeRecord
 
 
 @dataclass
@@ -282,49 +282,49 @@ class Position:
         )
 
     @classmethod
-    def from_trade_record(cls, trade: "TradeRecordDict", price_history: list[tuple[float, float]]) -> Position:
-        entry_audit = trade.get("entry_audit", {})
-        slug = str(trade.get("slug") or _audit_value(entry_audit, "market_snapshot", "slug"))
-        event_slug = str(trade.get("event_slug") or _audit_value(entry_audit, "market_snapshot", "event_slug"))
-        exit_price = float(trade.get("exit_price") or trade.get("entry_price") or 0.0)
+    def from_trade_record(cls, trade: "TradeRecord", price_history: list[tuple[float, float]]) -> Position:
+        entry_audit = trade.entry_audit
+        slug = str(trade.slug or _audit_value(entry_audit, "market_snapshot", "slug"))
+        event_slug = str(trade.event_slug or _audit_value(entry_audit, "market_snapshot", "event_slug"))
+        exit_price = float(trade.exit_price or trade.entry_price or 0.0)
         return cls(
-            key=                  str((trade.get("cid", ""), trade.get("outcome", ""))),
+            key=                  str((trade.cid, trade.outcome)),
             status=               "closed",
             type=                 "SELL",
-            cid=                  str(trade.get("cid", "")),
-            asset=                str(trade.get("asset", "")),
-            title=                str(trade.get("title", "")),
+            cid=                  trade.cid,
+            asset=                trade.asset,
+            title=                trade.title,
             slug=                 slug,
             event_slug=           event_slug,
-            outcome=              str(trade.get("outcome", "")),
-            market_url=           str(trade.get("market_url", "")),
-            entry_price=          float(trade.get("entry_price") or 0.0),
+            outcome=              trade.outcome,
+            market_url=           trade.market_url,
+            entry_price=          float(trade.entry_price or 0.0),
             current_price=        exit_price,
             cur_price=            exit_price,
             exit_price=           exit_price,
-            shares=               float(trade.get("shares") or 0.0),
-            bet=                  float(trade.get("bet") or 0.0),
-            entry_ts=             float(trade.get("entry_ts") or 0.0),
-            exit_ts=              float(trade.get("exit_ts") or 0.0),
-            tier=                 str(trade.get("tier", "")),
-            strategy=             str(trade.get("strategy", "")),
-            elite_wallets=        [str(w) for w in trade.get("elite_wallets", [])],
-            whale_names=          [str(n) for n in trade.get("whale_names", [])],
-            whale_buy_cash=       {str(k): float(v) for k, v in trade.get("whale_buy_cash", {}).items()},
+            shares=               float(trade.shares or 0.0),
+            bet=                  float(trade.bet or 0.0),
+            entry_ts=             float(trade.entry_ts or 0.0),
+            exit_ts=              float(trade.exit_ts or 0.0),
+            tier=                 trade.tier,
+            strategy=             trade.strategy,
+            elite_wallets=        [str(w) for w in trade.elite_wallets],
+            whale_names=          [str(n) for n in trade.whale_names],
+            whale_buy_cash=       {str(k): float(v) for k, v in trade.whale_buy_cash.items()},
             price_history=        price_history,
             price_history_source= "db_closed" if price_history else "none",
-            price_history_error=  "old trade, no asset" if not trade.get("asset") else "",
-            pnl_usdc=             float(trade.get("pnl_usdc") or 0.0),
-            pnl_pct=              float(trade.get("pnl_pct") or 0.0),
-            bankroll=             float(trade.get("bankroll") or 0.0),
-            score=                float(trade.get("score") or 0.0),
-            n_confluence=         int(trade.get("n_confluence") or 0),
-            is_conviction=        bool(trade.get("is_conviction", False)),
-            avg_entry=            float(trade.get("avg_entry") or 0.0),
-            stop_loss_pct=        float(trade.get("stop_loss_pct") or 0.0),
-            entry_audit=          dict(trade.get("entry_audit") or {}),
-            exit_audit=           dict(trade.get("exit_audit") or {}),
-            reason=               str(trade.get("reason") or ""),
+            price_history_error=  "old trade, no asset" if not trade.asset else "",
+            pnl_usdc=             float(trade.pnl_usdc or 0.0),
+            pnl_pct=              float(trade.pnl_pct or 0.0),
+            bankroll=             float(trade.bankroll or 0.0),
+            score=                float(trade.score or 0.0),
+            n_confluence=         int(trade.n_confluence or 0),
+            is_conviction=        trade.is_conviction,
+            avg_entry=            float(trade.avg_entry or 0.0),
+            stop_loss_pct=        float(trade.stop_loss_pct or 0.0),
+            entry_audit=          dict(trade.entry_audit),
+            exit_audit=           dict(trade.exit_audit),
+            reason=               trade.reason,
         )
 
 
@@ -350,5 +350,5 @@ def normalize_open_position(key: object, d: dict) -> Position:
     return Position.from_open_dict(key, d)
 
 
-def normalize_closed_position(trade: "TradeRecordDict", price_history: list[tuple[float, float]]) -> Position:
+def normalize_closed_position(trade: "TradeRecord", price_history: list[tuple[float, float]]) -> Position:
     return Position.from_trade_record(trade, price_history)

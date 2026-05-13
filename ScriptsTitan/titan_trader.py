@@ -30,6 +30,7 @@ from titan_market  import fetch_position_price_history, get_market, get_outcome_
 from titan_signals import classify_market, estimate_expected_value, _KNOWN_HEDGE_WALLETS, Signal
 from titan_wallet  import is_hft_wallet, record_whale_trade_performance
 from titan_persistence import save_state, save_whale_roster_async
+from titan_trade import TradeRecord
 import titan_db as DB
 
 
@@ -609,44 +610,37 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         S.env().paper_bankroll += bet + pnl_usdc_net
         S.env().session_pnl    += pnl_usdc_net
 
-        trade_record = {
-            "cid":           pos.cid or key[0],
-            "asset":         pos.asset,
-            "type":          "SELL",
-            "title":         pos.title,
-            "outcome":       pos.outcome,
-            "entry_price":   pos.entry_price,
-            "exit_price":    cur,
-            "shares":        shares,
-            "bet":           bet,
-            "pnl_usdc":      round(pnl_usdc_net, 4),
-            "pnl_pct":       round(pnl_pct * 100, 2),
-            "reason":        reason,
-            "ts":            now_t,
-            "ts_str":        sell_dtf["ts_str"],
-            "ts_iso":        sell_dtf["ts_iso"],
-            "date":          sell_dtf["date"],
-            "time":          sell_dtf["time"],
-            "entry_ts":      pos.entry_ts,
-            "exit_ts":       now_t,
-            "exit_ts_str":   sell_dtf["ts_str"],
-            "exit_ts_iso":   sell_dtf["ts_iso"],
-            "exit_date":     sell_dtf["date"],
-            "exit_time":     sell_dtf["time"],
-            "bankroll":      round(S.env().paper_bankroll, 4),
-            "tier":          pos.tier,
-            "strategy":      pos.strategy,
-            "elite_wallets": pos.elite_wallets,
-            "whale_buy_cash": pos.whale_buy_cash,
-            "whale_names":   [
+        trade_record = TradeRecord(
+            cid=pos.cid or key[0],
+            asset=pos.asset,
+            type="SELL",
+            title=pos.title,
+            outcome=pos.outcome,
+            entry_price=pos.entry_price,
+            exit_price=cur,
+            shares=shares,
+            bet=bet,
+            pnl_usdc=round(pnl_usdc_net, 4),
+            pnl_pct=round(pnl_pct * 100, 2),
+            reason=reason,
+            ts=now_t,
+            ts_str=sell_dtf["ts_str"],
+            entry_ts=pos.entry_ts,
+            exit_ts=now_t,
+            bankroll=round(S.env().paper_bankroll, 4),
+            tier=pos.tier,
+            strategy=pos.strategy,
+            elite_wallets=pos.elite_wallets,
+            whale_buy_cash=pos.whale_buy_cash,
+            whale_names=[
                 S.env().wallet_cache.get(w, {}).get("name", w[:10]+"…")
                 for w in pos.elite_wallets[:3]
             ],
-            "avg_entry":     pos.avg_entry or pos.entry_price,
-            "market_url":    pos.market_url,
-            "entry_audit":   pos.entry_audit,
-            "exit_audit":    exit_audit,
-        }
+            avg_entry=pos.avg_entry or pos.entry_price,
+            market_url=pos.market_url,
+            entry_audit=pos.entry_audit,
+            exit_audit=exit_audit,
+        )
         DB.append_trade(trade_record)
         S.env().trade_stats.record_sell(pnl_usdc_net)
         DB.upsert_trade_stats(S.env().trade_stats)
@@ -662,7 +656,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         record_whale_trade_performance(pos.elite_wallets, pnl_usdc_net, won=(pnl_usdc_net >= 0))
 
         emoji = "✅" if pnl_usdc_net >= 0 else "❌"
-        whale_str = ", ".join(trade_record["whale_names"])
+        whale_str = ", ".join(trade_record.whale_names)
         strat_tag = pos.strategy[:2].upper()
         events.append((
             "CLOSE",
@@ -925,43 +919,33 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             opening_whale_counts[w] = opening_whale_counts.get(w, 0) + 1
         open_per_strategy[strat] = open_per_strategy.get(strat, 0) + 1
 
-        trade_record = {
-            "cid":           cid,
-            "asset":         asset,
-            "type":          "BUY",
-            "title":         title,
-            "outcome":       outcome,
-            "entry_price":   cur,
-            "exit_price":    None,
-            "shares":        shares,
-            "bet":           bet,
-            "pnl_usdc":      None,
-            "pnl_pct":       None,
-            "reason":        f"AUTO_{tier}",
-            "ts":            now_t,
-            "ts_str":        buy_dtf["ts_str"],
-            "ts_iso":        buy_dtf["ts_iso"],
-            "date":          buy_dtf["date"],
-            "time":          buy_dtf["time"],
-            "entry_ts":      now_t,
-            "entry_ts_str":  buy_dtf["ts_str"],
-            "entry_ts_iso":  buy_dtf["ts_iso"],
-            "entry_date":    buy_dtf["date"],
-            "entry_time":    buy_dtf["time"],
-            "bankroll":      round(S.env().paper_bankroll, 4),
-            "tier":          tier,
-            "strategy":      strat,  # v10
-            "stop_loss_pct": sig_stop_loss,  # v10
-            "elite_wallets": elite_wallet_addrs,
-            "whale_names":   elite_names,
-            "whale_buy_cash": whale_buy_cash,
-            "avg_entry":     sig.avg_entry,
-            "score":         sig.score,
-            "n_confluence":  sig.n_confluence,
-            "is_conviction": is_conviction,
-            "market_url":    market_url,
-            "entry_audit":   entry_audit,
-        }
+        trade_record = TradeRecord(
+            cid=cid,
+            asset=asset,
+            type="BUY",
+            title=title,
+            outcome=outcome,
+            entry_price=cur,
+            shares=shares,
+            bet=bet,
+            reason=f"AUTO_{tier}",
+            ts=now_t,
+            ts_str=buy_dtf["ts_str"],
+            entry_ts=now_t,
+            bankroll=round(S.env().paper_bankroll, 4),
+            tier=tier,
+            strategy=strat,
+            stop_loss_pct=sig_stop_loss,
+            elite_wallets=elite_wallet_addrs,
+            whale_names=elite_names,
+            whale_buy_cash=whale_buy_cash,
+            avg_entry=sig.avg_entry,
+            score=sig.score,
+            n_confluence=sig.n_confluence,
+            is_conviction=is_conviction,
+            market_url=market_url,
+            entry_audit=entry_audit,
+        )
         DB.append_trade(trade_record)
 
         n_conf   = sig.n_confluence

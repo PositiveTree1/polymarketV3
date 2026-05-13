@@ -690,8 +690,8 @@ def run_ui(api: TitanBackend) -> None:
     def show_trade_history_detail(trade):
         """Show a floating detail popup for a closed trade."""
         win = tk.Toplevel(root)
-        typ = trade.get("type", "?")
-        win.title(f"Trade Detail — {trade.get('title','')[:50]}")
+        typ = trade.type or "?"
+        win.title(f"Trade Detail — {trade.title[:50]}")
         win.configure(bg="#060615")
         win.geometry("760x500")
     
@@ -699,19 +699,19 @@ def run_ui(api: TitanBackend) -> None:
         bold9  = font.Font(family="Courier", size=9, weight="bold")
         bold11 = font.Font(family="Courier", size=11, weight="bold")
     
-        pnl_u = trade.get("pnl_usdc") or 0
-        pnl_p = trade.get("pnl_pct")  or 0
+        pnl_u = trade.pnl_usdc or 0
+        pnl_p = trade.pnl_pct or 0
         pnl_color = "#00ff55" if pnl_u >= 0 else "#ff5555"
-        title = trade.get("title", "Unknown")
-        slug  = trade.get("slug", "") or trade.get("event_slug", "")
+        title = trade.title or "Unknown"
+        slug  = trade.slug or trade.event_slug
     
         hf = tk.Frame(win, bg="#0a0a20", pady=8)
         hf.pack(fill="x", padx=8, pady=(8,0))
         icon = "🛒" if typ == "BUY" else ("✅" if pnl_u >= 0 else "❌")
-        tk.Label(hf, text=f"{icon} [{typ}] [{trade.get('tier','?')}]  {title}",
+        tk.Label(hf, text=f"{icon} [{typ}] [{trade.tier or '?'}]  {title}",
                  fg="#00aaff" if typ == "BUY" else pnl_color, bg="#0a0a20", font=bold11,
                  wraplength=730, justify="left").pack(anchor="w", padx=12)
-        tk.Label(hf, text=f"Outcome: {trade.get('outcome','')}   Time: {trade.get('ts_str','')}",
+        tk.Label(hf, text=f"Outcome: {trade.outcome}   Time: {trade.ts_str}",
                  fg="#556677", bg="#0a0a20", font=mono9).pack(anchor="w", padx=12)
     
         sf2 = tk.Frame(win, bg="#060615")
@@ -723,18 +723,18 @@ def run_ui(api: TitanBackend) -> None:
             tk.Label(f, text=label, fg="#445566", bg="#0d0d20", font=mono9, pady=2).pack()
             tk.Label(f, text=value, fg=color, bg="#0d0d20", font=bold9, pady=2).pack()
     
-        w_entry = trade.get("avg_entry", trade.get("entry_price", 0))
-        entry_p = trade.get("entry_price", 0)
-        exit_p  = trade.get("exit_price", 0)
+        w_entry = trade.avg_entry or trade.entry_price
+        entry_p = trade.entry_price
+        exit_p  = trade.exit_price or 0.0
         stats_data = [
             ("Whale Entry",  f"${w_entry:.4f}",                          "#ffaa44"),
             ("Our Entry",    f"${entry_p:.4f}",                          "#aaaaff"),
             ("Exit Price",   f"${exit_p:.4f}" if exit_p else "—",        pnl_color if typ=="SELL" else "#888888"),
             ("P&L $",        f"${pnl_u:+.4f}" if typ=="SELL" else "—",   pnl_color),
             ("P&L %",        f"{pnl_p:+.1f}%" if typ=="SELL" else "—",   pnl_color),
-            ("Bet Size",     f"${trade.get('bet',0):.2f}",               "#00aaff"),
-            ("Tier",         trade.get("tier","?"),                      "#ff8844"),
-            ("Bankroll @",   f"${trade.get('bankroll',0):.3f}",          "#778899"),
+            ("Bet Size",     f"${trade.bet:.2f}",                        "#00aaff"),
+            ("Tier",         trade.tier or "?",                          "#ff8844"),
+            ("Bankroll @",   f"${trade.bankroll:.3f}",                   "#778899"),
         ]
         for i, (lbl, val, col) in enumerate(stats_data):
             sf2.columnconfigure(i % 4, weight=1)
@@ -743,9 +743,9 @@ def run_ui(api: TitanBackend) -> None:
         # Whales — show name + how much each whale put into this trade
         wf = tk.Frame(win, bg="#060615")
         wf.pack(fill="x", padx=8)
-        whale_names = trade.get("whale_names", [])
-        whale_addrs = trade.get("elite_wallets", [])
-        whale_cash  = trade.get("whale_buy_cash", {})  # addr → $ amount
+        whale_names = trade.whale_names
+        whale_addrs = trade.elite_wallets
+        whale_cash  = trade.whale_buy_cash  # addr → $ amount
         if whale_names or whale_addrs:
             tk.Label(wf, text="VIA WHALES:", fg="#00ff88", bg="#060615", font=mono9).pack(anchor="w", padx=12, pady=(4,2))
             for i, name in enumerate(whale_names[:6]):
@@ -761,7 +761,7 @@ def run_ui(api: TitanBackend) -> None:
                          fg="#00cc88", bg="#060615", font=mono9).pack(anchor="w", padx=16)
     
         # Exit reason
-        reason = trade.get("reason", "")
+        reason = trade.reason
         if reason:
             tk.Label(win, text=f"Exit reason: {reason}",
                      fg="#ffaa44", bg="#060615", font=mono9).pack(anchor="w", padx=20)
@@ -1186,12 +1186,12 @@ def run_ui(api: TitanBackend) -> None:
         outcome  = str(vals[3]) if len(vals) > 3 else ""
         # Find matching trade in history
         for t in reversed(api.get_trade_history()[-500:]):
-            if t.get('ts_str', '') == ts_str:
+            if t.ts_str == ts_str:
                 show_trade_history_detail(t)
                 return
         # Fallback: match by title+outcome
         for t in reversed(api.get_trade_history()[-500:]):
-            if mkt_name[:20] in t.get('title', '') and t.get('outcome', '') == outcome:
+            if mkt_name[:20] in t.title and t.outcome == outcome:
                 show_trade_history_detail(t)
                 return
     
@@ -1231,24 +1231,24 @@ def run_ui(api: TitanBackend) -> None:
         history = api.get_trade_history()
         hist_tree.delete(*hist_tree.get_children())
         for t in reversed(history[-200:]):
-            whale_str = ", ".join(t.get("whale_names", [])[:2]) or "—"
-            w_entry   = f"${t.get('avg_entry', t.get('entry_price', 0)):.4f}"
-            if t.get("type") == "BUY":
+            whale_str = ", ".join(t.whale_names[:2]) or "—"
+            w_entry   = f"${(t.avg_entry or t.entry_price):.4f}"
+            if t.type == "BUY":
                 hist_tree.insert("", "end", values=(
-                    t.get("ts_str","—"), "BUY", t.get("title","")[:40], t.get("outcome",""),
-                    w_entry, f"${t.get('entry_price',0):.4f}",
-                    "—", "—", "—", whale_str, f"${t.get('bankroll',0):.3f}",
+                    t.ts_str or "—", "BUY", t.title[:40], t.outcome,
+                    w_entry, f"${t.entry_price:.4f}",
+                    "—", "—", "—", whale_str, f"${t.bankroll:.3f}",
                 ), tags=("BUY",))
-            elif t.get("type") == "SELL":
-                pnl_u = t.get("pnl_usdc") or 0
-                pnl_p = t.get("pnl_pct")  or 0
+            elif t.type == "SELL":
+                pnl_u = t.pnl_usdc or 0
+                pnl_p = t.pnl_pct or 0
                 tag   = "WIN" if pnl_u >= 0 else "LOSS"
                 hist_tree.insert("", "end", values=(
-                    t.get("ts_str","—"), "SELL", t.get("title","")[:40], t.get("outcome",""),
-                    w_entry, f"${t.get('entry_price',0):.4f}",
-                    f"${t.get('exit_price',0):.4f}" if t.get("exit_price") else "—",
+                    t.ts_str or "—", "SELL", t.title[:40], t.outcome,
+                    w_entry, f"${t.entry_price:.4f}",
+                    f"${t.exit_price:.4f}" if t.exit_price else "—",
                     f"${pnl_u:+.4f}", f"{pnl_p:+.1f}%", whale_str,
-                    f"${t.get('bankroll',0):.3f}",
+                    f"${t.bankroll:.3f}",
                 ), tags=(tag,))
     
         draw_pnl_graph()
@@ -1348,8 +1348,15 @@ def run_ui(api: TitanBackend) -> None:
 
     def _log_ui_error(context: str, error: Exception, level: str = "ERR") -> None:
         import traceback
-        tb = traceback.format_exc().strip()
-        log(f"[{context}] {error}\n{tb}", level)
+        tb = error.__traceback__
+        if tb is not None:
+            last_frame = traceback.extract_tb(tb)[-1]
+            location = f"{last_frame.filename}:{last_frame.lineno}"
+            detail = f"{type(error).__name__}: {error} @ {location}"
+        else:
+            detail = f"{type(error).__name__}: {error}"
+        stack = "".join(traceback.format_exception(type(error), error, tb)).strip()
+        log(f"[{context}] {detail}\n{stack}", level)
     
     
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -2749,7 +2756,7 @@ def run_ui(api: TitanBackend) -> None:
         try: render_open_positions()
         except Exception as _e: log(f"[render_open_positions error] {_e}", "ERR")
         try: refresh_pnl_tab()
-        except Exception as _e: log(f"[refresh_pnl_tab error] {_e}", "ERR")
+        except Exception as _e: _log_ui_error("refresh_pnl_tab error", _e)
         try: render_whales(_last_wallets)
         except Exception as _e: log(f"[render_whales error] {_e}", "ERR")
 

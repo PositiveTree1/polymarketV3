@@ -12,13 +12,15 @@ import urllib.request
 from collections.abc import Mapping
 from collections import defaultdict
 from typing import TYPE_CHECKING, Callable
+from titan_trade import TradeRecord
 
 if TYPE_CHECKING:
     from titan_signals import SignalDict
     from titan_position import Position
+    from titan_trade import TradeRecord
     from titan_types import (
         AlertDict, ErrorDict, WhaleDict,
-        PnlSummaryDict, TradeStatsDict, PortfolioOverviewDict, TradeRecordDict,
+        PnlSummaryDict, TradeStatsDict, PortfolioOverviewDict,
     )
 
 
@@ -294,8 +296,16 @@ class TitanClient:
     def get_pnl_summary(self) -> PnlSummaryDict:
         return self._call_tool("get_pnl_summary")  # type: ignore[return-value]
 
-    def get_trade_history(self) -> list[TradeRecordDict]:
-        return self._call_tool("get_trade_history")  # type: ignore[return-value]
+    def get_trade_history(self) -> list[TradeRecord]:
+        raw_value = self._call_tool("get_trade_history")
+        if not isinstance(raw_value, list):
+            raise RuntimeError(f"Invalid get_trade_history payload: expected list, got {type(raw_value).__name__}")
+        return [
+            item if isinstance(item, TradeRecord)
+            else TradeRecord.from_mapping(item)
+            for item in raw_value
+            if isinstance(item, Mapping | TradeRecord)
+        ]
 
     def get_trade_stats(self) -> TradeStatsDict:
         return self._call_tool("get_trade_stats")  # type: ignore[return-value]

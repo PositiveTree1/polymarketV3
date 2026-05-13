@@ -185,8 +185,8 @@ def _rebuild_trade_stats(env) -> None:
     from titan_state import TradeStats
     stats = TradeStats()
     for t in DB.load_trade_history():
-        pnl_usdc = t.get("pnl_usdc")
-        if pnl_usdc is not None and t.get("type") == "SELL":
+        pnl_usdc = t.pnl_usdc
+        if pnl_usdc is not None and t.type == "SELL":
             stats.record_sell(float(pnl_usdc))
     env.trade_stats = stats
 
@@ -194,15 +194,15 @@ def _rebuild_trade_stats(env) -> None:
 def _rebuild_equity_from_trades(env):
     trades_with_br = [
         t for t in DB.load_trade_history()
-        if t.get("bankroll") and t.get("ts")
+        if t.bankroll and t.ts
     ]
     if not trades_with_br:
         env.equity_history = []
         return
-    trades_with_br.sort(key=lambda t: t["ts"])
-    points = [(trades_with_br[0]["ts"] - 1, float(BANKROLL_START))]
+    trades_with_br.sort(key=lambda t: t.ts)
+    points = [(trades_with_br[0].ts - 1, float(BANKROLL_START))]
     for t in trades_with_br:
-        points.append((float(t["ts"]), float(t["bankroll"])))
+        points.append((float(t.ts), float(t.bankroll)))
     points.append((time.time(), env.paper_bankroll))
     env.equity_history = points
     S._log(
