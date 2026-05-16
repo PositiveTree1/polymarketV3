@@ -119,7 +119,7 @@ def show_loading_screen(root, api, on_complete):
     spin_idx    = [0]
 
     BOOT_TASKS = [
-        ("Checking engine status...", lambda: api.get_status()),
+        ("Connecting to engine...", lambda: api.get_status()),
         ("Loading P&L and bankroll state...", lambda: api.get_pnl_summary()),
         ("Fetching verified whale roster...", lambda: api.get_whales()),
         ("Syncing open positions...", lambda: api.get_positions()),
@@ -171,7 +171,6 @@ def show_loading_screen(root, api, on_complete):
                 task()
             except Exception:
                 pass
-            time.sleep(0.3)  # Small visual delay so the user can read the step
         current_step[0] = total_steps
 
     draw_bar(0.0)
@@ -508,7 +507,7 @@ def run_ui(api: TitanBackend) -> None:
         win = tk.Toplevel(root)
         win.title(f"Position Detail — {pos.title[:50]}")
         win.configure(bg="#060615")
-        win.geometry("820x640")
+        win.geometry("820x760")
         win.resizable(True, True)
 
         mono10  = font.Font(family="Courier", size=10)
@@ -600,6 +599,60 @@ def run_ui(api: TitanBackend) -> None:
             tk.Label(wf, text=f"  {hft_t}{name:<22} WR:{wr:.0f}%  PnL:${pnl_w:+,.0f}  Score:{prof.get('score',0):.2f}",
                      fg="#00cc88", bg="#060615", font=mono9).pack(anchor="w", padx=12)
     
+        tf = tk.Frame(win, bg="#060615")
+        tf.pack(fill="x", padx=8, pady=(6, 0))
+        tk.Label(tf, text="TRADES", fg="#00ff88", bg="#060615", font=bold9).pack(anchor="w", padx=4, pady=(4,2))
+
+        trade_cols = ("type", "time", "price", "shares", "bet", "pnl")
+        trade_tree = ttk.Treeview(tf, columns=trade_cols, show="headings", height=3)
+        trade_tree.heading("type", text="Type")
+        trade_tree.heading("time", text="Time")
+        trade_tree.heading("price", text="Price")
+        trade_tree.heading("shares", text="Shares")
+        trade_tree.heading("bet", text="Bet")
+        trade_tree.heading("pnl", text="P&L")
+        trade_tree.column("type", width=60, anchor="center")
+        trade_tree.column("time", width=150, anchor="w")
+        trade_tree.column("price", width=80, anchor="e")
+        trade_tree.column("shares", width=80, anchor="e")
+        trade_tree.column("bet", width=80, anchor="e")
+        trade_tree.column("pnl", width=90, anchor="e")
+        trade_tree.pack(fill="x", padx=4, pady=(0,4))
+
+        position_trades: list[TradeRecord] = [pos.buy_trade]
+        if pos.sell_trade is not None:
+            position_trades.append(pos.sell_trade)
+
+        trade_items: dict[str, TradeRecord] = {}
+        for trade in position_trades:
+            pnl_value = "â€”"
+            if trade.type == "SELL":
+                pnl_value = f"${(trade.pnl_usdc or 0.0):+.4f}"
+            item_id = trade_tree.insert(
+                "",
+                "end",
+                values=(
+                    trade.type or "?",
+                    trade.ts_str,
+                    f"${trade.price:.4f}",
+                    f"{trade.shares:.2f}",
+                    f"${trade.bet:.2f}",
+                    pnl_value,
+                ),
+            )
+            trade_items[str(item_id)] = trade
+
+        def _open_selected_trade(_event: tk.Event[tk.Misc]) -> None:
+            selection = trade_tree.selection()
+            if not selection:
+                return
+            trade = trade_items.get(str(selection[0]))
+            if trade is None:
+                return
+            show_trade_history_detail(trade)
+
+        trade_tree.bind("<Double-1>", _open_selected_trade)
+
         # Links
         lf = tk.Frame(win, bg="#060615")
         lf.pack(fill="x", padx=8, pady=6)
@@ -608,6 +661,21 @@ def run_ui(api: TitanBackend) -> None:
         def open_polymarket() -> None:
             log(f"Opening Polymarket URL: {pos.market_url}", "DEBUG")
             pos.open_on_polymarket()
+
+        def open_market_detail() -> None:
+            market_value: object | None = None
+            try:
+                market_value = pos.market
+            except Exception:
+                audit = pos.entry_audit
+                if isinstance(audit, dict):
+                    snapshot = audit.get("market_snapshot")
+                    if snapshot is not None:
+                        market_value = snapshot
+            if market_value is None:
+                log("[position detail] market payload missing", "WARN")
+                return
+            show_market_detail(cast(dict[str, object], market_value), signal_title=title)
     
         def copy_title():
             try:
@@ -625,6 +693,10 @@ def run_ui(api: TitanBackend) -> None:
     
         tk.Button(lf, text="🌐 Open on Polymarket", bg="#0a1a3a", fg="#00aaff",
                   font=mono9, padx=10, command=open_polymarket).pack(side="left", padx=4)
+        tk.Button(lf, text="ðŸ“ˆ Market", bg="#10203a", fg="#88ccff",
+                  font=mono9, padx=10, command=open_market_detail).pack(side="left", padx=4)
+        tk.Button(lf, text="ðŸ“ˆ Market", bg="#10203a", fg="#88ccff",
+                  font=mono9, padx=10, command=open_market_detail).pack(side="left", padx=4)
         tk.Button(lf, text="📋 Copy Title", bg="#1a2a1a", fg="#00ff88",
                   font=mono9, padx=10, command=copy_title).pack(side="left", padx=4)
         tk.Button(lf, text="🔎 Inspect Raw", bg="#201a2a", fg="#d0b0ff",
@@ -780,6 +852,14 @@ def run_ui(api: TitanBackend) -> None:
     
         def open_polymarket():
             trade.open_on_polymarket()
+
+        def open_market_detail() -> None:
+            audit = trade.audit
+            market_value = audit.get("market_snapshot") if isinstance(audit, dict) else None
+            if market_value is None:
+                log("[trade detail] market payload missing", "WARN")
+                return
+            show_market_detail(cast(dict[str, object], market_value), signal_title=title)
     
         def copy_title():
             try:
@@ -2229,7 +2309,7 @@ def run_ui(api: TitanBackend) -> None:
 
         def open_market_detail() -> None:
             market_value = signal.get("mkt")
-            if not isinstance(market_value, dict):
+            if market_value is None:
                 log("[signal detail] market payload missing", "WARN")
                 return
             show_market_detail(cast(dict[str, object], market_value), signal_title=signal_title)
@@ -2766,6 +2846,9 @@ def run_ui(api: TitanBackend) -> None:
         root.after(0, lambda: log(msg, level))
         if level == "ERR" and telegram_notifier is not None:
             threading.Thread(target=telegram_notifier.notify_error, args=(msg,), daemon=True).start()
+
+    import titan_state as _ts_mut
+    _ts_mut.on_log = on_log_cb
     
     
     def on_position_open_cb(pos):
@@ -2991,9 +3074,12 @@ def run_ui(api: TitanBackend) -> None:
                         fast_p = fetch_position_price_fast(cid, asset, outcome)
                         if fast_p is not None and fast_p != pos.cur_price:
                             pos.cur_price = fast_p
-                            pos.price_history.append((time.time(), fast_p))
+                            now_ts = time.time()
+                            pos.price_history.append((now_ts, fast_p))
                             if len(pos.price_history) > 2880:
                                 del pos.price_history[:-2880]
+                            from titan_prices import PRICES
+                            PRICES.ingest(asset, [(now_ts, fast_p)])
                             updated = True
                     if updated:
                         _pending_update[0] = True

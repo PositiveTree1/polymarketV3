@@ -8,6 +8,8 @@ from datetime import datetime
 from typing import cast
 import titan_state as S
 import titan_db as DB
+import titan_prices
+from titan_prices import PricesCacheSrv
 from titan_config import STATE_FILE, WHALE_FILE, STATE_DB, BANKROLL_START, SEED_WATCHLIST
 from titan_wallet import WalletProfile
 
@@ -65,6 +67,9 @@ def save_whale_roster_async():
 
 def load_state():
     DB.init_db(STATE_DB)
+    srv = PricesCacheSrv()
+    srv.init_db(STATE_DB)
+    titan_prices.PRICES = srv
     _load_whale_roster()
     _load_trading_state()
 

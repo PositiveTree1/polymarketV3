@@ -26,7 +26,8 @@ import titan_state as S
 from titan_config import *
 import titan_config as C
 from titan_position import Position, get_effective_stop_loss
-from titan_market  import fetch_asset_price_history, get_market, get_outcome_price, is_market_resolving, Market
+from titan_market  import get_market, get_outcome_price, is_market_resolving, Market
+from titan_prices  import PRICES
 from titan_signals import classify_market, estimate_expected_value, _KNOWN_HEDGE_WALLETS, Signal
 from titan_wallet  import is_hft_wallet, record_whale_trade_performance
 from titan_persistence import save_state, save_whale_roster_async
@@ -235,18 +236,18 @@ def _compact_elite_trade_snapshot(elite_ver: dict) -> list[dict]:
     for addr, trade in list((elite_ver or {}).items())[:8]:
         rows.append({
             "wallet": addr,
-            "name": trade.get("name"),
-            "title": trade.get("title"),
-            "outcome": trade.get("outcome"),
-            "price": trade.get("price"),
-            "size": trade.get("size"),
-            "cash": trade.get("cash"),
-            "asset": trade.get("asset"),
-            "slug": trade.get("slug"),
-            "event_slug": trade.get("event_slug"),
-            "ts": trade.get("ts"),
-            "source": trade.get("source"),
-            "window": trade.get("window"),
+            "name": trade.name,
+            "title": trade.title,
+            "outcome": trade.outcome,
+            "price": trade.price,
+            "size": trade.size,
+            "cash": trade.cash,
+            "asset": trade.asset,
+            "slug": trade.slug,
+            "event_slug": trade.event_slug,
+            "ts": trade.ts,
+            "source": trade.source,
+            "window": trade.window,
         })
     return rows
 
@@ -422,6 +423,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         pos.price_history.append((now_t, cur))
         if len(pos.price_history) > 1440:
             del pos.price_history[:-1440]
+        PRICES.add_point(pos.asset, now_t, cur)
 
         pnl_pct = (cur - entry) / max(entry, 0.001)
         reason  = None
@@ -844,8 +846,6 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         market_url = _build_market_url(event_slug, resolved_slug)
         entry_audit = _build_entry_audit(sig, cur, shares, bet, ev_info, now_t, S.env().paper_bankroll)
 
-        price_history = _with_latest_price_point(fetch_asset_price_history(asset), now_t, cur)
-
         trade_record = TradeRecord(
             cid=cid,
             asset=asset,
@@ -873,6 +873,9 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             market_url=market_url,
             audit=entry_audit,
         )
+
+        trade_record.load_prices()
+
         DB.append_trade(trade_record)
 
         pos = Position(
@@ -896,13 +899,10 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             market_fail_count= 0,
             peak_pnl_pct=      0.0,
         )
-        pos.set_price_history(price_history, "clob_api_open")
 
         S.env().open_positions[key]    = pos
         S.env().active_market_cids.add(cid)
         S.env().position_whale_map[cid] = set(all_whale_addrs)
-        if asset:
-            DB.upsert_price_history(asset, price_history)
 
         # WS: subscribe to real-time resolution events
         _ws_sub = _get_ws_monitor()

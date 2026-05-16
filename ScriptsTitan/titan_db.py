@@ -373,50 +373,6 @@ def _ts_column_type(cx: sqlite3.Connection, table_name: str) -> str | None:
     return None
 
 
-# ── price_history ────────────────────────────────────────────────────────────
-
-def upsert_price_history(asset: str, points: list[tuple[float, float]]) -> None:
-    """Write (ts, price) pairs for an asset. Ignores duplicates."""
-    asset_id = str(asset).strip()
-    if not asset_id or not points or not _DB_PATH:
-        return
-    rows = [(asset_id, _ts_to_dt(float(ts)), _ts_to_dt(float(ts)), float(p))
-            for ts, p in points]
-    with _connect() as cx:
-        cx.executemany(
-            "INSERT OR IGNORE INTO price_history (asset, ts, recorded_at, price) "
-            "VALUES (?, ?, ?, ?)",
-            rows,
-        )
-
-
-def load_price_history(asset: str, limit: int = 2880) -> list[tuple[float, float]]:
-    """Return [(ts, price), ...] ordered oldest-first, capped at limit."""
-    asset_id = str(asset).strip()
-    if not asset_id or not _DB_PATH:
-        return []
-    with _connect() as cx:
-        rows = cx.execute(
-            "SELECT ts, price FROM price_history "
-            "WHERE asset = ? "
-            "ORDER BY ts DESC LIMIT ?",
-            (asset_id, limit),
-        ).fetchall()
-    return [(_dt_to_ts(str(r[0])), float(r[1])) for r in reversed(rows)]
-
-
-def delete_price_history(asset: str) -> None:
-    """Remove all price history for an asset."""
-    asset_id = str(asset).strip()
-    if not asset_id or not _DB_PATH:
-        return
-    with _connect() as cx:
-        cx.execute(
-            "DELETE FROM price_history WHERE asset = ?",
-            (asset_id,),
-        )
-
-
 # ── equity_history ───────────────────────────────────────────────────────────
 
 def upsert_equity_history(points: list[tuple[float, float]]) -> None:

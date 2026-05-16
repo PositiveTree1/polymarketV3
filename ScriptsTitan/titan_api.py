@@ -125,11 +125,15 @@ class TitanAPI:
     def get_positions(self) -> list[Position]:
         import titan_state as _TS
         env = _TS.env()
-        return sorted(
+        positions = sorted(
             env.open_positions.values(),
             key=lambda pos: pos.entry_ts,
             reverse=True,
         )
+        for pos in positions:
+            if not pos.price_history:
+                pos.load_prices()
+        return positions
 
     @mcp_tool(
         description="Returns closed positions as consolidated position dicts enriched with price_history from DB.",
@@ -160,8 +164,9 @@ class TitanAPI:
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
     def get_signals(self, min_score: float = 0.0) -> list[SignalDict]:
+        from titan_signals import load_signal_prices_many
         filtered = [s for s in self._last_signals if s.get("score", 0) >= min_score]
-        return self._hydrate_signal_price_history(filtered)
+        return load_signal_prices_many(filtered)
 
     @mcp_tool(
         description=(
@@ -177,8 +182,7 @@ class TitanAPI:
     )
     def get_signal_history(self, limit: int = 200, min_score: float = 0.0, cid: str | None = None) -> list[SignalDict]:
         import titan_db as _DB
-        signals = _DB.load_signal_history(limit=limit, min_score=min_score, cid=cid)
-        return self._hydrate_signal_price_history(signals)
+        return _DB.load_signal_history(limit=limit, min_score=min_score, cid=cid)
 
     @mcp_tool(
         description="Returns recent signal rejection reasons from the last engine cycles.",
@@ -329,13 +333,9 @@ class TitanAPI:
         annotations={"readOnlyHint": True, "openWorldHint": True},
     )
     def get_asset_price_history(self, asset: str) -> list[tuple[float, float]]:
-        from titan_market import fetch_asset_price_history
-        import titan_db as _DB
-        live = fetch_asset_price_history(asset)
-        if live:
-            _DB.upsert_price_history(asset, live)
-            return live
-        return _DB.load_price_history(asset)
+        from titan_prices import PRICES
+        PRICES.refresh(asset)
+        return PRICES.get(asset)
 
     @mcp_tool(
         description="Returns the full trade history (buys and sells).",
@@ -483,7 +483,7 @@ class TitanAPI:
     def _load_persisted_signals_rejects(self) -> None:
         try:
             import titan_db as DB
-            self._last_signals = self._hydrate_signal_price_history(DB.load_latest_signals(200))
+            self._last_signals = DB.load_latest_signals(200)
             self._last_rejects = DB.load_latest_rejects(50)
             import titan_state as _S
             _S._log(f"📂 Restored {len(self._last_signals)} signal(s) and {len(self._last_rejects)} reject(s) from DB", "INFO")
@@ -493,6 +493,7 @@ class TitanAPI:
 
     def _on_cycle(self, signals, wallets, rejects, trades) -> None:
         from titan_signals import Signal
+        from titan_signals import load_signal_prices_many
         from typing import cast
         import titan_db as DB
         ts = time.time()
@@ -500,10 +501,10 @@ class TitanAPI:
             s.to_dict() if isinstance(s, Signal) else cast(SignalDict, s)
             for s in (signals or [])
         ]
-        signal_dicts = self._hydrate_signal_price_history(signal_dicts)
-        self._last_signals = signal_dicts
         if signal_dicts:
             DB.save_signals(cast(list[dict], signal_dicts), ts)
+            load_signal_prices_many(signal_dicts)
+        self._last_signals = signal_dicts
         if rejects:
             DB.save_rejects(rejects, ts)
             for r in reversed(rejects):
@@ -517,35 +518,6 @@ class TitanAPI:
             "rejects": rejects,
             "trades": trades,
         })
-
-    def _hydrate_signal_price_history(self, signals: list[SignalDict]) -> list[SignalDict]:
-        from titan_market import fetch_asset_price_history
-        import titan_db as _DB
-
-        hydrated: list[SignalDict] = []
-        for signal in signals:
-            price_history = signal.get("price_history")
-            if price_history:
-                hydrated.append(signal)
-                continue
-
-            asset_id = str(signal.get("asset") or "")
-            if not asset_id:
-                hydrated.append(signal)
-                continue
-
-            live_history = fetch_asset_price_history(asset_id)
-            if live_history:
-                signal["price_history"] = live_history
-                _DB.upsert_price_history(asset_id, live_history)
-                hydrated.append(signal)
-                continue
-
-            cached_history = _DB.load_price_history(asset_id)
-            if cached_history:
-                signal["price_history"] = cached_history
-            hydrated.append(signal)
-        return hydrated
 
     def _on_heartbeat(self, payload: dict) -> None:
         self._emit("titan/heartbeat", payload)

@@ -40,10 +40,12 @@ class TradeRecord:
     price_history_error:  str | None = None
 
     @property
+    def timestamp(self) -> datetime:
+        return datetime.fromtimestamp(self.ts)
+    
+    @property
     def ts_str(self) -> str:
-        if not self.ts:
-            return ""
-        return datetime.fromtimestamp(self.ts).strftime("%Y-%m-%d %H:%M:%S")
+        return self.timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "TradeRecord":
@@ -104,11 +106,17 @@ class TradeRecord:
         webbrowser.open(self.market_url)
         return
     
-    @property
-    def timestamp(self) -> datetime:
-        return datetime.fromtimestamp(self.ts)
+    def get_prices(self) -> list[tuple[float, float]]:
+        self.load_prices()
+        return self.price_history
     
-    @property
-    def ts_str(self) -> str:
-        return self.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+    def load_prices(self) -> None:
+        from titan_prices import PRICES
+        points, source, error = PRICES.get_prices(self.asset)
+        self.price_history = points
+        self.price_history_source = source
+        self.price_history_error = error
+        return
+
+
     

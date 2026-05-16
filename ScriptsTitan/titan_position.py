@@ -58,11 +58,6 @@ class Position:
     mkt_type:             str   = ""
     is_sports:            bool  = False
 
-    # ── price history ─────────────────────────────────────────────────────────
-    price_history:        list[tuple[float, float]] = field(default_factory=list)
-    price_history_source: str        = ""
-    price_history_error:  str        = ""
-
     # ── runtime state ─────────────────────────────────────────────────────────
     peak_pnl_pct:         float = 0.0
     market_fail_count:    int   = 0
@@ -114,7 +109,13 @@ class Position:
             return self.buy_trade.asset
         if self.sell_trade and self.sell_trade.asset:
             return self.sell_trade.asset
-        raise ValueError("Position has no trade asset")
+        audit_asset = _audit_value(self.buy_trade.audit if self.buy_trade is not None else None, "signal_snapshot", "asset")
+        if audit_asset:
+            return audit_asset
+        audit_asset = _audit_value(self.sell_trade.audit if self.sell_trade is not None else None, "signal_snapshot", "asset")
+        if audit_asset:
+            return audit_asset
+        return ""
 
     @asset.setter
     def asset(self, value: str) -> None:
@@ -150,7 +151,13 @@ class Position:
             return self.buy_trade.slug
         if self.sell_trade and self.sell_trade.slug:
             return self.sell_trade.slug
-        raise ValueError("Position has no trade slug")
+        audit_slug = _audit_value(self.buy_trade.audit if self.buy_trade is not None else None, "market_snapshot", "slug")
+        if audit_slug:
+            return audit_slug
+        audit_slug = _audit_value(self.sell_trade.audit if self.sell_trade is not None else None, "market_snapshot", "slug")
+        if audit_slug:
+            return audit_slug
+        return ""
 
     @slug.setter
     def slug(self, value: str) -> None:
@@ -168,7 +175,13 @@ class Position:
             return self.buy_trade.event_slug
         if self.sell_trade and self.sell_trade.event_slug:
             return self.sell_trade.event_slug
-        raise ValueError("Position has no trade event_slug")
+        audit_event_slug = _audit_value(self.buy_trade.audit if self.buy_trade is not None else None, "market_snapshot", "event_slug")
+        if audit_event_slug:
+            return audit_event_slug
+        audit_event_slug = _audit_value(self.sell_trade.audit if self.sell_trade is not None else None, "market_snapshot", "event_slug")
+        if audit_event_slug:
+            return audit_event_slug
+        return ""
 
     @event_slug.setter
     def event_slug(self, value: str) -> None:
@@ -328,22 +341,81 @@ class Position:
             raise LookupError(f"Market not loaded for cid={cid}")
         return market
 
+    def _market_snapshot_value(self, key: str) -> object:
+        audit = self.entry_audit
+        if not isinstance(audit, dict):
+            return None
+        market_snapshot = audit.get("market_snapshot")
+        if not isinstance(market_snapshot, dict):
+            return None
+        return market_snapshot.get(key)
+
     @property
     def liq(self) -> float:
-        return float(self.market.liq)
+        try:
+            return float(self.market.liq)
+        except LookupError:
+            snapshot_value = self._market_snapshot_value("liq")
+            return float(snapshot_value) if isinstance(snapshot_value, (int, float)) else 0.0
 
     @property
     def volume(self) -> float:
-        return float(self.market.volume)
+        try:
+            return float(self.market.volume)
+        except LookupError:
+            snapshot_value = self._market_snapshot_value("volume")
+            return float(snapshot_value) if isinstance(snapshot_value, (int, float)) else 0.0
 
     @property
     def hrs_left(self) -> float:
-        hrs_left = self.market.hrs_left
-        return float(hrs_left) if hrs_left is not None else 0.0
+        try:
+            hrs_left = self.market.hrs_left
+            return float(hrs_left) if hrs_left is not None else 0.0
+        except LookupError:
+            snapshot_value = self._market_snapshot_value("hrs_left")
+            return float(snapshot_value) if isinstance(snapshot_value, (int, float)) else 0.0
 
     @property
     def end_date(self) -> str:
-        return str(self.market.end_date or "")
+        try:
+            return str(self.market.end_date or "")
+        except LookupError:
+            snapshot_value = self._market_snapshot_value("end_date")
+            return str(snapshot_value or "")
+    
+    @property
+    def price_history(self) -> list[tuple[float, float]]:
+        return self.buy_trade.price_history
+
+    @price_history.setter
+    def price_history(self, value: list[tuple[float, float]]) -> None:
+        self.buy_trade.price_history = value
+
+    @property
+    def price_history_source(self) -> str:
+        return self.buy_trade.price_history_source
+
+    @price_history_source.setter
+    def price_history_source(self, value: str) -> None:
+        self.buy_trade.price_history_source = value
+
+    @property
+    def price_history_error(self) -> str | None:
+        return self.buy_trade.price_history_error
+
+    @price_history_error.setter
+    def price_history_error(self, value: str | None) -> None:
+        self.buy_trade.price_history_error = value
+    
+    def get_prices(self) -> list[tuple[float, float]]:
+        self.load_prices()
+        return self.price_history
+
+    def load_prices(self) -> None:
+        if self.sell_trade is not None:
+            return
+        self.buy_trade.load_prices()
+        return
 
     
 
@@ -362,9 +434,6 @@ class Position:
             "ver_flow":             self.ver_flow,
             "mkt_type":             self.mkt_type,
             "is_sports":            self.is_sports,
-            "price_history":        self.price_history,
-            "price_history_source": self.price_history_source,
-            "price_history_error":  self.price_history_error,
             "peak_pnl_pct":         self.peak_pnl_pct,
             "market_fail_count":    self.market_fail_count,
             "exits":                self.exits,
@@ -395,9 +464,6 @@ class Position:
             ver_flow=             float(d.get("ver_flow") or 0.0),
             mkt_type=             str(d.get("mkt_type", "")),
             is_sports=            bool(d.get("is_sports", False)),
-            price_history=        list(d.get("price_history", [])),
-            price_history_source= str(d.get("price_history_source", "")),
-            price_history_error=  str(d.get("price_history_error") or ""),
             peak_pnl_pct=         float(d.get("peak_pnl_pct") or 0.0),
             market_fail_count=    int(d.get("market_fail_count") or 0),
             exits=                list(d.get("exits", [])),
@@ -418,31 +484,6 @@ class Position:
             return float(C.STOP_LOSS_PCT)
         return None
 
-    def set_price_history(self, points: list[tuple[float, float]], source: str) -> None:
-        self.price_history = points
-        self.price_history_source = source
-        S._log(
-            f"  Price history source [{source}] for {self.title[:30]} "
-            f"asset={self.asset[:20]} points={len(points)}",
-            "DIAG",
-        )
-
-    def ensure_price_history(self) -> None:
-        if self.price_history and not self.price_history_source:
-            self.price_history_source = "unknown_existing"
-            return
-        if self.price_history or not self.asset:
-            return
-        import titan_db as _DB
-        from titan_market import fetch_asset_price_history
-        ph = _DB.load_price_history(self.asset)
-        if ph:
-            self.set_price_history(ph, "db")
-            return
-        ph = fetch_asset_price_history(self.asset)
-        if ph:
-            self.set_price_history(ph, "clob_api")
-            _DB.upsert_price_history(self.asset, ph)
 
     # ── factories ─────────────────────────────────────────────────────────────
     def add_trade(self, trade: "TradeRecord") -> None:
@@ -461,9 +502,10 @@ class Position:
                 self.event_slug = str(trade.event_slug or _audit_value(trade.audit, "market_snapshot", "event_slug"))
 
     def open_on_polymarket(self) -> None:
-        S._log(f"Opening Polymarket URL: {self.market_url}", "DEBUG")
-        webbrowser.open(self.market_url)
+        self.buy_trade.open_on_polymarket()
         return
+
+####
 
 
 def _audit_value(audit: object, *path: str) -> str:
@@ -480,10 +522,6 @@ def get_effective_stop_loss(pos: Position) -> float | None:
     return pos.get_effective_stop_loss()
 
 
-def set_position_price_history(pos: Position, points: list[tuple[float, float]], source: str) -> None:
-    pos.set_price_history(points, source)
-
-
 def group_trades_by_position(trades: "list[TradeRecord]") -> "dict[str, list[TradeRecord]]":
     """Group trades into per-position buckets.
     Key is asset token when available, else 'title|||outcome' as fallback for old records."""
@@ -498,5 +536,4 @@ def build_position_from_trades(trades: "list[TradeRecord]") -> Position:
     pos = Position( buy_trade = trades[0] )
     for t in trades[1:]:
         pos.add_trade(t)
-    pos.ensure_price_history()
     return pos

@@ -127,6 +127,16 @@ class Signal:
         payload.pop("wallets", None)
         return cast("SignalDict", payload)
 
+    def get_prices(self) -> list[tuple[float, float]]:
+        self.load_prices()
+        return self.price_history
+
+    def load_prices(self) -> None:
+        from titan_prices import PRICES
+        points, _, _ = PRICES.get_prices(self.asset)
+        self.price_history = points
+        return
+
 
 class _SignalDictRequired(TypedDict):
     cid:                    str
@@ -179,6 +189,30 @@ class _SignalDictRequired(TypedDict):
 
 class SignalDict(_SignalDictRequired, total=False):
     snapshot_ts:            float
+
+
+def get_signal_prices(signal: SignalDict) -> list[tuple[float, float]]:
+    load_signal_prices(signal)
+    return list(signal.get("price_history") or [])
+
+
+def load_signal_prices(signal: SignalDict) -> None:
+    if signal.get("price_history"):
+        return
+    from titan_prices import PRICES
+    asset_id = str(signal.get("asset") or "")
+    if not asset_id:
+        return
+    points, _, _ = PRICES.get_prices(asset_id)
+    if points:
+        signal["price_history"] = points
+    return
+
+
+def load_signal_prices_many(signals: list[SignalDict]) -> list[SignalDict]:
+    for signal in signals:
+        load_signal_prices(signal)
+    return signals
 
 
 def _hft_spike_ratio_value(trade: WhaleObservation) -> float:

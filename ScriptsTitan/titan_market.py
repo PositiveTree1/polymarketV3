@@ -35,6 +35,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Iterator
+import webbrowser
 import titan_state as S
 
 
@@ -97,6 +98,13 @@ class Market:
     def items(self) -> Iterator[tuple[str, object]]:
         for key in self.keys():
             yield key, getattr(self, key)
+
+    def open_on_polymarket(self) -> None:
+        S._log(f"Market: Opening Polymarket URL: {self.polymarket_url()}", "DEBUG")
+        webbrowser.open(self.polymarket_url())
+        return
+
+
 from titan_config import *
 from titan_wallet import WalletProfile, fetch_wallet, get_elite_wallets, is_hft_wallet
 
@@ -136,7 +144,6 @@ class WhaleSell:
 #  verified or watchable. This cuts 70-80% of Gamma calls.
 # ─────────────────────────────────────────────────────────────────────────────
 _seen_verified_cids: set = set()  # cids from verified/watchable wallets only
-_CLOB_HISTORY_API = "https://clob.polymarket.com/prices-history"
 
 
 def mark_cid_verified(cid: str):
@@ -239,96 +246,6 @@ def _record_cid_failure(cid: str):
 def _reset_cid_failures(cid: str):
     """Reset failure count on success."""
     _gamma_cid_fails.pop(cid, None)
-
-
-def _coerce_history_ts(value: object) -> float | None:
-    if isinstance(value, (int, float)):
-        ts = float(value)
-        if ts > 1_000_000_000_000:
-            ts /= 1000.0
-        return ts if ts > 0 else None
-    if isinstance(value, str):
-        raw = value.strip()
-        if not raw:
-            return None
-        try:
-            return _coerce_history_ts(float(raw))
-        except ValueError:
-            pass
-        normalized = raw.replace("Z", "+00:00").replace(" ", "T")
-        try:
-            dt = datetime.fromisoformat(normalized)
-        except ValueError:
-            return None
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        else:
-            dt = dt.astimezone(timezone.utc)
-        return dt.timestamp()
-    return None
-
-
-def _coerce_history_price(value: object) -> float | None:
-    if isinstance(value, (int, float, str)):
-        try:
-            price = float(value)
-        except ValueError:
-            return None
-        return price if 0.0 <= price <= 1.0 else None
-    return None
-
-
-def _extract_history_points(payload: object) -> list[tuple[float, float]]:
-    rows: object = payload
-    if isinstance(payload, dict):
-        for key in ("history", "data", "prices"):
-            candidate = payload.get(key)
-            if isinstance(candidate, list):
-                rows = candidate
-                break
-
-    if not isinstance(rows, list):
-        return []
-
-    points_by_ts: dict[float, float] = {}
-    for row in rows:
-        ts: float | None = None
-        price: float | None = None
-        if isinstance(row, dict):
-            for ts_key in ("t", "timestamp", "ts", "time"):
-                if ts_key in row:
-                    ts = _coerce_history_ts(row.get(ts_key))
-                    if ts is not None:
-                        break
-            for price_key in ("p", "price", "value"):
-                if price_key in row:
-                    price = _coerce_history_price(row.get(price_key))
-                    if price is not None:
-                        break
-        elif isinstance(row, (list, tuple)) and len(row) >= 2:
-            ts = _coerce_history_ts(row[0])
-            price = _coerce_history_price(row[1])
-        if ts is None or price is None:
-            continue
-        points_by_ts[ts] = price
-
-    return sorted(points_by_ts.items(), key=lambda item: item[0])
-
-
-def fetch_asset_price_history(asset: str) -> list[tuple[float, float]]:
-    """Fetch max-resolution history for a token asset from the CLOB API."""
-    asset_id = str(asset).strip()
-    if not asset_id:
-        return []
-    payload = S.safe_get(
-        _CLOB_HISTORY_API,
-        {"market": asset_id, "interval": "max", "fidelity": 60},
-        timeout=20,
-        quiet=True,
-    )
-    if payload is None:
-        return []
-    return _extract_history_points(payload)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
