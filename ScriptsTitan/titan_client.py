@@ -296,6 +296,12 @@ class TitanClient:
     def get_pnl_summary(self) -> PnlSummaryDict:
         return self._call_tool("get_pnl_summary")  # type: ignore[return-value]
 
+    def get_asset_price_history(self, asset: str) -> list[tuple[float, float]]:
+        result = self._call_tool("get_asset_price_history", {"asset": asset})
+        if not isinstance(result, list):
+            return []
+        return [(float(ts), float(v)) for ts, v in result]
+
     def get_trade_history(self) -> list[TradeRecord]:
         raw_value = self._call_tool("get_trade_history")
         if not isinstance(raw_value, list):

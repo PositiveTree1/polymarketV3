@@ -32,29 +32,71 @@ KEY ARCHITECTURE FACTS about Polymarket:
 
 import time
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TypedDict
+from typing import Iterator
 import titan_state as S
 
 
-class Market(TypedDict):
-    yes_price:      float
-    no_price:       float
-    outcome_labels: list
-    outcome_prices: dict[str, float]
-    token_index:    dict[str, int]
-    index_to_price: dict[int, float]
-    asset_to_price: dict[str, float]
-    asset_to_index: dict[str, int]
-    liq:            float
-    volume:         float
-    title:          str
-    end_date:       str
-    hrs_left:       float | None
-    slug:           str
-    event_slug:     str
-    ts:             float
+@dataclass
+class Market:
+    yes_price: float = 0.5
+    no_price: float = 0.5
+    outcome_labels: list[str] = field(default_factory=list)
+    outcome_prices: dict[str, float] = field(default_factory=dict)
+    token_index: dict[str, int] = field(default_factory=dict)
+    index_to_price: dict[int, float] = field(default_factory=dict)
+    asset_to_price: dict[str, float] = field(default_factory=dict)
+    asset_to_index: dict[str, int] = field(default_factory=dict)
+    liq: float = 0.0
+    volume: float = 0.0
+    title: str = ""
+    end_date: str = ""
+    hrs_left: float | None = None
+    slug: str = ""
+    event_slug: str = ""
+    ts: float = 0.0
+
+    def polymarket_url(self) -> str:
+        slug = self.event_slug or self.slug
+        return f"https://polymarket.com/event/{slug}" if slug else "https://polymarket.com"
+
+    def get(self, key: str, default: object = None) -> object:
+        return getattr(self, key, default)
+
+    def __getitem__(self, key: str) -> object:
+        if not hasattr(self, key):
+            raise KeyError(key)
+        return getattr(self, key)
+
+    def __setitem__(self, key: str, value: object) -> None:
+        if not hasattr(self, key):
+            raise KeyError(key)
+        setattr(self, key, value)
+
+    def keys(self) -> tuple[str, ...]:
+        return (
+            "yes_price",
+            "no_price",
+            "outcome_labels",
+            "outcome_prices",
+            "token_index",
+            "index_to_price",
+            "asset_to_price",
+            "asset_to_index",
+            "liq",
+            "volume",
+            "title",
+            "end_date",
+            "hrs_left",
+            "slug",
+            "event_slug",
+            "ts",
+        )
+
+    def items(self) -> Iterator[tuple[str, object]]:
+        for key in self.keys():
+            yield key, getattr(self, key)
 from titan_config import *
 from titan_wallet import WalletProfile, fetch_wallet, get_elite_wallets, is_hft_wallet
 
@@ -273,7 +315,7 @@ def _extract_history_points(payload: object) -> list[tuple[float, float]]:
     return sorted(points_by_ts.items(), key=lambda item: item[0])
 
 
-def fetch_position_price_history(asset: str) -> list[tuple[float, float]]:
+def fetch_asset_price_history(asset: str) -> list[tuple[float, float]]:
     """Fetch max-resolution history for a token asset from the CLOB API."""
     asset_id = str(asset).strip()
     if not asset_id:
@@ -394,9 +436,9 @@ def get_market(cid: str, trade_title: str | None = None, asset: str = "", slug: 
     """
     now_t  = time.time()
     cached = S.market_cache.get(cid)
-    if cached and (now_t - cached["ts"]) < MARKET_TTL:
-        if trade_title and "?" in str(trade_title) and len(trade_title) > len(cached.get("title", "")):
-            cached["title"] = trade_title
+    if cached and (now_t - cached.ts) < MARKET_TTL:
+        if trade_title and "?" in str(trade_title) and len(trade_title) > len(cached.title):
+            cached.title = trade_title
         return cached, None
 
     # Register this cid as coming from a verified source if flagged
@@ -577,11 +619,11 @@ def get_outcome_price(mkt: Market, outcome: str, asset: str = "") -> float:
     ALWAYS pass asset= when you have it from the trade record.
     """
     if asset:
-        ap = mkt.get("asset_to_price", {})
+        ap = mkt.asset_to_price
         if asset in ap:
             return ap[asset]
 
-    op = mkt.get("outcome_prices", {})
+    op = mkt.outcome_prices
 
     if outcome in op:
         return op[outcome]
@@ -595,13 +637,13 @@ def get_outcome_price(mkt: Market, outcome: str, asset: str = "") -> float:
             return price
 
     if lower in ("yes", "true", "1"):
-        return mkt["yes_price"]
+        return mkt.yes_price
     if lower in ("no", "false", "0"):
-        no_p = mkt.get("no_price")
+        no_p = mkt.no_price
         if no_p is not None:
             return no_p
         S._log(f"  ⚠ get_outcome_price: no_price unavailable for outcome='{outcome}'", "DIAG")
-        return mkt["yes_price"]
+        return mkt.yes_price
 
     S._log(f"  ⚠ get_outcome_price: unmatched outcome='{outcome}' — returning 0.5", "DIAG")
     return 0.5
@@ -616,21 +658,21 @@ def get_outcome_price_by_trade(mkt: Market, trade: dict) -> float:
     asset   = trade.get("asset", "")
 
     if asset:
-        ap = mkt.get("asset_to_price", {})
+        ap = mkt.asset_to_price
         if asset in ap:
             return ap[asset]
 
     price = get_outcome_price(mkt, outcome, asset)
 
-    labels = mkt.get("outcome_labels", [])
+    labels = mkt.outcome_labels
     if len(labels) >= 2:
         lbl0 = str(labels[0])
         lbl1 = str(labels[1])
-        ip   = mkt.get("index_to_price", {})
+        ip = mkt.index_to_price
         if outcome.lower() == lbl1.lower() or outcome.strip() == lbl1.strip():
-            return ip.get(1, mkt.get("no_price", price))
+            return ip.get(1, mkt.no_price)
         if outcome.lower() == lbl0.lower() or outcome.strip() == lbl0.strip():
-            return ip.get(0, mkt.get("yes_price", price))
+            return ip.get(0, mkt.yes_price)
 
     return price
 
@@ -680,12 +722,12 @@ def fetch_position_price_fast(cid: str, asset: str, outcome: str) -> float | Non
                         p = prices[i]
                         cached = S.market_cache.get(cid)
                         if cached:
-                            cached["asset_to_price"][asset] = p
+                            cached.asset_to_price[asset] = p
                             if i == 0:
-                                cached["yes_price"] = p
+                                cached.yes_price = p
                             else:
-                                cached["no_price"] = p
-                            cached["ts"] = time.time()
+                                cached.no_price = p
+                            cached.ts = time.time()
                         return p
 
         # Strategy 2: Data API recent trades — DIRECT MATCH ONLY.
@@ -720,8 +762,8 @@ def is_market_resolving(mkt: Market) -> bool:
     Returns True if a market appears to be resolving/resolved.
     A binary market resolves when one outcome goes to ~1.0 and the other to ~0.0.
     """
-    yes_p = mkt.get("yes_price", 0.5)
-    no_p  = mkt.get("no_price", 0.5)
+    yes_p = mkt.yes_price
+    no_p = mkt.no_price
     return yes_p <= 0.02 or yes_p >= 0.98 or no_p <= 0.02 or no_p >= 0.98
 
 

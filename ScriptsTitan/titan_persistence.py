@@ -8,7 +8,6 @@ from datetime import datetime
 from typing import cast
 import titan_state as S
 import titan_db as DB
-from titan_market import fetch_position_price_history
 from titan_config import STATE_FILE, WHALE_FILE, STATE_DB, BANKROLL_START, SEED_WATCHLIST
 from titan_wallet import WalletProfile
 
@@ -17,26 +16,16 @@ def save_state():
     try:
         env = S.env()
 
-        for pos in env.open_positions.values():
-            if pos.price_history and pos.asset:
-                DB.upsert_price_history(pos.asset, pos.price_history)
-
         if env.watchlist:
             DB.upsert_watchlist(env.watchlist)
-
-        lean_positions = {}
-        for k, pos in env.open_positions.items():
-            d = pos.to_dict()
-            d.pop("price_history", None)
-            lean_positions[f"{k[0]}|||{k[1]}"] = d
 
         state = {
             "bankroll":           env.paper_bankroll,
             "session_pnl":        env.session_pnl,
-            "open_positions":     lean_positions,
             "active_market_cids": list(env.active_market_cids),
             "cooldown_cids":      env.cooldown_cids,
             "position_whale_map": {k: list(v) for k, v in env.position_whale_map.items()},
+            "signal_first_seen_by_asset": env.signal_first_seen_by_asset,
             "saved_at":           datetime.now().isoformat(),
         }
         with open(STATE_FILE, "w") as f:
@@ -96,6 +85,11 @@ def _load_trading_state():
         env.active_market_cids = set(state.get("active_market_cids", []))
         env.cooldown_cids      = state.get("cooldown_cids", {})
         env.position_whale_map = {k: set(v) for k, v in state.get("position_whale_map", {}).items()}
+        env.signal_first_seen_by_asset = {
+            str(asset): float(ts)
+            for asset, ts in state.get("signal_first_seen_by_asset", {}).items()
+            if str(asset)
+        }
 
         db_wl = DB.load_watchlist()
         if db_wl:
@@ -114,41 +108,31 @@ def _load_trading_state():
 
         loaded_stats = DB.load_trade_stats()
         if loaded_stats is not None:
-            env.trade_stats = loaded_stats
+            env.trade_stats = cast(S.TradeStats, loaded_stats)
         else:
             _rebuild_trade_stats(env)
             DB.upsert_trade_stats(env.trade_stats)
 
-        from titan_position import Position
-        raw = state.get("open_positions", {})
-        env.open_positions = {}
-        skipped = 0
-        for composite_key, pos_dict in raw.items():
-            parts = composite_key.split("|||", 1)
-            if len(parts) == 2:
-                env.open_positions[(parts[0], parts[1])] = Position.from_dict(pos_dict)
-            else:
-                skipped += 1
-                S._log(f"📂 Skipped malformed position key: {composite_key!r}", "WARN")
+        _migrate_null_cid_trades(state)
 
-        for key, pos in env.open_positions.items():
-            env.active_market_cids.add(pos.cid or key[0])
-            asset = pos.asset
-            ph = DB.load_price_history(asset) if asset else []
-            price_history_source = "db_restore" if ph else "none"
-            if not ph and asset:
-                ph = fetch_position_price_history(asset)
-                if ph:
-                    DB.upsert_price_history(asset, ph)
-                    price_history_source = "clob_api_restore"
-            pos.set_price_history(ph, price_history_source)
+        from titan_position import group_trades_by_position, build_position_from_trades
+        all_trades = DB.load_trade_history(limit=5000)
+        groups = group_trades_by_position(all_trades)
+        env.open_positions = {}
+        for bucket_trades in groups.values():
+            has_sell = any(t.type == "SELL" for t in bucket_trades)
+            if has_sell:
+                continue
+            pos = build_position_from_trades(bucket_trades)
+            key = (pos.cid, pos.outcome)
+            env.open_positions[key] = pos
+            env.active_market_cids.add(pos.cid or pos.asset)
 
         n_pos = len(env.open_positions)
         if n_pos:
-            S._log(f"📂 Loaded {n_pos} open position(s) from {STATE_FILE}", "INFO")
+            S._log(f"📂 Rebuilt {n_pos} open position(s) from DB trades", "INFO")
         else:
-            reason = f" ({skipped} keys had bad format)" if skipped else " (none saved)"
-            S._log(f"📂 No open positions loaded from {STATE_FILE}{reason}", "INFO")
+            S._log("📂 No open positions in DB", "INFO")
 
         S._log(
             f"📂 State loaded: bankroll=${env.paper_bankroll:.2f} | "
@@ -210,6 +194,56 @@ def _rebuild_equity_from_trades(env):
         f"(${points[0][1]:.2f} → ${points[-1][1]:.2f})",
         "INFO"
     )
+
+
+def _migrate_null_cid_trades(state: dict) -> None:
+    """Repair corrupt cids in trade_history using two sources of truth:
+    1. JSON open_positions: authority for open BUY cids (matched by title+outcome).
+    2. Consistency: if a SELL's cid doesn't match any BUY with the same title+outcome, null it out.
+    """
+    import sqlite3
+    with sqlite3.connect(STATE_DB) as cx:
+        rows = cx.execute("SELECT id, type, title, outcome, cid FROM trade_history").fetchall()
+
+        # Build title+outcome -> set of cids seen on BUY trades
+        buy_cids: dict[tuple[str, str], set[str]] = {}
+        for _, typ, title, outcome, cid in rows:
+            if typ == "BUY" and cid:
+                buy_cids.setdefault((title or "", outcome or ""), set()).add(cid)
+
+        # Override with JSON open_positions as definitive source for open BUYs
+        json_authority: dict[tuple[str, str], dict] = {}
+        for d in state.get("open_positions", {}).values():
+            cid = str(d.get("cid") or "")
+            if not cid:
+                continue
+            key = (str(d.get("title") or ""), str(d.get("outcome") or ""))
+            json_authority[key] = {
+                "cid":        cid,
+                "asset":      str(d.get("asset") or ""),
+                "slug":       str(d.get("slug") or ""),
+                "event_slug": str(d.get("event_slug") or ""),
+                "market_url": str(d.get("market_url") or ""),
+            }
+            buy_cids[key] = {cid}
+
+        updated = 0
+        for row_id, typ, title, outcome, db_cid in rows:
+            key = (title or "", outcome or "")
+            info = json_authority.get(key)
+            if info and db_cid != info["cid"]:
+                cx.execute(
+                    "UPDATE trade_history SET cid=?, asset=?, slug=?, event_slug=?, market_url=? WHERE id=?",
+                    (info["cid"], info["asset"], info["slug"], info["event_slug"], info["market_url"], row_id),
+                )
+                updated += 1
+            elif typ == "SELL" and db_cid and db_cid not in (buy_cids.get(key) or set()):
+                # SELL cid points to a different market — corrupt, detach it
+                cx.execute("UPDATE trade_history SET cid=NULL WHERE id=?", (row_id,))
+                updated += 1
+
+    if updated:
+        S._log(f"📂 Migrated {updated} trade record(s): repaired cids from JSON+consistency check", "INFO")
 
 
 def _load_whale_roster():

@@ -368,9 +368,10 @@ def sync_open_positions():
         if asset:
             tokens.append(asset)
         # Also try to get the sibling token from the market cache
-        mkt = S.market_cache.get(cid, {})
-        for tid in mkt.get("asset_to_price", {}).keys():
-            if tid not in tokens:
-                tokens.append(tid)
+        mkt = S.market_cache.get(cid)
+        if mkt is not None:
+            for tid in mkt.asset_to_price.keys():
+                if tid not in tokens:
+                    tokens.append(tid)
         if tokens:
             subscribe_position(cid, tokens)

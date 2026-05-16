@@ -226,6 +226,18 @@ def _migrate_add_columns(cx: sqlite3.Connection) -> None:
         cx.execute("ALTER TABLE trade_history ADD COLUMN slug TEXT")
     if "event_slug" not in existing:
         cx.execute("ALTER TABLE trade_history ADD COLUMN event_slug TEXT")
+    if "price" not in existing:
+        cx.execute("ALTER TABLE trade_history ADD COLUMN price REAL")
+        cx.execute(
+            """
+            UPDATE trade_history
+            SET price = CASE
+                WHEN type = 'SELL' THEN COALESCE(exit_price, entry_price)
+                ELSE COALESCE(entry_price, exit_price)
+            END
+            WHERE price IS NULL
+            """
+        )
 
 
 def _price_history_uses_asset_key(cx: sqlite3.Connection) -> bool:
@@ -581,19 +593,16 @@ def get_schema_description() -> str:
 # ── trade_history ────────────────────────────────────────────────────────────
 
 _TRADE_SCALAR_COLS = (
-    "cid", "asset", "type", "title", "slug", "event_slug", "outcome", "entry_price", "exit_price",
-    "shares", "bet", "pnl_usdc", "pnl_pct", "reason", "ts", "ts_str",
+    "cid", "asset", "type", "title", "slug", "event_slug", "outcome", "price",
+    "shares", "bet", "pnl_usdc", "pnl_pct", "reason", "ts",
     "bankroll", "tier", "strategy", "stop_loss_pct", "avg_entry",
     "score", "n_confluence", "is_conviction", "market_url",
-    "entry_ts", "exit_ts",
 )
 
 
 def _trade_to_row(trade: TradeRecord) -> tuple:
     ts_raw = trade.ts
     ts = _ts_to_dt(float(ts_raw)) if ts_raw is not None else _ts_to_dt(0.0)
-    entry_ts_raw = trade.entry_ts
-    exit_ts_raw = trade.exit_ts
     return (
         trade.cid,
         trade.asset,
@@ -602,15 +611,13 @@ def _trade_to_row(trade: TradeRecord) -> tuple:
         trade.slug,
         trade.event_slug,
         trade.outcome,
-        trade.entry_price,
-        trade.exit_price,
+        trade.price,
         trade.shares,
         trade.bet,
         trade.pnl_usdc,
         trade.pnl_pct,
         trade.reason,
         ts,
-        trade.ts_str,
         trade.bankroll,
         trade.tier,
         trade.strategy,
@@ -620,8 +627,6 @@ def _trade_to_row(trade: TradeRecord) -> tuple:
         trade.n_confluence,
         int(trade.is_conviction),
         trade.market_url,
-        _ts_to_dt(float(entry_ts_raw)) if entry_ts_raw is not None else None,
-        _ts_to_dt(float(exit_ts_raw)) if exit_ts_raw is not None else None,
     )
 
 
@@ -646,9 +651,6 @@ def _row_to_trade(row: sqlite3.Row, wallets: list[dict], audits: list[dict]) -> 
         raise TypeError(f"Expected int-compatible value, got {type(value).__name__}")
 
     ts_value = row_data.get("ts")
-    entry_ts_value = row_data.get("entry_ts")
-    exit_ts_value = row_data.get("exit_ts")
-
     elite_wallets = [str(wallet["wallet"]) for wallet in wallets]
     whale_names = [str(wallet["name"]) for wallet in wallets if wallet.get("name")]
     whale_buy_cash = {
@@ -665,11 +667,14 @@ def _row_to_trade(row: sqlite3.Row, wallets: list[dict], audits: list[dict]) -> 
         slug=_as_str(row_data.get("slug")),
         event_slug=_as_str(row_data.get("event_slug")),
         outcome=_as_str(row_data.get("outcome")),
-        entry_price=_as_float(row_data.get("entry_price")),
+        price=_as_float(
+            row_data.get("price")
+            if row_data.get("price") is not None
+            else (row_data.get("exit_price") if _as_str(row_data.get("type")) == "SELL" else row_data.get("entry_price"))
+        ),
         shares=_as_float(row_data.get("shares")),
         bet=_as_float(row_data.get("bet")),
         ts=_dt_to_ts(str(ts_value)) if ts_value else 0.0,
-        ts_str=_as_str(row_data.get("ts_str")),
         bankroll=_as_float(row_data.get("bankroll")),
         tier=_as_str(row_data.get("tier")),
         strategy=_as_str(row_data.get("strategy")),
@@ -677,16 +682,11 @@ def _row_to_trade(row: sqlite3.Row, wallets: list[dict], audits: list[dict]) -> 
         n_confluence=_as_int(row_data.get("n_confluence")),
         is_conviction=bool(row_data.get("is_conviction")),
         market_url=_as_str(row_data.get("market_url")),
-        entry_ts=_dt_to_ts(str(entry_ts_value)) if entry_ts_value else 0.0,
         elite_wallets=elite_wallets,
         whale_names=whale_names,
         whale_buy_cash=whale_buy_cash,
     )
 
-    if row_data.get("exit_price") is not None:
-        trade.exit_price = float(row_data["exit_price"])
-    if exit_ts_value:
-        trade.exit_ts = _dt_to_ts(str(exit_ts_value))
     if row_data.get("pnl_usdc") is not None:
         trade.pnl_usdc = float(row_data["pnl_usdc"])
     if row_data.get("pnl_pct") is not None:
@@ -701,10 +701,8 @@ def _row_to_trade(row: sqlite3.Row, wallets: list[dict], audits: list[dict]) -> 
     for audit in audits:
         audit_type = str(audit["audit_type"])
         audit_data = json.loads(str(audit["data"]))
-        if audit_type == "entry_audit":
-            trade.entry_audit = audit_data
-        elif audit_type == "exit_audit":
-            trade.exit_audit = audit_data
+        if audit_type in {"audit", "entry_audit", "exit_audit"}:
+            trade.audit = audit_data
 
     return trade
 
@@ -734,12 +732,11 @@ def append_trade(trade: TradeRecord) -> None:
                 wallet_rows,
             )
 
-        for audit_type, audit_data in (("entry_audit", trade.entry_audit), ("exit_audit", trade.exit_audit)):
-            if audit_data is not None:
-                cx.execute(
-                    "INSERT INTO trade_history_audit (trade_id, audit_type, data) VALUES (?, ?, ?)",
-                    (trade_id, audit_type, json.dumps(audit_data, default=str)),
-                )
+        if trade.audit:
+            cx.execute(
+                "INSERT INTO trade_history_audit (trade_id, audit_type, data) VALUES (?, ?, ?)",
+                (trade_id, "audit", json.dumps(trade.audit, default=str)),
+            )
 
 
 def bulk_insert_trades(trades: list[TradeRecord]) -> None:

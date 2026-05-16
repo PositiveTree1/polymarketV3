@@ -8,6 +8,13 @@ from typing import Any, Callable
 
 HistoryPoint = tuple[float, float]
 
+
+@dataclass
+class ChartMarker:
+    ts:    float
+    label: str
+    color: str = "#ffdd00"
+
 _mono: font.Font | tuple[str, int] = ("Courier", 9)
 _mono_sm: font.Font | tuple[str, int] = ("Courier", 8)
 _bold_hd: font.Font | tuple[str, int, str] = ("Courier", 10, "bold")
@@ -65,6 +72,7 @@ class BaseChart(tk.Canvas):
             **kwargs,
         )
         self._history: list[HistoryPoint] = []
+        self._markers: list[ChartMarker] = []
         self._view_start: int = 0
         self._view_size: int = 0
         self._selector_index: int = 0
@@ -72,9 +80,11 @@ class BaseChart(tk.Canvas):
         self._last_val: float = 0.0
         self._baseline_value: float = 0.0
         self._dirty: bool = False
+        self._redraw_pending: bool = False
         self._drag_x: int | None = None
         self._drag_view_start: int = 0
         self.bind("<Configure>", lambda _event: self._mark_dirty())
+        self.bind("<Map>", lambda _event: self._mark_dirty())
         self.bind("<MouseWheel>", self._on_scroll)
         self.bind("<Motion>", self._on_motion)
         self.bind("<ButtonPress-1>", self._drag_start)
@@ -84,8 +94,26 @@ class BaseChart(tk.Canvas):
         self.bind("<Right>", self._on_right)
         self.bind("<Enter>", lambda _event: self.focus_set())
 
+    def set_markers(self, markers: list[ChartMarker]) -> None:
+        self._markers = markers
+        self._mark_dirty()
+
     def _mark_dirty(self) -> None:
         self._dirty = True
+        self._schedule_redraw()
+
+    def _schedule_redraw(self) -> None:
+        if self._redraw_pending:
+            return
+        self._redraw_pending = True
+        self.after_idle(self._render_if_dirty)
+
+    def _render_if_dirty(self) -> None:
+        self._redraw_pending = False
+        if not self._dirty:
+            return
+        self._redraw()
+        self._dirty = False
 
     def _visible_count(self) -> int:
         count = len(self._history)
@@ -406,6 +434,19 @@ class BaseChart(tk.Canvas):
             tags="chart",
         )
 
+    def _draw_markers(self, ctx: RenderContext) -> None:
+        if not self._markers:
+            return
+        ts_min, ts_max = ctx.timestamps[0], ctx.timestamps[-1]
+        for m in self._markers:
+            if not (ts_min <= m.ts <= ts_max):
+                continue
+            x = ctx.x_from_ts(m.ts)
+            self.create_line(x, ctx.pad_top, x, ctx.height - ctx.pad_bottom,
+                             fill=m.color, dash=(3, 3), width=1, tags="chart")
+            self.create_text(x + 3, ctx.pad_top + 4, text=m.label,
+                             fill=m.color, font=_mono_xs, anchor="nw", tags="chart")
+
     def _time_tick_count(self, visible: list[HistoryPoint]) -> int:
         return min(6, len(visible))
 
@@ -488,6 +529,7 @@ class BaseChart(tk.Canvas):
         self._draw_baseline(ctx)
         self._draw_time_axis(ctx)
         self._draw_series(ctx)
+        self._draw_markers(ctx)
 
         selector_visible_index = self._selector_visible_index()
         if selector_visible_index is not None:
@@ -515,6 +557,8 @@ class PositionChart(BaseChart):
         self._title: str = ""
         self._empty_message: str = "Select a position to view its live price chart"
         self._entry_ts: float | None = None
+        self._exit_ts: float | None = None
+        self._exit_price: float | None = None
 
     def load(
         self,
@@ -523,12 +567,20 @@ class PositionChart(BaseChart):
         entry_price: float,
         empty_message: str | None = None,
         entry_ts: float | None = None,
+        exit_ts: float | None = None,
+        exit_price: float | None = None,
     ) -> None:
         new_len = len(history) if history else 0
         new_msg = empty_message or "Select a position to view its live price chart"
         new_last = history[-1][1] if history else 0.0
         track_latest = self._selector_index >= max(self._last_len - 1, 0)
-        position_changed = title != self._title or entry_price != self._baseline_value or entry_ts != self._entry_ts
+        position_changed = (
+            title != self._title
+            or entry_price != self._baseline_value
+            or entry_ts != self._entry_ts
+            or exit_ts != self._exit_ts
+            or exit_price != self._exit_price
+        )
         data_changed = (
             new_len != self._last_len
             or new_last != self._last_val
@@ -539,6 +591,8 @@ class PositionChart(BaseChart):
             self._title = title
             self._baseline_value = entry_price
             self._entry_ts = entry_ts
+            self._exit_ts = exit_ts
+            self._exit_price = exit_price
             self._empty_message = new_msg
             self._apply_loaded_history(
                 history=history_points,
@@ -547,13 +601,17 @@ class PositionChart(BaseChart):
                 reset_view=position_changed,
                 track_latest=track_latest,
             )
-        if self._dirty:
-            self._redraw()
-            self._dirty = False
+        self._schedule_redraw()
 
     def _crosshair_label(self, ts: float, value: float) -> str:
         pct = (value - self._baseline_value) / max(self._baseline_value, 0.001) * 100
         return f"${value:.4f}  ({pct:+.1f}%)"
+
+    def _marker_x(self, ts_value: float | None, ctx: RenderContext, fallback_ts: float) -> float:
+        if ts_value is None:
+            return ctx.x_from_ts(fallback_ts)
+        clamped_ts = min(max(ts_value, ctx.timestamps[0]), ctx.timestamps[-1])
+        return ctx.x_from_ts(clamped_ts)
 
 
     def _draw_series(self, ctx: RenderContext) -> None:
@@ -583,9 +641,8 @@ class PositionChart(BaseChart):
                 tags="chart",
             )
 
-        buy_ts = self._entry_ts if self._entry_ts is not None else ctx.timestamps[0]
         buy_price = self._baseline_value if self._entry_ts is not None else ctx.values[0]
-        buy_x = ctx.x_from_ts(buy_ts)
+        buy_x = self._marker_x(self._entry_ts, ctx, ctx.timestamps[0])
         buy_y = ctx.y_from_value(buy_price)
         self.create_text(buy_x, buy_y - 14, text="▲ BUY", fill="#ffdd00", font=_mono_sm, tags="chart")
         self.create_oval(buy_x - 4, buy_y - 4, buy_x + 4, buy_y + 4, fill="#ffdd00", outline="", tags="chart")
@@ -595,6 +652,12 @@ class PositionChart(BaseChart):
         end_y = ctx.y_from_value(current_price)
         dot_color = "#00ff88" if self._is_at_or_above_baseline(current_price) else "#ff5555"
         self.create_oval(end_x - 5, end_y - 5, end_x + 5, end_y + 5, fill=dot_color, outline="#ffffff", width=1, tags="chart")
+
+        if self._exit_ts is not None and self._exit_price is not None:
+            sell_x = self._marker_x(self._exit_ts, ctx, ctx.timestamps[-1])
+            sell_y = ctx.y_from_value(self._exit_price)
+            self.create_text(sell_x, sell_y + 14, text="▼ SELL", fill="#ff8844", font=_mono_sm, tags="chart")
+            self.create_oval(sell_x - 4, sell_y - 4, sell_x + 4, sell_y + 4, fill="#ff8844", outline="", tags="chart")
 
     def _draw_header(self, ctx: RenderContext) -> None:
         current_price = ctx.values[-1]
@@ -630,9 +693,7 @@ class PnLChart(BaseChart):
                 reset_view=self._view_size == 0,
                 track_latest=track_latest,
             )
-        if self._dirty:
-            self._redraw()
-            self._dirty = False
+        self._schedule_redraw()
 
     def _guide_values(self, ctx: RenderContext) -> list[float]:
         return [ctx.low + (ctx.high - ctx.low) * i / 6 for i in range(7)]
@@ -675,4 +736,4 @@ class PnLChart(BaseChart):
         )
 
 
-__all__ = ["BaseChart", "PositionChart", "PnLChart", "init_chart_fonts"]
+__all__ = ["BaseChart", "PositionChart", "PnLChart", "ChartMarker", "init_chart_fonts"]

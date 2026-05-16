@@ -26,7 +26,7 @@ import titan_state as S
 from titan_config import *
 import titan_config as C
 from titan_position import Position, get_effective_stop_loss
-from titan_market  import fetch_position_price_history, get_market, get_outcome_price, is_market_resolving, Market
+from titan_market  import fetch_asset_price_history, get_market, get_outcome_price, is_market_resolving, Market
 from titan_signals import classify_market, estimate_expected_value, _KNOWN_HEDGE_WALLETS, Signal
 from titan_wallet  import is_hft_wallet, record_whale_trade_performance
 from titan_persistence import save_state, save_whale_roster_async
@@ -120,7 +120,9 @@ def _get_current_price(pos: Position) -> tuple:
     outcome = pos.outcome
     asset   = pos.asset
     title   = pos.title
-    stale_price = pos.cur_price or pos.entry_price or 0.5
+    stale_price = pos.cur_price 
+    
+    #or pos.entry_price or 0.5
 
     fast_price = fetch_position_price_fast(cid, asset, outcome)
     if fast_price is not None:
@@ -129,7 +131,7 @@ def _get_current_price(pos: Position) -> tuple:
         return fast_price, resolving
 
     cached = S.market_cache.get(cid)
-    if cached and (time.time() - cached.get("ts", 0)) > C.MARKET_TTL:
+    if cached and (time.time() - cached.ts) > C.MARKET_TTL:
         S.market_cache.pop(cid, None)
 
     mkt, err = get_market(cid, title, asset=asset, slug=pos.slug)
@@ -141,7 +143,7 @@ def _get_current_price(pos: Position) -> tuple:
     resolving = is_market_resolving(mkt)
 
     if asset:
-        ap = mkt.get("asset_to_price", {})
+        ap = mkt.asset_to_price
         if asset in ap:
             price = ap[asset]
             if price <= 0.03: return price, True
@@ -190,24 +192,24 @@ def _compact_market_snapshot(mkt: Market | None, *, fallback_title: str = "", fa
     if mkt is None:
         return {
             "title": fallback_title, "slug": fallback_slug, "event_slug": fallback_event_slug,
-            "yes_price": None, "no_price": None, "outcome_labels": [], "outcome_prices": {},
+            "yes_price": 0.5, "no_price": 0.5, "outcome_labels": [], "outcome_prices": {},
             "asset_to_price": {}, "liq": None, "volume": None, "hrs_left": None,
             "end_date": None, "ts": None,
         }
     return {
-        "title": mkt.get("title") or fallback_title,
-        "slug": mkt.get("slug") or fallback_slug,
-        "event_slug": mkt.get("event_slug") or fallback_event_slug,
-        "yes_price": mkt.get("yes_price"),
-        "no_price": mkt.get("no_price"),
-        "outcome_labels": list(mkt.get("outcome_labels", [])),
-        "outcome_prices": dict(mkt.get("outcome_prices", {})),
-        "asset_to_price": dict(mkt.get("asset_to_price", {})),
-        "liq": mkt.get("liq"),
-        "volume": mkt.get("volume"),
-        "hrs_left": mkt.get("hrs_left"),
-        "end_date": mkt.get("end_date"),
-        "ts": mkt.get("ts"),
+        "title": mkt.title or fallback_title,
+        "slug": mkt.slug or fallback_slug,
+        "event_slug": mkt.event_slug or fallback_event_slug,
+        "yes_price": mkt.yes_price,
+        "no_price": mkt.no_price,
+        "outcome_labels": list(mkt.outcome_labels),
+        "outcome_prices": dict(mkt.outcome_prices),
+        "asset_to_price": dict(mkt.asset_to_price),
+        "liq": mkt.liq,
+        "volume": mkt.volume,
+        "hrs_left": mkt.hrs_left,
+        "end_date": mkt.end_date,
+        "ts": mkt.ts,
     }
 
 
@@ -252,9 +254,9 @@ def _compact_elite_trade_snapshot(elite_ver: dict) -> list[dict]:
 def _build_entry_audit(sig: Signal, cur: float, shares: float, bet: float, ev_info: dict,
                        now_t: float, bankroll_after: float) -> dict:
     dtf = _dt_fields(now_t)
-    market = sig.mkt or {}
-    event_slug = sig.event_slug or market.get("event_slug", "")
-    slug = market.get("slug") or sig.slug
+    market = sig.mkt
+    event_slug = sig.event_slug or market.event_slug
+    slug = market.slug or sig.slug
     http_traces = _collect_action_http_traces(
         since_ts=max(0.0, now_t - 60),
         cid=sig.cid,
@@ -506,7 +508,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             mkt_check, _ = get_market(cid, pos.title, asset=pos.asset, slug=pos.slug)
             if mkt_check:
                 pos.market_fail_count = 0
-                hrs = mkt_check.get("hrs_left")
+                hrs = mkt_check.hrs_left
                 if hrs is not None and hrs < max(MIN_HOURS_LEFT, 0.35):
                     reason = "EXPIRING_SOON"
             else:
@@ -616,17 +618,13 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             type="SELL",
             title=pos.title,
             outcome=pos.outcome,
-            entry_price=pos.entry_price,
-            exit_price=cur,
+            price=cur,
             shares=shares,
             bet=bet,
             pnl_usdc=round(pnl_usdc_net, 4),
             pnl_pct=round(pnl_pct * 100, 2),
             reason=reason,
             ts=now_t,
-            ts_str=sell_dtf["ts_str"],
-            entry_ts=pos.entry_ts,
-            exit_ts=now_t,
             bankroll=round(S.env().paper_bankroll, 4),
             tier=pos.tier,
             strategy=pos.strategy,
@@ -638,8 +636,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             ],
             avg_entry=pos.avg_entry or pos.entry_price,
             market_url=pos.market_url,
-            entry_audit=pos.entry_audit,
-            exit_audit=exit_audit,
+            audit=exit_audit,
         )
         DB.append_trade(trade_record)
         S.env().trade_stats.record_sell(pnl_usdc_net)
@@ -802,7 +799,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             continue
 
         # EV gate — skip for HFT spike signals (momentum, not mispricing)
-        liq      = sig.mkt.get("liq", 0)
+        liq = sig.mkt.liq
         ev_info  = estimate_expected_value(cur, sig.avg_entry, liq, bet, mkt_type, sig.avg_wscore)
         is_spike = sig.is_hft and sig.has_large_trade
         # Drift discount: EV may appear slightly negative due to drift, but the discount IS the edge
@@ -834,7 +831,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
 
         is_conviction = sig.has_large_trade
         mkt_obj       = sig.mkt
-        resolved_slug = mkt_obj["slug"] or sig.slug
+        resolved_slug = mkt_obj.slug or sig.slug
 
         elite_ver = sig.elite_ver
         whale_buy_cash = {
@@ -847,50 +844,57 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         market_url = _build_market_url(event_slug, resolved_slug)
         entry_audit = _build_entry_audit(sig, cur, shares, bet, ev_info, now_t, S.env().paper_bankroll)
 
-        price_history = _with_latest_price_point(fetch_position_price_history(asset), now_t, cur)
+        price_history = _with_latest_price_point(fetch_asset_price_history(asset), now_t, cur)
+
+        trade_record = TradeRecord(
+            cid=cid,
+            asset=asset,
+            type="BUY",
+            title=title,
+            slug=resolved_slug,
+            event_slug=event_slug,
+            outcome=outcome,
+            price=cur,
+            shares=shares,
+            bet=bet,
+            reason=f"AUTO_{tier}",
+            ts=now_t,
+            bankroll=round(S.env().paper_bankroll, 4),
+            tier=tier,
+            strategy=strat,
+            stop_loss_pct=sig_stop_loss,
+            elite_wallets=elite_wallet_addrs,
+            whale_names=elite_names,
+            whale_buy_cash=whale_buy_cash,
+            avg_entry=sig.avg_entry,
+            score=sig.score,
+            n_confluence=sig.n_confluence,
+            is_conviction=is_conviction,
+            market_url=market_url,
+            audit=entry_audit,
+        )
+        DB.append_trade(trade_record)
+
         pos = Position(
+            buy_trade=          trade_record,
             key=               str(key),
-            title=             title,
-            slug=              resolved_slug,
-            cid=               cid,
-            asset=             asset,
-            event_slug=        event_slug,
-            outcome=           outcome,
-            tier=              tier,
-            strategy=          strat,
-            stop_loss_pct=     sig_stop_loss or 0.0,
-            score=             sig.score,
-            entry_price=       cur,
-            cur_price=         cur,
-            current_price=     cur,
-            shares=            shares,
-            bet=               bet,
-            entry_ts=          now_t,
+            status=            "open",
+            type=              "OPEN",
+            # signal-only fields not on TradeRecord
             whale_wallets=     all_whale_addrs,
-            elite_wallets=     elite_wallet_addrs,
             elite_names=       elite_names,
-            whale_buy_cash=    whale_buy_cash,
             n_elite=           sig.n_elite,
-            n_confluence=      sig.n_confluence,
             is_hft=            sig.is_hft,
-            is_conviction=     is_conviction,
             mkt_type=          mkt_type,
             is_sports=         sig.is_sports,
             conviction_detail= sig.conviction_detail,
             ev_info=           ev_info,
-            avg_entry=         sig.avg_entry,
             ver_flow=          sig.ver_flow,
-            market_fail_count= 0,
-            peak_pnl_pct=      0.0,
-            liq=               float(sig.mkt.get("liq") or 0),
-            volume=            float(sig.mkt.get("volume") or 0),
-            hrs_left=          float(sig.mkt.get("hrs_left") or 0),
-            end_date=          str(sig.mkt.get("end_date", "")),
-            market_url=        market_url,
-            entry_audit=       entry_audit,
             whale_avg_entry=   sig.avg_entry if strat == "drift_discount" else 0.0,
             drift_discount_pct=float(sig.drift_discount_pct or 0) if strat == "drift_discount" else 0.0,
             source_recent_wr=  float(sig.source_recent_wr or 0) if strat == "recent_form" else 0.0,
+            market_fail_count= 0,
+            peak_pnl_pct=      0.0,
         )
         pos.set_price_history(price_history, "clob_api_open")
 
@@ -904,10 +908,11 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         _ws_sub = _get_ws_monitor()
         if _ws_sub and asset:
             tokens = [asset]
-            mkt_cached = S.market_cache.get(cid, {})
-            for tid in mkt_cached.get("asset_to_price", {}).keys():
-                if tid != asset and tid not in tokens:
-                    tokens.append(tid)
+            mkt_cached = S.market_cache.get(cid)
+            if mkt_cached is not None:
+                for tid in mkt_cached.asset_to_price.keys():
+                    if tid != asset and tid not in tokens:
+                        tokens.append(tid)
             _ws_sub.subscribe_position(cid, tokens)
 
         opening_this_cycle.add(key)
@@ -918,35 +923,6 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         for w in elite_wallet_addrs:
             opening_whale_counts[w] = opening_whale_counts.get(w, 0) + 1
         open_per_strategy[strat] = open_per_strategy.get(strat, 0) + 1
-
-        trade_record = TradeRecord(
-            cid=cid,
-            asset=asset,
-            type="BUY",
-            title=title,
-            outcome=outcome,
-            entry_price=cur,
-            shares=shares,
-            bet=bet,
-            reason=f"AUTO_{tier}",
-            ts=now_t,
-            ts_str=buy_dtf["ts_str"],
-            entry_ts=now_t,
-            bankroll=round(S.env().paper_bankroll, 4),
-            tier=tier,
-            strategy=strat,
-            stop_loss_pct=sig_stop_loss,
-            elite_wallets=elite_wallet_addrs,
-            whale_names=elite_names,
-            whale_buy_cash=whale_buy_cash,
-            avg_entry=sig.avg_entry,
-            score=sig.score,
-            n_confluence=sig.n_confluence,
-            is_conviction=is_conviction,
-            market_url=market_url,
-            entry_audit=entry_audit,
-        )
-        DB.append_trade(trade_record)
 
         n_conf   = sig.n_confluence
         hft_tag  = "⚡HFT " if sig.is_hft else ""
