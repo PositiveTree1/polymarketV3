@@ -51,11 +51,9 @@ class Signal:
     cid:            str
     asset:          str
     outcome:        str
-    title:          str
-    slug:           str
-    event_slug:     str
-    mkt_type:       str
-    is_sports:      bool
+    _title:         str
+    _slug:          str
+    _event_slug:    str
 
     # ── strategy ─────────────────────────────────────────────────────────────
     strategy:       str          # "recent_form" | "drift_discount" | "consensus_basket"
@@ -122,9 +120,49 @@ class Signal:
     def is_conviction(self) -> bool:
         return self.has_large_trade
 
+    @property
+    def title(self) -> str:
+        return self.mkt.title or self._title
+
+    @title.setter
+    def title(self, value: str) -> None:
+        self._title = value
+
+    @property
+    def slug(self) -> str:
+        return self.mkt.slug or self._slug
+
+    @slug.setter
+    def slug(self, value: str) -> None:
+        self._slug = value
+
+    @property
+    def event_slug(self) -> str:
+        return self.mkt.event_slug or self._event_slug
+
+    @event_slug.setter
+    def event_slug(self, value: str) -> None:
+        self._event_slug = value
+
+    @property
+    def mkt_type(self) -> str:
+        return self.mkt.mkt_type
+
+    @property
+    def is_sports(self) -> bool:
+        return self.mkt.is_sports
+
     def to_dict(self) -> "SignalDict":
         payload = asdict(self)
         payload.pop("wallets", None)
+        payload.pop("_title", None)
+        payload.pop("_slug", None)
+        payload.pop("_event_slug", None)
+        payload["title"] = self.title
+        payload["slug"] = self.slug
+        payload["event_slug"] = self.event_slug
+        payload["mkt_type"] = self.mkt_type
+        payload["is_sports"] = self.is_sports
         return cast("SignalDict", payload)
 
     def get_prices(self) -> list[tuple[float, float]]:
@@ -225,37 +263,6 @@ def _hft_spike_ratio_value(trade: WhaleObservation) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 #  MARKET TYPE CLASSIFICATION
 # ─────────────────────────────────────────────────────────────────────────────
-_SPORTS_PATTERNS = re.compile(
-    r'\b(vs\.?|spread|o/u|over|under|winner|set \d|game \d|bo[13]|'
-    r'nhl|nba|mlb|nfl|ufc|atp|wta|epl|sea-|nhl-|mlb-|nba-|ufc-|atp-|'
-    r'kings|flames|rays|yankees|royals|tigers|brewers|pirates|nationals|'
-    r'lol:|valorant:|counter-strike:|'
-    r'win on \d{4}-\d{2}-\d{2}|win on 20\d\d|'
-    r'leading at halftime|clean sheet|both teams|'
-    r'indian premier league|ipl:|champions league [a-z]|'
-    r'esports|furia|loud game|map \d|round \d)\b',
-    re.IGNORECASE
-)
-_CRYPTO_PATTERNS = re.compile(
-    r'\b(bitcoin|btc|ethereum|eth|solana|xrp|bnb|crypto|up or down)\b',
-    re.IGNORECASE
-)
-
-def classify_market(title: str, event_slug: str, hrs_left: float | None = None) -> str:
-    """
-    Classify a market into SPORTS, CRYPTO, POLITICS, or EVENT.
-    Sports markets require stricter entry criteria.
-    """
-    combined = f"{title} {event_slug}"
-    if _SPORTS_PATTERNS.search(combined):
-        return "SPORTS"
-    if _CRYPTO_PATTERNS.search(combined):
-        return "CRYPTO"
-    if hrs_left is not None and hrs_left < 24:
-        return "EVENT"
-    return "POLITICS"
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 #  PRE-ENTRY EXPECTED VALUE
 # ─────────────────────────────────────────────────────────────────────────────
@@ -602,10 +609,17 @@ def _strategy_bet_multiplier(sig: Signal) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 _EMPTY_W = {"score": 0.10, "verified": False, "watchable": False, "elite": False, "hft": False}
 
-def _get_market_for_signal(cid, trade_title, asset_hint, slug_hint, from_verified=True):
+def _get_market_for_signal(cid, trade_title, asset_hint, slug_hint, event_slug_hint="", from_verified=True):
     """Call get_market with verified flag so cid is registered."""
     mark_cid_verified(cid)
-    return get_market(cid, trade_title, asset=asset_hint, slug=slug_hint, from_verified=from_verified)
+    return get_market(
+        cid,
+        trade_title,
+        asset=asset_hint,
+        slug=slug_hint,
+        event_slug=event_slug_hint,
+        from_verified=from_verified,
+    )
 
 
 def _build_names(elite_wallets, verified_wallets, all_ver, is_hft_signal, has_large_trade):
@@ -749,8 +763,9 @@ def _build_recent_form_signals(raw_trades: list, wallets: dict,
         # Market data — only call Gamma since these wallets are verified
         asset_hint = next((t.asset for t in rf_qualified.values() if t.asset), "")
         slug_hint  = next((t.slug for t in rf_qualified.values() if t.slug), "")
+        event_slug_hint = next((t.event_slug for t in group if t.event_slug), "")
 
-        mkt, mkt_fail = _get_market_for_signal(cid, title, asset_hint, slug_hint)
+        mkt, mkt_fail = _get_market_for_signal(cid, title, asset_hint, slug_hint, event_slug_hint)
         if not mkt:
             rejects.append(f"  {outcome:<12} {title[:40]}\n    ↳ [RF] Market: {mkt_fail}")
             continue
@@ -760,11 +775,9 @@ def _build_recent_form_signals(raw_trades: list, wallets: dict,
         if not _check_price_zone(cur, price_min, price_max, outcome, title, rejects):
             continue
 
-        # Market type classification
         event_slug = next((t.event_slug for t in group if t.event_slug), "")
         if not event_slug:
             event_slug = mkt.event_slug
-        mkt_type = classify_market(title, event_slug, mkt.hrs_left)
 
         # Avg entry from recent-form wallets
         entries = [(t.price, t.cash) for t in rf_qualified.values()]
@@ -823,8 +836,8 @@ def _build_recent_form_signals(raw_trades: list, wallets: dict,
         window = "hot" if any(t.window == "hot" for t in rf_qualified.values()) else "warm"
 
         sig = Signal(
-            cid=cid, asset=asset_hint, outcome=outcome, title=title,
-            slug=mkt.slug or slug_hint, event_slug=event_slug, mkt_type=mkt_type, is_sports=(mkt_type == "SPORTS"),
+            cid=cid, asset=asset_hint, outcome=outcome, _title=title,
+            _slug=mkt.slug or slug_hint, _event_slug=event_slug,
             strategy="recent_form", stop_loss_pct=stop_loss_pct,
             ver=all_ver, elite_ver=elite_wallets_rf,
             n_ver=len(all_ver), n_elite=len(elite_wallets_rf),
@@ -841,6 +854,7 @@ def _build_recent_form_signals(raw_trades: list, wallets: dict,
             source_recent_wr=avg_recent_wr,
             mkt=mkt,
         )
+        S.market_cache.persist(cid)
 
         bd    = score_signal(sig)
         total = bd["total"]
@@ -944,8 +958,9 @@ def _build_drift_discount_signals(raw_trades: list, wallets: dict,
         # Market data
         asset_hint = next((t.asset for t in all_ver.values() if t.asset), "")
         slug_hint  = next((t.slug for t in all_ver.values() if t.slug), "")
+        event_slug_hint = next((t.event_slug for t in group if t.event_slug), "")
 
-        mkt, mkt_fail = _get_market_for_signal(cid, title, asset_hint, slug_hint)
+        mkt, mkt_fail = _get_market_for_signal(cid, title, asset_hint, slug_hint, event_slug_hint)
         if not mkt:
             continue  # Skip silently — not a real reject, just Gamma unavailable
 
@@ -1015,7 +1030,6 @@ def _build_drift_discount_signals(raw_trades: list, wallets: dict,
         event_slug = next((t.event_slug for t in group if t.event_slug), "")
         if not event_slug:
             event_slug = mkt.event_slug
-        mkt_type = classify_market(title, event_slug, mkt.hrs_left)
 
         drift = (cur - avg_whale_entry) / max(avg_whale_entry, 0.01)
         avg_wscore = sum(wallets.get(w, _EMPTY_W).get("score", 0.10) for w in all_ver) / max(len(all_ver), 1)
@@ -1039,8 +1053,8 @@ def _build_drift_discount_signals(raw_trades: list, wallets: dict,
             tier = "STRONG"  # Don't mark DD as STALE — the whole point is older signals
 
         sig = Signal(
-            cid=cid, asset=asset_hint, outcome=outcome, title=title,
-            slug=mkt.slug or slug_hint, event_slug=event_slug, mkt_type=mkt_type, is_sports=(mkt_type == "SPORTS"),
+            cid=cid, asset=asset_hint, outcome=outcome, _title=title,
+            _slug=mkt.slug or slug_hint, _event_slug=event_slug,
             strategy="drift_discount", stop_loss_pct=stop_loss_pct,
             ver=all_ver, elite_ver=elite_wallets,
             n_ver=len(all_ver), n_elite=len(elite_wallets),
@@ -1057,6 +1071,7 @@ def _build_drift_discount_signals(raw_trades: list, wallets: dict,
             drift_discount_pct=discount,
             mkt=mkt,
         )
+        S.market_cache.persist(cid)
 
         bet = kelly_bet(sig, wallets, score=drift_score)
         names = _build_names(elite_wallets, verified_wallets, all_ver, False, sig.has_large_trade)
@@ -1188,25 +1203,12 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
         # Market data — only for elite-sourced signals
         asset_hint = next((t.asset for t in elite_wallets.values() if t.asset), "")
         slug_hint  = next((t.slug for t in elite_wallets.values() if t.slug), "")
+        event_slug_hint = next((t.event_slug for t in group if t.event_slug), "")
 
-        mkt, mkt_fail = _get_market_for_signal(cid, title, asset_hint, slug_hint)
+        mkt, mkt_fail = _get_market_for_signal(cid, title, asset_hint, slug_hint, event_slug_hint)
         if not mkt:
-            _is_hft_pre = any(_hft_spike_ratio_value(t) > 0 or t.is_large_trade for t in by_w.values())
-            if _is_hft_pre and len(hft_wallets) > 0:
-                _trade_price = next(iter(elite_wallets.values())).price
-                mkt = Market(
-                    yes_price=_trade_price, no_price=1.0 - _trade_price,
-                    outcome_prices={"Yes": _trade_price, "No": 1.0 - _trade_price},
-                    asset_to_price={asset_hint: _trade_price} if asset_hint else {},
-                    asset_to_index={},
-                    liq=10_000, volume=50_000, title=title,
-                    hrs_left=48.0, slug=slug_hint or "", event_slug="",
-                    end_date="", ts=now_t, outcome_labels=[], token_index={},
-                    index_to_price={0: _trade_price, 1: 1.0 - _trade_price},
-                )
-            else:
-                rejects.append(f"  {outcome:<12} {title[:40]}\n    ↳ [CB] Market: {mkt_fail}")
-                continue
+            rejects.append(f"  {outcome:<12} {title[:40]}\n    ↳ [CB] Market: {mkt_fail}")
+            continue
 
         cur = get_outcome_price(mkt, outcome, asset=asset_hint)
 
@@ -1217,9 +1219,7 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
         event_slug = next((t.event_slug for t in group if t.event_slug), "")
         if not event_slug:
             event_slug = mkt.event_slug
-        mkt_type = classify_market(title, event_slug, mkt.hrs_left)
-
-        if mkt_type == "SPORTS":
+        if mkt.is_sports:
             genuine_sports_elites = {
                 w: t for w, t in elite_wallets.items()
                 if not S.env().wallet_cache.get(w, {}).get("sports_bot", False)
@@ -1352,8 +1352,8 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
         n_confluence    = len(all_ver)
 
         sig = Signal(
-            cid=cid, asset=asset_hint, outcome=outcome, title=title,
-            slug=mkt.slug or slug_hint, event_slug=event_slug, mkt_type=mkt_type, is_sports=(mkt_type == "SPORTS"),
+            cid=cid, asset=asset_hint, outcome=outcome, _title=title,
+            _slug=mkt.slug or slug_hint, _event_slug=event_slug,
             strategy="consensus_basket", stop_loss_pct=stop_loss_pct,
             ver=all_ver, elite_ver=elite_wallets,
             n_ver=n_ver, n_elite=len(elite_wallets),
@@ -1369,6 +1369,7 @@ def _build_consensus_basket_signals(trades: list, wallets: dict,
             sports_conviction_mult=1.0,
             mkt=mkt,
         )
+        S.market_cache.persist(cid)
 
         bd    = score_signal(sig)
         total = bd["total"]

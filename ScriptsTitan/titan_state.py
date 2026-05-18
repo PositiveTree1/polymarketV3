@@ -18,6 +18,8 @@ if TYPE_CHECKING:
     from titan_position import Position
     from titan_signals import Signal
 
+from titan_markets import MarketCache, market_cache
+
 _local = threading.local()
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -103,10 +105,10 @@ class WalletEnv:
 # The one wallet
 _wallet = WalletEnv()
 
+
 # Shared caches
 _shared_wallet_cache: dict[str, "WalletProfile"] = {}
 _wallet.wallet_cache = _shared_wallet_cache
-market_cache: dict[str, "Market"] = {}
 _http_trace_lock = threading.Lock()
 _recent_http_traces = deque(maxlen=400)
 

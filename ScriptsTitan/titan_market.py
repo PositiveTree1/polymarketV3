@@ -56,6 +56,8 @@ class Market:
     hrs_left: float | None = None
     slug: str = ""
     event_slug: str = ""
+    mkt_type: str = ""
+    is_sports: bool = False
     ts: float = 0.0
 
     def polymarket_url(self) -> str:
@@ -92,6 +94,8 @@ class Market:
             "hrs_left",
             "slug",
             "event_slug",
+            "mkt_type",
+            "is_sports",
             "ts",
         )
 
@@ -107,6 +111,28 @@ class Market:
 
 from titan_config import *
 from titan_wallet import WalletProfile, fetch_wallet, get_elite_wallets, is_hft_wallet
+
+_SPORTS_KEYWORDS = (
+    "vs", "spread", "o/u", "over", "under", "winner", "set ", "game ",
+    "bo1", "bo3", "nhl", "nba", "mlb", "nfl", "ufc", "atp", "wta", "epl",
+    "sea-", "nhl-", "mlb-", "nba-", "ufc-", "atp-", "kings", "flames",
+    "rays", "yankees", "royals", "tigers", "brewers", "pirates", "nationals",
+    "lol:", "valorant:", "counter-strike:", "leading at halftime",
+    "clean sheet", "both teams", "indian premier league", "ipl:",
+    "champions league ", "esports", "furia", "loud game", "map ", "round ",
+)
+_CRYPTO_KEYWORDS = ("bitcoin", "btc", "ethereum", "eth", "solana", "xrp", "bnb", "crypto", "up or down")
+
+
+def classify_market_type(title: str, event_slug: str, hrs_left: float | None = None) -> str:
+    combined = f"{title} {event_slug}".lower()
+    if any(keyword in combined for keyword in _SPORTS_KEYWORDS):
+        return "SPORTS"
+    if any(keyword in combined for keyword in _CRYPTO_KEYWORDS):
+        return "CRYPTO"
+    if hrs_left is not None and hrs_left < 24:
+        return "EVENT"
+    return "POLITICS"
 
 
 @dataclass
@@ -281,19 +307,34 @@ def _fetch_market_raw(cid: str, asset: str = "", slug: str = "") -> dict | None:
 
     def _cid_ok(m: dict) -> bool:
         rc = (m.get("conditionId") or m.get("condition_id") or "").lower()
+        if not cid:
+            return True
         return not rc or rc == cid.lower()
+
+    def _gamma_market_by_asset(asset_value: str) -> dict | None:
+        dec_asset = _to_decimal_token(asset_value)
+        direct_data = _gamma_get(f"{GAMMA_API}/markets", {
+            "clob_token_ids": dec_asset, "limit": 1
+        })
+        direct_market = _pick(direct_data)
+        if direct_market and _cid_ok(direct_market):
+            return direct_market
+
+        legacy_data = _gamma_get(f"{GAMMA_API}/markets", {
+            "clob_token_ids": f'["{dec_asset}"]', "limit": 1
+        })
+        legacy_market = _pick(legacy_data)
+        if legacy_market and _cid_ok(legacy_market):
+            return legacy_market
+        return None
 
     # ── Stage 1: Gamma clob_token_ids lookup ─────────────────────────────────────────────
     # Only attempted when NO slug is available. When slug is known, Stage 2
     # always succeeds and Stage 1 always returns 422 — skip it to save API
     # calls and avoid false circuit-breaker increments.
     if asset and not slug:
-        dec_asset = _to_decimal_token(asset)
-        data = _gamma_get(f"{GAMMA_API}/markets", {
-            "clob_token_ids": f'["{dec_asset}"]', "limit": 1
-        })
-        m = _pick(data)
-        if m and _cid_ok(m):
+        m = _gamma_market_by_asset(asset)
+        if m:
             return m
 
     # ── Stage 2: Gamma slug lookup ────────────────────────────────────────────
@@ -305,9 +346,10 @@ def _fetch_market_raw(cid: str, asset: str = "", slug: str = "") -> dict | None:
 
     # ── Stage 3: Bootstrap slug via Data API trade lookup ─────────────────────
     # v10 FIX: Only run Stage 3 for cids that have been seen before from a verified
-    # wallet. For brand-new cids from unverified wallets, return None immediately.
-    # This prevents the constant Data API → Gamma double-hit for unknown cids.
-    if not slug and not asset:
+    # wallet. For brand-new unknown cids, return None immediately.
+    # Even when an asset hint exists, it may be stale or invalid, so missing slug
+    # should still allow bootstrap-by-cid.
+    if not slug:
         if cid not in _seen_verified_cids:
             return None  # Unknown cid from unverified source — skip Stage 3
         trades_data = S.safe_get(f"{DATA_API}/trades", {
@@ -324,20 +366,18 @@ def _fetch_market_raw(cid: str, asset: str = "", slug: str = "") -> dict | None:
                 if m and _cid_ok(m):
                     return m
             if recovered_asset and recovered_asset != asset:
-                data = _gamma_get(f"{GAMMA_API}/markets", {
-                    "clob_token_ids": json.dumps([_to_decimal_token(recovered_asset)]), "limit": 1
-                })
-                m = _pick(data)
-                if m and _cid_ok(m):
+                m = _gamma_market_by_asset(recovered_asset)
+                if m:
                     return m
 
     return None
 
 
-def get_market(cid: str, trade_title: str | None = None, asset: str = "", slug: str = "",
-               from_verified: bool = False) -> tuple[Market | None, str | None]:
+def _fetch_market_remote(cid: str, trade_title: str | None = None, asset: str = "", slug: str = "",
+                         from_verified: bool = False, allow_untradeable: bool = False,
+                         has_cached: bool = False) -> tuple[Market | None, str | None]:
     """
-    Fetch and cache market data for a conditionId.
+    Fetch market data for a conditionId from remote APIs.
 
     Each conditionId is a BINARY market (two outcome tokens).
     outcome_prices maps each outcome label AND each asset/token ID to its price.
@@ -351,12 +391,7 @@ def get_market(cid: str, trade_title: str | None = None, asset: str = "", slug: 
     from_verified, we skip the Gamma call entirely. This eliminates the bulk of 422s
     (brand-new cids from unverified wallets making up ~75% of all Gamma calls).
     """
-    now_t  = time.time()
-    cached = S.market_cache.get(cid)
-    if cached and (now_t - cached.ts) < MARKET_TTL:
-        if trade_title and "?" in str(trade_title) and len(trade_title) > len(cached.title):
-            cached.title = trade_title
-        return cached, None
+    now_t = time.time()
 
     # Register this cid as coming from a verified source if flagged
     if from_verified:
@@ -366,16 +401,14 @@ def get_market(cid: str, trade_title: str | None = None, asset: str = "", slug: 
     # This is the primary 422 reduction gate.
     import titan_market as _self_mod
     if (cid not in _seen_verified_cids and
-            not cached and
+            not has_cached and
             not from_verified and
             not asset and
             not slug):
         return None, "CID from unverified source — skipping Gamma (v10 gate)"
 
-    # During circuit-open period, return stale cache if available
-    if now_t < _self_mod._gamma_open_until and cached:
-        S._log(f"⚡ Gamma circuit open — using stale cache for {cid[:20]}…", "DIAG")
-        return cached, None
+    if now_t < _self_mod._gamma_open_until:
+        return None, "Gamma circuit open"
 
     # v9: Check per-CID blacklist
     if _is_cid_blacklisted(cid):
@@ -390,42 +423,45 @@ def get_market(cid: str, trade_title: str | None = None, asset: str = "", slug: 
     _reset_cid_failures(cid)
     _seen_verified_cids.add(cid)  # If it resolved, it's valid — register it
 
+    return _market_from_gamma_payload(
+        m,
+        cid=cid,
+        trade_title=trade_title,
+        slug=slug,
+        allow_untradeable=allow_untradeable,
+        now_t=now_t,
+    )
+
+
+def _market_from_gamma_payload(
+    payload: dict,
+    *,
+    cid: str,
+    trade_title: str | None,
+    slug: str,
+    allow_untradeable: bool,
+    now_t: float | None = None,
+) -> tuple[Market | None, str | None]:
+    now_t = float(time.time()) if now_t is None else now_t
+
     # v9 FIX: Don't hard-reject closed/inactive markets here.
     # When a position is open and the market closes, we STILL need the price
     # to compute P&L.
-    is_closed   = m.get("closed", False)
-    is_inactive = not m.get("active", True)
+    is_closed   = payload.get("closed", False)
+    is_inactive = not payload.get("active", True)
 
-    liq = float(m.get("liquidity") or 0)
-    vol = float(m.get("volume")    or 0)
+    liq = float(payload.get("liquidity") or 0)
+    vol = float(payload.get("volume") or 0)
 
     if is_closed or is_inactive:
-        raw_prices = m.get("outcomePrices") or "[]"
-        try:
-            prices = json.loads(raw_prices) if isinstance(raw_prices, str) else list(raw_prices)
-            prices = [float(p) for p in prices]
-            yes_price = prices[0] if prices else 0.5
-            no_price  = prices[1] if len(prices) > 1 else None
-        except Exception:
-            return None, "Price parse failed (closed market)"
-        if yes_price is None and no_price is None:
-            return None, "No prices available (closed market)"
-        return Market(
-            yes_price=yes_price or 0.5, no_price=no_price or 0.5,
-            outcome_labels=[], outcome_prices={},
-            asset_to_price={}, asset_to_index={},
-            token_index={}, index_to_price={0: yes_price or 0.5, 1: no_price or 0.5},
-            liq=liq, volume=vol, title=trade_title or cid[:28],
-            hrs_left=0.0, slug=m.get("slug") or slug or "",
-            end_date="", event_slug="", ts=now_t,
-        ), None
+        return None, "Market is closed or inactive"
 
-    if liq < MIN_LIQUIDITY:
+    if not allow_untradeable and liq < MIN_LIQUIDITY:
         return None, f"Liq ${liq:,.0f} < ${MIN_LIQUIDITY:,}"
-    if vol < MIN_VOLUME:
+    if not allow_untradeable and vol < MIN_VOLUME:
         return None, f"Vol ${vol:,.0f} < ${MIN_VOLUME:,}"
 
-    raw_prices = m.get("outcomePrices") or "[]"
+    raw_prices = payload.get("outcomePrices") or "[]"
     try:
         prices = json.loads(raw_prices) if isinstance(raw_prices, str) else list(raw_prices)
         prices = [float(p) for p in prices]
@@ -434,12 +470,12 @@ def get_market(cid: str, trade_title: str | None = None, asset: str = "", slug: 
     except Exception:
         return None, "Price parse failed"
 
-    if not yes_price or not (0.02 < yes_price < 0.98):
+    if not yes_price or (not allow_untradeable and not (0.02 < yes_price < 0.98)):
         return None, f"Yes price {yes_price} out of bounds"
     if no_price is None:
         return None, "No price unavailable (single-price market)"
 
-    raw_outcomes = m.get("outcomes") or "[]"
+    raw_outcomes = payload.get("outcomes") or "[]"
     try:
         outcome_labels = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else list(raw_outcomes)
         if not isinstance(outcome_labels, list):
@@ -471,7 +507,7 @@ def get_market(cid: str, trade_title: str | None = None, asset: str = "", slug: 
 
     asset_to_price = {}
     asset_to_index = {}
-    clob_tokens = m.get("clobTokenIds") or m.get("clob_token_ids") or "[]"
+    clob_tokens = payload.get("clobTokenIds") or payload.get("clob_token_ids") or "[]"
     try:
         if isinstance(clob_tokens, str):
             clob_tokens = json.loads(clob_tokens)
@@ -482,7 +518,7 @@ def get_market(cid: str, trade_title: str | None = None, asset: str = "", slug: 
     except Exception:
         pass
 
-    ed = m.get("endDate") or m.get("endDateIso") or ""
+    ed = payload.get("endDate") or payload.get("endDateIso") or ""
     hrs_left = None
     try:
         if ed:
@@ -492,14 +528,30 @@ def get_market(cid: str, trade_title: str | None = None, asset: str = "", slug: 
             if edt.tzinfo is None:
                 edt = edt.replace(tzinfo=timezone.utc)
             hrs_left = max(0, (edt - datetime.now(timezone.utc)).total_seconds() / 3600)
-            if hrs_left < MIN_HOURS_LEFT:
+            if not allow_untradeable and hrs_left < MIN_HOURS_LEFT:
                 return None, f"Closes in {hrs_left:.1f}h"
     except Exception:
         pass
 
-    gamma_title = m.get("question") or m.get("slug") or cid[:28]
+    gamma_title = payload.get("question") or payload.get("slug") or cid[:28]
     title = trade_title if (trade_title and len(trade_title) > 5 and "?" in trade_title) else gamma_title
 
+    event_obj = payload.get("event")
+    nested_event_slug = ""
+    if isinstance(event_obj, dict):
+        nested_event_slug = str(event_obj.get("slug") or "")
+    if not nested_event_slug:
+        events_obj = payload.get("events")
+        if isinstance(events_obj, list):
+            for event_item in events_obj:
+                if not isinstance(event_item, dict):
+                    continue
+                nested_event_slug = str(event_item.get("slug") or "")
+                if nested_event_slug:
+                    break
+    event_slug = payload.get("eventSlug") or payload.get("event_slug") or nested_event_slug or ""
+    market_slug = payload.get("slug") or slug or ""
+    mkt_type = classify_market_type(title, event_slug, hrs_left)
     result = Market(
         yes_price=yes_price,
         no_price=no_price,
@@ -514,12 +566,31 @@ def get_market(cid: str, trade_title: str | None = None, asset: str = "", slug: 
         title=title,
         end_date=ed[:10] if len(ed) >= 10 else ed,
         hrs_left=hrs_left,
-        slug=m.get("slug") or slug or "",
-        event_slug=m.get("eventSlug") or m.get("event_slug") or "",
+        slug=market_slug,
+        event_slug=event_slug,
+        mkt_type=mkt_type,
+        is_sports=(mkt_type == "SPORTS"),
         ts=now_t,
     )
-    S.market_cache[cid] = result
     return result, None
+
+
+def get_market(cid: str, trade_title: str | None = None, asset: str = "", slug: str = "",
+               event_slug: str = "",
+               from_verified: bool = False, allow_untradeable: bool = False,
+               persist: bool = False) -> tuple[Market | None, str | None]:
+    from titan_markets import market_cache
+
+    return market_cache.resolve(
+        cid,
+        trade_title=trade_title,
+        asset=asset,
+        slug=slug,
+        event_slug=event_slug,
+        from_verified=from_verified,
+        allow_untradeable=allow_untradeable,
+        persist=persist,
+    )
 
 
 def get_outcome_price(mkt: Market, outcome: str, asset: str = "") -> float:
@@ -617,8 +688,12 @@ def fetch_position_price_fast(cid: str, asset: str, outcome: str) -> float | Non
         if asset:
             dec_asset = _to_decimal_token(asset)
             data = S.safe_get(f"{GAMMA_API}/markets", {
-                "clob_token_ids": f'["{dec_asset}"]', "limit": 1
+                "clob_token_ids": dec_asset, "limit": 1
             }, quiet=True)
+            if not (data and isinstance(data, list) and data):
+                data = S.safe_get(f"{GAMMA_API}/markets", {
+                    "clob_token_ids": f'["{dec_asset}"]', "limit": 1
+                }, quiet=True)
             if data and isinstance(data, list) and data:
                 m = data[0]
                 raw_prices = m.get("outcomePrices") or "[]"
@@ -637,14 +712,7 @@ def fetch_position_price_fast(cid: str, asset: str, outcome: str) -> float | Non
                     # Compare normalised decimal so stored decimal == Gamma decimal
                     if _to_decimal_token(str(tok)) == dec_asset and i < len(prices):
                         p = prices[i]
-                        cached = S.market_cache.get(cid)
-                        if cached:
-                            cached.asset_to_price[asset] = p
-                            if i == 0:
-                                cached.yes_price = p
-                            else:
-                                cached.no_price = p
-                            cached.ts = time.time()
+                        S.market_cache.update_live_price(cid, asset, p, ts=time.time())
                         return p
 
         # Strategy 2: Data API recent trades — DIRECT MATCH ONLY.

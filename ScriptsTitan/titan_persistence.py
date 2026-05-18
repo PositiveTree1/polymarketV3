@@ -67,17 +67,43 @@ def save_whale_roster_async():
 
 def load_state():
     DB.init_db(STATE_DB)
+    S.market_cache.load_all_from_db(force=True)
     srv = PricesCacheSrv()
     srv.init_db(STATE_DB)
     titan_prices.PRICES = srv
-    _load_whale_roster()
-    _load_trading_state()
+    whale_info = _load_whale_roster()
+    recovery_info = _load_trading_state()
+    startup_line_1 = (
+        "Startup recovery: "
+        f"markets={len(S.market_cache)} | "
+        f"whales_loaded={whale_info['loaded']} | whales_total={whale_info['total']} | "
+        f"watchlist={recovery_info['watchlist']} | trades={recovery_info['trades']}"
+    )
+    startup_line_2 = (
+        "Startup recovery: "
+        f"open_positions={recovery_info['open_positions']} | "
+        f"closed_trades={recovery_info['closed_trades']} | "
+        f"equity_points={recovery_info['equity_points']} | "
+        f"cooldowns={recovery_info['cooldowns']}"
+    )
+    print(startup_line_1)
+    print(startup_line_2)
+    S._log(f"📦 {startup_line_1}", "INFO")
+    S._log(f"📦 {startup_line_2}", "INFO")
 
 
-def _load_trading_state():
+def _load_trading_state() -> dict[str, int]:
+    recovery_info = {
+        "watchlist": 0,
+        "trades": 0,
+        "open_positions": 0,
+        "closed_trades": 0,
+        "equity_points": 0,
+        "cooldowns": 0,
+    }
     if not os.path.exists(STATE_FILE):
         S._log("📂 No saved state — fresh start", "INFO")
-        return
+        return recovery_info
     try:
         with open(STATE_FILE) as f:
             state = json.load(f)
@@ -105,6 +131,7 @@ def _load_trading_state():
                 env.watchlist.update(saved_wl)
                 DB.upsert_watchlist(env.watchlist)
                 S._log(f"📂 Watchlist migrated from JSON: {len(saved_wl)} addresses", "INFO")
+        recovery_info["watchlist"] = len(env.watchlist)
 
         json_trades = state.get("trade_history", [])
         if json_trades and DB.get_trade_count() == 0:
@@ -122,6 +149,7 @@ def _load_trading_state():
 
         from titan_position import group_trades_by_position, build_position_from_trades
         all_trades = DB.load_trade_history(limit=5000)
+        recovery_info["trades"] = len(all_trades)
         groups = group_trades_by_position(all_trades)
         env.open_positions = {}
         for bucket_trades in groups.values():
@@ -134,6 +162,9 @@ def _load_trading_state():
             env.active_market_cids.add(pos.cid or pos.asset)
 
         n_pos = len(env.open_positions)
+        recovery_info["open_positions"] = n_pos
+        recovery_info["closed_trades"] = env.trade_stats.sell_count
+        recovery_info["cooldowns"] = len(env.cooldown_cids)
         if n_pos:
             S._log(f"📂 Rebuilt {n_pos} open position(s) from DB trades", "INFO")
         else:
@@ -149,6 +180,7 @@ def _load_trading_state():
         db_equity = DB.load_equity_history()
         if db_equity and len(db_equity) >= 2:
             env.equity_history = db_equity
+            recovery_info["equity_points"] = len(db_equity)
             S._log(
                 f"📈 Equity curve restored from DB: {len(db_equity)} points "
                 f"(${db_equity[0][1]:.2f} → ${db_equity[-1][1]:.2f})",
@@ -159,15 +191,18 @@ def _load_trading_state():
             if saved_equity and len(saved_equity) >= 2:
                 env.equity_history = [tuple(p) for p in saved_equity]
                 DB.upsert_equity_history(env.equity_history)
+                recovery_info["equity_points"] = len(env.equity_history)
                 S._log(
                     f"📈 Equity curve migrated from JSON: {len(env.equity_history)} points",
                     "INFO"
                 )
             else:
                 _rebuild_equity_from_trades(env)
+                recovery_info["equity_points"] = len(env.equity_history)
 
     except Exception as e:
         S._log(f"⚠ State load failed ({e}) — fresh start", "WARN")
+    return recovery_info
 
 
 def _rebuild_trade_stats(env) -> None:
@@ -251,10 +286,11 @@ def _migrate_null_cid_trades(state: dict) -> None:
         S._log(f"📂 Migrated {updated} trade record(s): repaired cids from JSON+consistency check", "INFO")
 
 
-def _load_whale_roster():
+def _load_whale_roster() -> dict[str, int]:
+    whale_info = {"loaded": 0, "total": len(S.env().wallet_cache)}
     if not os.path.exists(WHALE_FILE):
         S._log(f"📂 No whale roster found at {WHALE_FILE} — starting fresh discovery", "INFO")
-        return
+        return whale_info
     try:
         from titan_wallet import _whale_performance
         from titan_signals import restore_known_hedge_wallets
@@ -283,5 +319,8 @@ def _load_whale_roster():
             S._log(f"📂 Loaded {loaded} whale(s) from {WHALE_FILE} ({len(S.env().wallet_cache)} total in cache)", "INFO")
         else:
             S._log(f"📂 No new whales loaded from {WHALE_FILE} (all already cached or file empty)", "INFO")
+        whale_info["loaded"] = loaded
+        whale_info["total"] = len(S.env().wallet_cache)
     except Exception as e:
         S._log(f"⚠ Whale load failed ({e})", "WARN")
+    return whale_info

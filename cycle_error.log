@@ -1,0 +1,16 @@
+Traceback (most recent call last):
+  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_engine.py", line 251, in run_loop
+    analyse(trades)
+  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_engine.py", line 162, in analyse
+    signals, rejects = build_signals(trades, wallets, whale_exits)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_signals.py", line 1438, in build_signals
+    sigs, rejs = _build_drift_discount_signals(trades, wallets, whale_exits)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_signals.py", line 1074, in _build_drift_discount_signals
+    S.market_cache.persist(cid)
+  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_markets.py", line 100, in persist
+    DB.upsert_market(cid, market)
+  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_db.py", line 694, in upsert_market
+    cx.execute(
+sqlite3.OperationalError: database is locked

@@ -173,16 +173,8 @@ def _handle_ws_resolution(token_id: str, price: float, event_type: str, raw: dic
     }
 
     # Update the market cache immediately so the main loop sees it
-    cached = S.market_cache.get(cid)
-    if cached:
-        cached["ts"] = time.time()  # force cache refresh next call
-        # If price is near 1.0 for our token, force the yes/no price update
-        if price >= 0.97:
-            if cached.get("asset_to_price"):
-                cached["asset_to_price"][token_id] = price
-        elif price <= 0.03:
-            if cached.get("asset_to_price"):
-                cached["asset_to_price"][token_id] = price
+    if S.market_cache.get(cid):
+        S.market_cache.update_live_price(cid, token_id, price, ts=time.time())
 
     emoji = "✅" if price >= 0.97 else "❌"
     _log(
@@ -233,10 +225,7 @@ def _process_message(data: dict):
             # polling benefits from it too
             cid = _subscribed_tokens.get(asset_id, "")
             if cid:
-                cached = S.market_cache.get(cid)
-                if cached and cached.get("asset_to_price") is not None:
-                    cached["asset_to_price"][asset_id] = price
-                    cached["ts"] = time.time()
+                S.market_cache.update_live_price(cid, asset_id, price, ts=time.time())
 
 
 async def _ws_run_forever():

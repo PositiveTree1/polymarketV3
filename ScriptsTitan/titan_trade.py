@@ -102,8 +102,16 @@ class TradeRecord:
         )
     
     def open_on_polymarket(self) -> None:
-        S._log(f"Trade: Opening Polymarket URL: {self.market_url}", "DEBUG")
-        webbrowser.open(self.market_url)
+        url = self.market_url
+        if not url:
+            if self.event_slug:
+                url = f"https://polymarket.com/event/{self.event_slug}"
+            elif self.slug:
+                url = f"https://polymarket.com/event/{self.slug}"
+            else:
+                url = "https://polymarket.com"
+        S._log(f"Trade: Opening Polymarket URL: {url}", "DEBUG")
+        webbrowser.open(url)
         return
     
     def get_prices(self) -> list[tuple[float, float]]:

@@ -28,7 +28,7 @@ import titan_config as C
 from titan_position import Position, get_effective_stop_loss
 from titan_market  import get_market, get_outcome_price, is_market_resolving, Market
 from titan_prices  import PRICES
-from titan_signals import classify_market, estimate_expected_value, _KNOWN_HEDGE_WALLETS, Signal
+from titan_signals import estimate_expected_value, _KNOWN_HEDGE_WALLETS, Signal
 from titan_wallet  import is_hft_wallet, record_whale_trade_performance
 from titan_persistence import save_state, save_whale_roster_async
 from titan_trade import TradeRecord
@@ -55,8 +55,12 @@ def _try_fetch_resolution_price(cid: str, asset: str, outcome: str) -> float | N
     try:
         if asset:
             data = S.safe_get(f"{GAMMA_API}/markets", {
-                "clob_token_ids": f'["{asset}"]', "limit": 1
+                "clob_token_ids": asset, "limit": 1
             })
+            if not (data and isinstance(data, list) and data):
+                data = S.safe_get(f"{GAMMA_API}/markets", {
+                    "clob_token_ids": f'["{asset}"]', "limit": 1
+                })
             if data and isinstance(data, list) and data:
                 m = data[0]
                 import json as _json
@@ -135,7 +139,7 @@ def _get_current_price(pos: Position) -> tuple:
     if cached and (time.time() - cached.ts) > C.MARKET_TTL:
         S.market_cache.pop(cid, None)
 
-    mkt, err = get_market(cid, title, asset=asset, slug=pos.slug)
+    mkt, err = get_market(cid, title, asset=asset, slug=pos.slug, event_slug=pos.event_slug, persist=True)
     if not mkt:
         pos.market_fail_count += 1
         return stale_price, False
@@ -195,7 +199,7 @@ def _compact_market_snapshot(mkt: Market | None, *, fallback_title: str = "", fa
             "title": fallback_title, "slug": fallback_slug, "event_slug": fallback_event_slug,
             "yes_price": 0.5, "no_price": 0.5, "outcome_labels": [], "outcome_prices": {},
             "asset_to_price": {}, "liq": None, "volume": None, "hrs_left": None,
-            "end_date": None, "ts": None,
+            "end_date": None, "mkt_type": "", "is_sports": False, "ts": None,
         }
     return {
         "title": mkt.title or fallback_title,
@@ -210,6 +214,8 @@ def _compact_market_snapshot(mkt: Market | None, *, fallback_title: str = "", fa
         "volume": mkt.volume,
         "hrs_left": mkt.hrs_left,
         "end_date": mkt.end_date,
+        "mkt_type": mkt.mkt_type,
+        "is_sports": mkt.is_sports,
         "ts": mkt.ts,
     }
 
@@ -507,7 +513,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
 
         # (e) Expiring soon
         if not reason:
-            mkt_check, _ = get_market(cid, pos.title, asset=pos.asset, slug=pos.slug)
+            mkt_check, _ = get_market(cid, pos.title, asset=pos.asset, slug=pos.slug, event_slug=pos.event_slug, persist=True)
             if mkt_check:
                 pos.market_fail_count = 0
                 hrs = mkt_check.hrs_left

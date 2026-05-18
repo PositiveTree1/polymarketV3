@@ -502,8 +502,13 @@ class Position:
                 self.event_slug = str(trade.event_slug or _audit_value(trade.audit, "market_snapshot", "event_slug"))
 
     def open_on_polymarket(self) -> None:
-        self.buy_trade.open_on_polymarket()
-        return
+        mkt = S.market_cache.get_market_by_asset(self.asset)
+        if mkt is None:
+            mkt = S.market_cache.get_market_by_cid(self.cid)
+        if mkt is not None:
+            mkt.open_on_polymarket()
+        else:
+            S._log(f"Position.open_on_polymarket: market not found for cid={self.cid} asset={self.asset}", "WARN")
 
 ####
 

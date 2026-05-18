@@ -21,6 +21,8 @@ from datetime import datetime
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, cast
 from titan_protocol import TitanBackend
+if TYPE_CHECKING:
+    from titan_market import Market
 import os
 import webbrowser
 from pathlib import Path
@@ -663,19 +665,17 @@ def run_ui(api: TitanBackend) -> None:
             pos.open_on_polymarket()
 
         def open_market_detail() -> None:
-            market_value: object | None = None
+            market: Market | None = None
             try:
-                market_value = pos.market
-            except Exception:
-                audit = pos.entry_audit
-                if isinstance(audit, dict):
-                    snapshot = audit.get("market_snapshot")
-                    if snapshot is not None:
-                        market_value = snapshot
-            if market_value is None:
+                market = _market_payload_from_value(pos.market)
+            except LookupError:
+                pass
+            if market is None:
+                market = _load_market_payload(cid=pos.cid, asset=pos.asset)
+            if market is None:
                 log("[position detail] market payload missing", "WARN")
                 return
-            show_market_detail(cast(dict[str, object], market_value), signal_title=title)
+            show_market_detail(market, signal_title=title)
     
         def copy_title():
             try:
@@ -693,9 +693,7 @@ def run_ui(api: TitanBackend) -> None:
     
         tk.Button(lf, text="🌐 Open on Polymarket", bg="#0a1a3a", fg="#00aaff",
                   font=mono9, padx=10, command=open_polymarket).pack(side="left", padx=4)
-        tk.Button(lf, text="ðŸ“ˆ Market", bg="#10203a", fg="#88ccff",
-                  font=mono9, padx=10, command=open_market_detail).pack(side="left", padx=4)
-        tk.Button(lf, text="ðŸ“ˆ Market", bg="#10203a", fg="#88ccff",
+        tk.Button(lf, text="📈 Market", bg="#10203a", fg="#88ccff",
                   font=mono9, padx=10, command=open_market_detail).pack(side="left", padx=4)
         tk.Button(lf, text="📋 Copy Title", bg="#1a2a1a", fg="#00ff88",
                   font=mono9, padx=10, command=copy_title).pack(side="left", padx=4)
@@ -703,7 +701,7 @@ def run_ui(api: TitanBackend) -> None:
                   font=mono9, padx=10, command=inspect_raw_data).pack(side="left", padx=4)
         tk.Button(lf, text="🧩 Properties", bg="#2a2012", fg="#ffcc88",
                   font=mono9, padx=10, command=open_properties).pack(side="left", padx=4)
-    
+        
         url_lbl = tk.Label(lf, text=pos.market_url[:80], fg="#334455", bg="#060615", font=mono9)
         url_lbl.pack(side="left", padx=8)
     
@@ -854,12 +852,11 @@ def run_ui(api: TitanBackend) -> None:
             trade.open_on_polymarket()
 
         def open_market_detail() -> None:
-            audit = trade.audit
-            market_value = audit.get("market_snapshot") if isinstance(audit, dict) else None
-            if market_value is None:
+            market: Market | None = _load_market_payload(cid=trade.cid, asset=trade.asset)
+            if market is None:
                 log("[trade detail] market payload missing", "WARN")
                 return
-            show_market_detail(cast(dict[str, object], market_value), signal_title=title)
+            show_market_detail(market, signal_title=title)
     
         def copy_title():
             try:
@@ -1009,16 +1006,23 @@ def run_ui(api: TitanBackend) -> None:
 
     _closed_tree_items: dict[str, Position] = {}
     _open_tree_items: dict[str, Position] = {}
+    _last_chart_signature: list[object | None] = [None]
 
     def _load_selected_position_chart() -> None:
         sel = pos_tree.selection()
         if not sel:
-            pos_graph.load([], "", 0.0)
+            empty_signature = ("empty",)
+            if _last_chart_signature[0] != empty_signature:
+                pos_graph.load([], "", 0.0)
+                _last_chart_signature[0] = empty_signature
             return
 
         vals = pos_tree.item(sel[0])["values"]
         if not vals:
-            pos_graph.load([], "", 0.0)
+            empty_signature = ("empty",)
+            if _last_chart_signature[0] != empty_signature:
+                pos_graph.load([], "", 0.0)
+                _last_chart_signature[0] = empty_signature
             return
 
         mkt_name = str(vals[0]).replace("ðŸ’Ž", "").replace("âš¡", "")
@@ -1029,7 +1033,11 @@ def run_ui(api: TitanBackend) -> None:
             pos = _find_selected_closed_position()
             if pos is None:
                 msg = f"Closed position match not found for {mkt_name[:48]} [{outcome}]."
-                pos_graph.load([], mkt_name, 0.0, msg)
+                missing_signature = ("closed-missing", mkt_name, outcome, msg)
+                if _last_chart_signature[0] != missing_signature:
+                    pos_graph.load([], mkt_name, 0.0, msg)
+                    pos_chart_frame.refresh_panel(reset=True)
+                    _last_chart_signature[0] = missing_signature
                 if _last_chart_warn[0] != msg:
                     pos_log_write(msg, "WARN")
                     _last_chart_warn[0] = msg
@@ -1039,6 +1047,16 @@ def run_ui(api: TitanBackend) -> None:
             entry_price = pos.entry_price
             title = pos.title or mkt_name
             if history:
+                history_signature = (
+                    "closed",
+                    str(pos.cid or ""),
+                    title,
+                    outcome,
+                    len(history),
+                    float(history[-1][0]),
+                )
+                if _last_chart_signature[0] == history_signature:
+                    return
                 _last_chart_warn[0] = ""
                 pos_graph.load(
                     history,
@@ -1049,19 +1067,29 @@ def run_ui(api: TitanBackend) -> None:
                     exit_price=pos.exit_price or None,
                 )
                 pos_chart_frame.refresh_panel(reset=True)
+                _last_chart_signature[0] = history_signature
                 return
 
             detail = pos.price_history_error or "Closed position has no chart history."
-            pos_graph.load(
-                [],
+            empty_history_signature = (
+                "closed-empty",
+                str(pos.cid if (pos.buy_trade or pos.sell_trade) else ""),
                 title,
-                entry_price,
+                outcome,
                 detail,
-                entry_ts=pos.entry_ts or None,
-                exit_ts=pos.exit_ts or None,
-                exit_price=pos.exit_price or None,
             )
-            pos_chart_frame.refresh_panel(reset=True)
+            if _last_chart_signature[0] != empty_history_signature:
+                pos_graph.load(
+                    [],
+                    title,
+                    entry_price,
+                    detail,
+                    entry_ts=pos.entry_ts or None,
+                    exit_ts=pos.exit_ts or None,
+                    exit_price=pos.exit_price or None,
+                )
+                pos_chart_frame.refresh_panel(reset=True)
+                _last_chart_signature[0] = empty_history_signature
             warn_msg = f"Closed chart empty: {title[:80]} [{outcome}] | {detail}"
             if _last_chart_warn[0] != warn_msg:
                 pos_log_write(warn_msg, "WARN")
@@ -1072,14 +1100,28 @@ def run_ui(api: TitanBackend) -> None:
             title = pos.title
             if title[:48] in mkt_name or mkt_name[:30] in title:
                 if pos.outcome == outcome:
+                    history_signature = (
+                        "open",
+                        str(pos.cid or ""),
+                        title,
+                        outcome,
+                        len(pos.price_history),
+                        float(pos.price_history[-1][0]) if pos.price_history else 0.0,
+                    )
+                    if _last_chart_signature[0] == history_signature:
+                        return
                     _last_chart_warn[0] = ""
                     pos_graph.load(pos.price_history, title, pos.entry_price, entry_ts=pos.entry_ts or None)
                     pos_chart_frame.refresh_panel(reset=True)
+                    _last_chart_signature[0] = history_signature
                     return
 
         _last_chart_warn[0] = ""
-        pos_graph.load([], mkt_name, 0.0, f"Open position match not found for {mkt_name[:48]} [{outcome}].")
-        pos_chart_frame.refresh_panel(reset=True)
+        missing_signature = ("open-missing", mkt_name, outcome)
+        if _last_chart_signature[0] != missing_signature:
+            pos_graph.load([], mkt_name, 0.0, f"Open position match not found for {mkt_name[:48]} [{outcome}].")
+            pos_chart_frame.refresh_panel(reset=True)
+            _last_chart_signature[0] = missing_signature
 
     def _find_selected_closed_position() -> Position | None:
         sel = pos_tree.selection()
@@ -1196,9 +1238,11 @@ def run_ui(api: TitanBackend) -> None:
     def pos_log_write(msg, tag="INFO"):
         try:
             pos_log.configure(state="normal")
+            was_at_end = _is_scrolled_to_end(pos_log)
             ts = datetime.now().strftime("%H:%M:%S")
             pos_log.insert(tk.END, f"[{ts}] {msg}\n", tag)
-            pos_log.see(tk.END)
+            if was_at_end:
+                pos_log.see(tk.END)
             pos_log.configure(state="disabled")
         except Exception:
             pass
@@ -1410,6 +1454,27 @@ def run_ui(api: TitanBackend) -> None:
     }
     for tag_name, color in LOG_COLORS.items():
         sig_log.tag_configure(tag_name, foreground=color)
+
+    def _is_scrolled_to_end(widget: tk.Misc) -> bool:
+        try:
+            return float(widget.yview()[1]) >= 0.999
+        except Exception:
+            return True
+
+    def _top_scroll_fraction(widget: tk.Misc) -> float:
+        try:
+            return float(widget.yview()[0])
+        except Exception:
+            return 0.0
+
+    def _restore_scroll(widget: tk.Misc, *, was_at_end: bool, top_fraction: float) -> None:
+        try:
+            if was_at_end:
+                widget.see(tk.END)
+            else:
+                widget.yview_moveto(top_fraction)
+        except Exception:
+            pass
     
     
     def log(msg, level="INFO"):
@@ -1417,13 +1482,15 @@ def run_ui(api: TitanBackend) -> None:
             if level == "DEBUG" and not _debug_mode[0]:
                 return
             sig_log.configure(state="normal")
+            was_at_end = _is_scrolled_to_end(sig_log)
             ts  = datetime.now().strftime("%H:%M:%S")
             tag = level if level in LOG_COLORS else "INFO"
             sig_log.insert(tk.END, f"[{ts}] {msg}\n", tag)
             line_count = int(sig_log.index("end-1c").split(".")[0])
             if line_count > 3000:
                 sig_log.delete("1.0", "600.0")
-            sig_log.see(tk.END)
+            if was_at_end:
+                sig_log.see(tk.END)
             sig_log.configure(state="disabled")
         except Exception:
             pass
@@ -1697,56 +1764,13 @@ def run_ui(api: TitanBackend) -> None:
             return value
         raise TypeError(f"{label} must be an object, got {type(value).__name__}")
 
-    def _hydrate_signal_row_market(row: dict[str, object]) -> dict[str, object]:
-        market_value = row.get("mkt")
-        if not isinstance(market_value, dict):
-            return row
-        from titan_market import Market
-
-        row["mkt"] = Market(
-            yes_price=float(market_value.get("yes_price") or 0.5),
-            no_price=float(market_value.get("no_price") or 0.5),
-            outcome_labels=[
-                str(item) for item in market_value.get("outcome_labels", [])
-            ] if isinstance(market_value.get("outcome_labels", []), list) else [],
-            outcome_prices={
-                str(key): float(value)
-                for key, value in market_value.get("outcome_prices", {}).items()
-            } if isinstance(market_value.get("outcome_prices", {}), dict) else {},
-            token_index={
-                str(key): int(value)
-                for key, value in market_value.get("token_index", {}).items()
-            } if isinstance(market_value.get("token_index", {}), dict) else {},
-            index_to_price={
-                int(key): float(value)
-                for key, value in market_value.get("index_to_price", {}).items()
-            } if isinstance(market_value.get("index_to_price", {}), dict) else {},
-            asset_to_price={
-                str(key): float(value)
-                for key, value in market_value.get("asset_to_price", {}).items()
-            } if isinstance(market_value.get("asset_to_price", {}), dict) else {},
-            asset_to_index={
-                str(key): int(value)
-                for key, value in market_value.get("asset_to_index", {}).items()
-            } if isinstance(market_value.get("asset_to_index", {}), dict) else {},
-            liq=float(market_value.get("liq") or 0.0),
-            volume=float(market_value.get("volume") or 0.0),
-            title=str(market_value.get("title") or ""),
-            end_date=str(market_value.get("end_date") or ""),
-            hrs_left=float(market_value["hrs_left"]) if isinstance(market_value.get("hrs_left"), (int, float)) else None,
-            slug=str(market_value.get("slug") or ""),
-            event_slug=str(market_value.get("event_slug") or ""),
-            ts=float(market_value.get("ts") or 0.0),
-        )
-        return row
-
     def _require_signal_rows(value: object) -> list[SignalDict]:
         if not isinstance(value, list):
             raise TypeError(f"signals must be a list, got {type(value).__name__}")
         rows: list[SignalDict] = []
         for idx, item in enumerate(value):
             row = _require_row_object(item, f"signal[{idx}]")
-            rows.append(cast("SignalDict", _hydrate_signal_row_market(row)))
+            rows.append(cast("SignalDict", row))
         return rows
 
     def _signal_ev_pct(signal: SignalDict) -> float:
@@ -1765,6 +1789,22 @@ def run_ui(api: TitanBackend) -> None:
         if isinstance(age_h, (int, float)):
             return float(age_h) * 60.0
         return 0.0
+
+    def _market_payload_from_value(value: object) -> Market | None:
+        from titan_market import Market as _Market
+        if isinstance(value, _Market):
+            return value
+        return None
+
+    def _load_market_payload(*, cid: str = "", asset: str = "") -> Market | None:
+        import titan_state as _ts_mut
+
+        market_value: object | None = None
+        if asset:
+            market_value = _ts_mut.market_cache.get_market_by_asset(asset)
+        if market_value is None and cid:
+            market_value = _ts_mut.market_cache.get_market_by_cid(cid)
+        return _market_payload_from_value(market_value)
 
     @dataclass(frozen=True)
     class _InspectorRow:
@@ -2079,10 +2119,10 @@ def run_ui(api: TitanBackend) -> None:
         raw_txt.insert("1.0", json.dumps(raw_value, indent=2, default=str))
         raw_txt.focus_set()
 
-    def show_market_detail(market: dict[str, Any], signal_title: str = "") -> None:
+    def show_market_detail(market: Market, signal_title: str = "") -> None:
         win = tk.Toplevel(root)
-        market_title = str(market.get("title", signal_title or "Market"))
-        market_slug = str(market.get("slug", ""))
+        market_title = market.title or signal_title or "Market"
+        market_slug = market.slug
         win.title(f"Market Detail — {market_title[:50]}")
         win.configure(bg="#060615")
         win.geometry("760x560")
@@ -2093,23 +2133,25 @@ def run_ui(api: TitanBackend) -> None:
         bold9 = font.Font(family="Courier", size=9, weight="bold")
         bold11 = font.Font(family="Courier", size=11, weight="bold")
 
-        liq       = float(market.get("liq") or 0.0)
-        volume    = float(market.get("volume") or 0.0)
-        yes_price = float(market.get("yes_price") or 0.0)
-        no_price  = float(market.get("no_price") or 0.0)
-        hrs_left_obj = market.get("hrs_left")
-        hrs_left_text = f"{float(hrs_left_obj):.1f}h" if isinstance(hrs_left_obj, (int, float)) else "—"
-        ts_value  = float(market.get("ts") or 0.0)
-        ts_text = datetime.fromtimestamp(ts_value).strftime("%Y-%m-%d %H:%M:%S") if ts_value > 0 else "—"
+        liq       = market.liq
+        volume    = market.volume
+        yes_price = market.yes_price
+        no_price  = market.no_price
+        hrs_left_text = f"{market.hrs_left:.1f}h" if market.hrs_left is not None else "—"
+        ts_text = datetime.fromtimestamp(market.ts).strftime("%Y-%m-%d %H:%M:%S") if market.ts > 0 else "—"
 
         hf = tk.Frame(win, bg="#0a0a20", pady=8)
         hf.pack(fill="x", padx=8, pady=(8, 0))
         tk.Label(hf, text=f"📈 {market_title}",
                  fg="#00aaff", bg="#0a0a20", font=bold11,
                  wraplength=730, justify="left").pack(anchor="w", padx=12)
-        tk.Label(hf, text=f"Slug: {market_slug or '—'}   Event: {market.get('event_slug', '—')}",
-                 fg="#556677", bg="#0a0a20", font=mono9,
-                 wraplength=730, justify="left").pack(anchor="w", padx=12)
+        event_slug = market.event_slug or "—"
+        # tk.Label(hf, text=f"Slug: {market_slug or '—'}",
+        #          fg="#556677", bg="#0a0a20", font=mono9,
+        #          wraplength=730, justify="left").pack(anchor="w", padx=12)
+        # tk.Label(hf, text=f"Event slug: {event_slug}",
+        #          fg="#556677", bg="#0a0a20", font=mono9,
+        #          wraplength=730, justify="left").pack(anchor="w", padx=12)
 
         sf2 = tk.Frame(win, bg="#060615")
         sf2.pack(fill="x", padx=8, pady=6)
@@ -2124,14 +2166,12 @@ def run_ui(api: TitanBackend) -> None:
             ("Liquidity", f"${liq:,.0f}", "#00ff88"),
             ("Volume", f"${volume:,.0f}", "#88ccff"),
             ("Hours Left", hrs_left_text, "#ffdd44"),
-            ("End Date", str(market.get("end_date", "—") or "—"), "#ff8844"),
-            ("Slug", market_slug or "—", "#aaaaff"),
-            ("Event Slug", str(market.get("event_slug", "—") or "—"), "#aaaacc"),
+            ("End Date", market.end_date or "—", "#ff8844"),
             ("Yes Price", f"${yes_price:.4f}" if yes_price > 0 else "—", "#00ff88"),
             ("No Price", f"${no_price:.4f}" if no_price > 0 else "—", "#ff8844"),
-            ("Volume", f"${volume:,.0f}", "#88ccff"),
             ("Timestamp", ts_text, "#88ccff"),
-            ("Outcome Labels", f"{len(market.get('outcome_labels', []) or [])}", "#aaaacc"),
+            ("Market Type", market.mkt_type or "—", "#ffdd44"),
+            ("Outcome Labels", f"{len(market.outcome_labels)}", "#aaaacc"),
         ]
         for i, (lbl, val, col) in enumerate(stats_data):
             sf2.columnconfigure(i % 4, weight=1)
@@ -2142,12 +2182,11 @@ def run_ui(api: TitanBackend) -> None:
         tk.Label(info_f, text="DETAILS", fg="#00ff88", bg="#060615", font=bold9).pack(anchor="w", padx=4, pady=(4, 2))
         detail_lines = [
             f"  Title: {market_title}",
-            f"  End date: {market.get('end_date', '—')}",
-            f"  Hours left: {hrs_left_text}",
+            f"  Slug: {market_slug or '—'}",
+            f"  Event slug: {event_slug}",
         ]
-        outcome_labels = market.get("outcome_labels")
-        if isinstance(outcome_labels, list) and outcome_labels:
-            detail_lines.append(f"  Outcomes: {', '.join(str(x) for x in outcome_labels[:8])}")
+        if market.outcome_labels:
+            detail_lines.append(f"  Outcomes: {', '.join(str(x) for x in market.outcome_labels[:8])}")
         for line in detail_lines:
             tk.Label(info_f, text=line, fg="#cccccc", bg="#060615", font=mono10,
                      anchor="w", justify="left", wraplength=720).pack(anchor="w", padx=12)
@@ -2171,6 +2210,8 @@ def run_ui(api: TitanBackend) -> None:
                                   title=f"Market Properties - {market_title}",
                                   subtitle="Double-click nested rows to inspect them.")
 
+        tk.Button(lf, text="🌐 Open Polymarket", bg="#1a1a2a", fg="#00aaff",
+                  font=mono9, padx=10, command=market.open_on_polymarket).pack(side="left", padx=4)
         tk.Button(lf, text="📋 Copy Title", bg="#1a2a1a", fg="#00ff88",
                   font=mono9, padx=10, command=copy_title).pack(side="left", padx=4)
         tk.Button(lf, text="🔎 Inspect Raw", bg="#201a2a", fg="#d0b0ff",
@@ -2308,11 +2349,16 @@ def run_ui(api: TitanBackend) -> None:
                                   subtitle="Double-click nested rows to inspect them.")
 
         def open_market_detail() -> None:
-            market_value = signal.get("mkt")
-            if market_value is None:
+            market_payload = _market_payload_from_value(signal.get("mkt"))
+            if market_payload is None:
+                market_payload = _load_market_payload(
+                    cid=str(signal.get("cid") or ""),
+                    asset=str(signal.get("asset") or ""),
+                )
+            if market_payload is None:
                 log("[signal detail] market payload missing", "WARN")
                 return
-            show_market_detail(cast(dict[str, object], market_value), signal_title=signal_title)
+            show_market_detail(market_payload, signal_title=signal_title)
 
         tk.Button(lf, text="🌐 Polymarket", bg="#0a1a3a", fg="#00aaff",
                   font=mono9, padx=10, command=open_polymarket_signal).pack(side="left", padx=4)

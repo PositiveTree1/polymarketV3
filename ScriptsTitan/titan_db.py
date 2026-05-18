@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 TITAN — SQLite layer for time-series data (price_history, equity_history, watchlist).
 Keeps titan_state.json lean by offloading high-cardinality data here.
@@ -11,11 +13,9 @@ from typing import TYPE_CHECKING, Iterator, cast
 if TYPE_CHECKING:
     from titan_state import TradeStats
     from titan_signals import SignalDict
-from titan_trade import TradeRecord
+    from titan_trade import TradeRecord
 
 _DB_PATH: str = ""
-
-
 def init_db(db_path: str) -> None:
     global _DB_PATH
     _DB_PATH = db_path
@@ -115,11 +115,26 @@ def init_db(db_path: str) -> None:
                 worst       REAL    NOT NULL DEFAULT 0.0,
                 updated_at  DATETIME NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS markets (
+                cid         TEXT     NOT NULL PRIMARY KEY,
+                updated_at  DATETIME NOT NULL,
+                data        TEXT     NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_markets_updated_at ON markets (updated_at);
         """)
         _migrate_ts_columns(cx)
         _migrate_add_columns(cx)
         _migrate_price_history_table(cx)
-        _migrate_strip_signal_wallets(cx)
+        scanned_rows, updated_rows = _migrate_strip_signal_embedded_market_data(cx)
+    cleanup_line = f"Signal cleanup: scanned={scanned_rows} updated={updated_rows}"
+    print(cleanup_line)
+    try:
+        import titan_state as S
+
+        S._log(cleanup_line, "INFO")
+    except Exception:
+        pass
 
 
 @contextmanager
@@ -342,10 +357,19 @@ def _sanitize_signal_payload(payload: object) -> dict[str, object] | None:
         return None
     sanitized = dict(payload)
     sanitized.pop("wallets", None)
+    sanitized.pop("mkt", None)
+    sanitized.pop("title", None)
+    sanitized.pop("slug", None)
+    sanitized.pop("event_slug", None)
+    sanitized.pop("mkt_type", None)
+    sanitized.pop("is_sports", None)
+    sanitized.pop("price_history", None)
+    sanitized["ver"] = _sanitize_signal_observation_map(payload.get("ver"))
+    sanitized["elite_ver"] = _sanitize_signal_observation_map(payload.get("elite_ver"))
     return sanitized
 
 
-def _migrate_strip_signal_wallets(cx: sqlite3.Connection) -> None:
+def _migrate_strip_signal_embedded_market_data(cx: sqlite3.Connection) -> tuple[int, int]:
     rows = cx.execute("SELECT id, data FROM signals").fetchall()
     updates: list[tuple[str, int]] = []
     for row_id, raw_data in rows:
@@ -363,6 +387,43 @@ def _migrate_strip_signal_wallets(cx: sqlite3.Connection) -> None:
         updates.append((json.dumps(sanitized, default=str), int(row_id)))
     if updates:
         cx.executemany("UPDATE signals SET data = ? WHERE id = ?", updates)
+    return len(rows), len(updates)
+
+
+def _sanitize_signal_observation_map(value: object) -> dict[str, dict[str, object]]:
+    if not isinstance(value, dict):
+        return {}
+    sanitized: dict[str, dict[str, object]] = {}
+    for wallet_raw, observation_raw in value.items():
+        wallet = str(wallet_raw or "")
+        if not wallet or not isinstance(observation_raw, dict):
+            continue
+        sanitized[wallet] = _sanitize_signal_observation_payload(observation_raw, wallet)
+    return sanitized
+
+
+def _sanitize_signal_observation_payload(
+    payload: dict[str, object],
+    wallet: str,
+) -> dict[str, object]:
+    return {
+        "wallet": wallet,
+        "name": str(payload.get("name") or ""),
+        "asset": str(payload.get("asset") or ""),
+        "price": float(payload.get("price") or 0.0),
+        "size": float(payload.get("size") or 0.0),
+        "cash": float(payload.get("cash") or 0.0),
+        "ts": float(payload.get("ts") or 0.0),
+        "window": str(payload.get("window") or ""),
+        "source": str(payload.get("source") or ""),
+        "is_elite": bool(payload.get("is_elite")),
+        "is_large_trade": bool(payload.get("is_large_trade")),
+        "hft_spike_ratio": (
+            float(payload["hft_spike_ratio"])
+            if payload.get("hft_spike_ratio") is not None
+            else None
+        ),
+    }
 
 
 def _ts_column_type(cx: sqlite3.Connection, table_name: str) -> str | None:
@@ -470,7 +531,7 @@ def _decode_signal_row_payload(data: str) -> "SignalDict | None":
         sanitized = _sanitize_signal_payload(decoded)
         if sanitized is None:
             return None
-        return cast("SignalDict", sanitized)
+        return _enrich_signal_payload_from_market_cache(cast("SignalDict", sanitized))
 
     if isinstance(decoded, str):
         decoded_text = decoded.strip()
@@ -480,7 +541,7 @@ def _decode_signal_row_payload(data: str) -> "SignalDict | None":
                 sanitized = _sanitize_signal_payload(nested)
                 if sanitized is None:
                     return None
-                return cast("SignalDict", sanitized)
+                return _enrich_signal_payload_from_market_cache(cast("SignalDict", sanitized))
         return None
 
     return None
@@ -528,6 +589,141 @@ def load_signal_history(limit: int = 200, min_score: float = 0.0, cid: str | Non
         typed_sig["snapshot_ts"] = _dt_to_ts(str(snapshot_ts))
         out.append(typed_sig)
     return out
+
+
+def _market_to_payload(market: object) -> dict[str, object]:
+    return {
+        "yes_price": float(getattr(market, "yes_price")),
+        "no_price": float(getattr(market, "no_price")),
+        "outcome_labels": list(getattr(market, "outcome_labels")),
+        "outcome_prices": dict(getattr(market, "outcome_prices")),
+        "token_index": dict(getattr(market, "token_index")),
+        "index_to_price": dict(getattr(market, "index_to_price")),
+        "asset_to_price": dict(getattr(market, "asset_to_price")),
+        "asset_to_index": dict(getattr(market, "asset_to_index")),
+        "liq": float(getattr(market, "liq")),
+        "volume": float(getattr(market, "volume")),
+        "title": str(getattr(market, "title") or ""),
+        "end_date": str(getattr(market, "end_date") or ""),
+        "hrs_left": getattr(market, "hrs_left"),
+        "slug": str(getattr(market, "slug") or ""),
+        "event_slug": str(getattr(market, "event_slug") or ""),
+        "mkt_type": str(getattr(market, "mkt_type") or ""),
+        "is_sports": bool(getattr(market, "is_sports")),
+        "ts": float(getattr(market, "ts")),
+    }
+
+
+def _market_from_payload(payload: dict[str, object]) -> "Market":
+    from titan_market import Market
+
+    hrs_left_raw = payload.get("hrs_left")
+    hrs_left: float | None
+    if hrs_left_raw is None:
+        hrs_left = None
+    else:
+        hrs_left = float(hrs_left_raw)
+
+    outcome_labels_raw = payload.get("outcome_labels")
+    outcome_labels = [str(item) for item in outcome_labels_raw] if isinstance(outcome_labels_raw, list) else []
+
+    def _string_float_map(value: object) -> dict[str, float]:
+        if not isinstance(value, dict):
+            return {}
+        return {str(key): float(item) for key, item in value.items()}
+
+    def _string_int_map(value: object) -> dict[str, int]:
+        if not isinstance(value, dict):
+            return {}
+        return {str(key): int(item) for key, item in value.items()}
+
+    def _int_float_map(value: object) -> dict[int, float]:
+        if not isinstance(value, dict):
+            return {}
+        return {int(key): float(item) for key, item in value.items()}
+
+    return Market(
+        yes_price=float(payload.get("yes_price") or 0.5),
+        no_price=float(payload.get("no_price") or 0.5),
+        outcome_labels=outcome_labels,
+        outcome_prices=_string_float_map(payload.get("outcome_prices")),
+        token_index=_string_int_map(payload.get("token_index")),
+        index_to_price=_int_float_map(payload.get("index_to_price")),
+        asset_to_price=_string_float_map(payload.get("asset_to_price")),
+        asset_to_index=_string_int_map(payload.get("asset_to_index")),
+        liq=float(payload.get("liq") or 0.0),
+        volume=float(payload.get("volume") or 0.0),
+        title=str(payload.get("title") or ""),
+        end_date=str(payload.get("end_date") or ""),
+        hrs_left=hrs_left,
+        slug=str(payload.get("slug") or ""),
+        event_slug=str(payload.get("event_slug") or ""),
+        mkt_type=str(payload.get("mkt_type") or ""),
+        is_sports=bool(payload.get("is_sports")),
+        ts=float(payload.get("ts") or 0.0),
+    )
+
+
+def _enrich_signal_payload_from_market_cache(signal: "SignalDict") -> "SignalDict":
+    import titan_state as S
+
+    cid = str(signal.get("cid") or "")
+    if not cid:
+        return signal
+    market = S.market_cache.peek(cid)
+    if market is None:
+        return signal
+    signal["mkt"] = _market_to_payload(market)
+    signal["mkt_type"] = market.mkt_type
+    signal["is_sports"] = market.is_sports
+    if not signal.get("title"):
+        signal["title"] = market.title
+    if not signal.get("slug"):
+        signal["slug"] = market.slug
+    if not signal.get("event_slug"):
+        signal["event_slug"] = market.event_slug
+    return signal
+
+
+def upsert_market(cid: str, market: object) -> None:
+    if not _DB_PATH or not cid:
+        return
+    now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    payload = json.dumps(_market_to_payload(market), separators=(",", ":"), default=str)
+    with _connect() as cx:
+        cx.execute(
+            """
+            INSERT INTO markets (cid, updated_at, data)
+            VALUES (?, ?, ?)
+            ON CONFLICT(cid) DO UPDATE SET
+                updated_at=excluded.updated_at,
+                data=excluded.data
+            """,
+            (cid, now, payload),
+        )
+
+
+def load_markets() -> dict[str, "Market"]:
+    if not _DB_PATH:
+        return {}
+    with _connect() as cx:
+        rows = cx.execute("SELECT cid, data FROM markets ORDER BY cid ASC").fetchall()
+    markets: dict[str, "Market"] = {}
+    for cid_raw, data_raw in rows:
+        cid = str(cid_raw or "")
+        if not cid:
+            continue
+        try:
+            payload = json.loads(str(data_raw))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        try:
+            markets[cid] = _market_from_payload(payload)
+        except Exception:
+            continue
+    return markets
 
 
 def get_schema_description() -> str:
@@ -587,6 +783,8 @@ def _trade_to_row(trade: TradeRecord) -> tuple:
 
 
 def _row_to_trade(row: sqlite3.Row, wallets: list[dict], audits: list[dict]) -> "TradeRecord":
+    from titan_trade import TradeRecord
+
     row_data = dict(row)
 
     def _as_str(value: object) -> str:
