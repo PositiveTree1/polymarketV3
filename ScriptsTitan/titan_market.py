@@ -64,6 +64,17 @@ class Market:
         slug = self.event_slug or self.slug
         return f"https://polymarket.com/event/{slug}" if slug else "https://polymarket.com"
 
+    @classmethod
+    def fetch_price_for_asset(cls, asset: str) -> float | None:
+        raw = _fetch_market_raw("", asset=asset)
+        if not raw:
+            return None
+        cid = str(raw.get("conditionId") or raw.get("condition_id") or "")
+        mkt, _ = _market_from_gamma_payload(raw, cid=cid, trade_title=None, slug=str(raw.get("slug") or ""), allow_untradeable=True)
+        if mkt is None:
+            return None
+        return mkt.outcome_prices.get(asset)
+
     def get(self, key: str, default: object = None) -> object:
         return getattr(self, key, default)
 
@@ -319,13 +330,6 @@ def _fetch_market_raw(cid: str, asset: str = "", slug: str = "") -> dict | None:
         direct_market = _pick(direct_data)
         if direct_market and _cid_ok(direct_market):
             return direct_market
-
-        legacy_data = _gamma_get(f"{GAMMA_API}/markets", {
-            "clob_token_ids": f'["{dec_asset}"]', "limit": 1
-        })
-        legacy_market = _pick(legacy_data)
-        if legacy_market and _cid_ok(legacy_market):
-            return legacy_market
         return None
 
     # ── Stage 1: Gamma clob_token_ids lookup ─────────────────────────────────────────────
@@ -690,10 +694,6 @@ def fetch_position_price_fast(cid: str, asset: str, outcome: str) -> float | Non
             data = S.safe_get(f"{GAMMA_API}/markets", {
                 "clob_token_ids": dec_asset, "limit": 1
             }, quiet=True)
-            if not (data and isinstance(data, list) and data):
-                data = S.safe_get(f"{GAMMA_API}/markets", {
-                    "clob_token_ids": f'["{dec_asset}"]', "limit": 1
-                }, quiet=True)
             if data and isinstance(data, list) and data:
                 m = data[0]
                 raw_prices = m.get("outcomePrices") or "[]"

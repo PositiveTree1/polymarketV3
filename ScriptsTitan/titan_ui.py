@@ -1796,15 +1796,10 @@ def run_ui(api: TitanBackend) -> None:
             return value
         return None
 
-    def _load_market_payload(*, cid: str = "", asset: str = "") -> Market | None:
-        import titan_state as _ts_mut
-
-        market_value: object | None = None
-        if asset:
-            market_value = _ts_mut.market_cache.get_market_by_asset(asset)
-        if market_value is None and cid:
-            market_value = _ts_mut.market_cache.get_market_by_cid(cid)
-        return _market_payload_from_value(market_value)
+    def _load_market_payload(*, cid: str = "", asset: str = "", slug: str = "") -> Market | None:
+        import titan_market as market_api
+        mkt, _ = market_api.get_market(cid, asset=asset, slug=slug, persist=True)
+        return mkt
 
     @dataclass(frozen=True)
     class _InspectorRow:
@@ -2354,6 +2349,7 @@ def run_ui(api: TitanBackend) -> None:
                 market_payload = _load_market_payload(
                     cid=str(signal.get("cid") or ""),
                     asset=str(signal.get("asset") or ""),
+                    slug=str(signal.get("slug") or ""),
                 )
             if market_payload is None:
                 log("[signal detail] market payload missing", "WARN")

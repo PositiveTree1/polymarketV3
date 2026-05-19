@@ -54,34 +54,11 @@ def _try_fetch_resolution_price(cid: str, asset: str, outcome: str) -> float | N
     """
     try:
         if asset:
-            data = S.safe_get(f"{GAMMA_API}/markets", {
-                "clob_token_ids": asset, "limit": 1
-            })
-            if not (data and isinstance(data, list) and data):
-                data = S.safe_get(f"{GAMMA_API}/markets", {
-                    "clob_token_ids": f'["{asset}"]', "limit": 1
-                })
-            if data and isinstance(data, list) and data:
-                m = data[0]
-                import json as _json
-                raw_prices = m.get("outcomePrices") or "[]"
-                try:
-                    prices = _json.loads(raw_prices) if isinstance(raw_prices, str) else list(raw_prices)
-                    prices = [float(p) for p in prices]
-                except Exception:
-                    prices = []
-                clob_tokens = m.get("clobTokenIds") or m.get("clob_token_ids") or "[]"
-                try:
-                    if isinstance(clob_tokens, str):
-                        clob_tokens = _json.loads(clob_tokens)
-                except Exception:
-                    clob_tokens = []
-                for i, tok in enumerate(clob_tokens):
-                    if str(tok) == str(asset) and i < len(prices):
-                        p = prices[i]
-                        if p >= 0.97 or p <= 0.03:
-                            S._log(f"  📡 Asset price confirmed: {asset[:20]} = {p:.4f}", "DIAG")
-                            return p
+            from titan_market import Market
+            p = Market.fetch_price_for_asset(asset)
+            if p is not None and (p >= 0.97 or p <= 0.03):
+                S._log(f"  📡 Asset price confirmed: {asset[:20]} = {p:.4f}", "DIAG")
+                return p
 
         data = S.safe_get(f"{DATA_API}/trades", {
             "conditionId": cid,

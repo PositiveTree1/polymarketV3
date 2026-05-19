@@ -52,19 +52,6 @@ class MarketCache(dict[str, "Market"]):
             changed = True
         return changed
 
-    def _find_cached_by_asset(self, asset: str) -> tuple[str, "Market"] | None:
-        normalized_asset = str(asset or "").strip()
-        if not normalized_asset:
-            return None
-        now_t = time.time()
-        for cid, market in self.items():
-            if normalized_asset not in market.asset_to_price:
-                continue
-            if (now_t - market.ts) >= MARKET_TTL:
-                continue
-            return cid, market
-        return None
-
     def _extract_trade_slug_and_asset(self, cid: str) -> tuple[str, str]:
         import titan_state as S
 
@@ -204,11 +191,6 @@ class MarketCache(dict[str, "Market"]):
 
         import titan_market as market_api
 
-        cached_match = self._find_cached_by_asset(normalized_asset)
-        if cached_match is not None:
-            _, cached_market = cached_match
-            return cached_market, None
-
         raw_market = market_api._fetch_market_raw("", asset=normalized_asset, slug=slug)
         if raw_market is None:
             return None, "API returned nothing"
@@ -243,6 +225,8 @@ class MarketCache(dict[str, "Market"]):
         self,
         cid: str,
         *,
+        slug: str = "",
+        asset: str = "",
         allow_untradeable: bool = False,
         persist: bool = False,
     ) -> tuple["Market | None", str | None]:
@@ -261,7 +245,8 @@ class MarketCache(dict[str, "Market"]):
 
         import titan_market as market_api
 
-        slug, asset = self._extract_trade_slug_and_asset(normalized_cid)
+        if not slug:
+            slug, asset = self._extract_trade_slug_and_asset(normalized_cid)
         if not slug:
             return None, "No trade slug found for this conditionId"
 
@@ -284,9 +269,11 @@ class MarketCache(dict[str, "Market"]):
         self.store(resolved_cid, loaded, persist=persist)
         return loaded, None
 
-    def get_market_by_cid(self, cid: str) -> "Market | None":
+    def get_market_by_cid(self, cid: str, *, slug: str = "", asset: str = "") -> "Market | None":
         market, _ = self.resolve_cid(
             cid,
+            slug=slug,
+            asset=asset,
             allow_untradeable=True,
             persist=True,
         )
