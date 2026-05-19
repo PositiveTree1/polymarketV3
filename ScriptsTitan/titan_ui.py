@@ -21,17 +21,17 @@ from datetime import datetime
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, cast
 from titan_protocol import TitanBackend
-if TYPE_CHECKING:
-    from titan_market import Market
+    
 import os
 import webbrowser
 from pathlib import Path
 from titan_ui_charts import PnLChart, PositionChart, ChartMarker, init_chart_fonts
 
 if TYPE_CHECKING:
-    from titan_signals import SignalDict
+    from titan_signals import Signal
     from titan_position import Position
     from titan_trade import TradeRecord
+    from titan_market import Market
 
 try:
     import pyperclip
@@ -416,7 +416,7 @@ def run_ui(api: TitanBackend) -> None:
     sig_tree.configure(yscrollcommand=sig_vsb.set)
     sig_vsb.pack(side="right", fill="y")
     sig_tree.pack(fill="x", padx=4, pady=(4,2))
-    _signal_tree_items: dict[str, SignalDict] = {}
+    _signal_tree_items: dict[str, Signal] = {}
     
     lf = tk.Frame(tab_live, bg="#080810")
     lf.pack(fill="both", expand=True, padx=4)
@@ -1455,19 +1455,19 @@ def run_ui(api: TitanBackend) -> None:
     for tag_name, color in LOG_COLORS.items():
         sig_log.tag_configure(tag_name, foreground=color)
 
-    def _is_scrolled_to_end(widget: tk.Misc) -> bool:
+    def _is_scrolled_to_end(widget: tk.Text) -> bool:
         try:
             return float(widget.yview()[1]) >= 0.999
         except Exception:
             return True
 
-    def _top_scroll_fraction(widget: tk.Misc) -> float:
+    def _top_scroll_fraction(widget: tk.Text) -> float:
         try:
             return float(widget.yview()[0])
         except Exception:
             return 0.0
 
-    def _restore_scroll(widget: tk.Misc, *, was_at_end: bool, top_fraction: float) -> None:
+    def _restore_scroll(widget: tk.Text, *, was_at_end: bool, top_fraction: float) -> None:
         try:
             if was_at_end:
                 widget.see(tk.END)
@@ -1747,14 +1747,14 @@ def run_ui(api: TitanBackend) -> None:
     # ═══════════════════════════════════════════════════════════════════════════════
     #  RENDERERS
     # ═══════════════════════════════════════════════════════════════════════════════
-    _last_signals: list[SignalDict] = []
+    _last_signals: list[Signal] = []
     _last_wallets        = {}
     _last_rejects        = []
     _last_trades         = []
     _cycle_num           = [0]
     _pending_update      = [False]
     _show_signal_history = [False]
-    _signal_history_cache: list[list[SignalDict]] = [[]]
+    _signal_history_cache: list[list[Signal]] = [[]]
     _last_hb_ts          = [0.0]
     _HB_DEAD_SECS = 60
     _HB_BLINK_MS  = 600
@@ -1764,31 +1764,26 @@ def run_ui(api: TitanBackend) -> None:
             return value
         raise TypeError(f"{label} must be an object, got {type(value).__name__}")
 
-    def _require_signal_rows(value: object) -> list[SignalDict]:
+    def _require_signal_rows(value: object) -> list[Signal]:
+        from titan_signals import Signal as _Signal
         if not isinstance(value, list):
             raise TypeError(f"signals must be a list, got {type(value).__name__}")
-        rows: list[SignalDict] = []
-        for idx, item in enumerate(value):
-            row = _require_row_object(item, f"signal[{idx}]")
-            rows.append(cast("SignalDict", row))
-        return rows
+        out: list[Signal] = []
+        for item in value:
+            if isinstance(item, _Signal):
+                out.append(item)
+            elif isinstance(item, dict):
+                try:
+                    out.append(_Signal.from_dict(item))
+                except Exception:
+                    pass
+        return out
 
-    def _signal_ev_pct(signal: SignalDict) -> float:
-        ev_info = signal.get("ev_info")
-        if isinstance(ev_info, dict):
-            ev_pct = ev_info.get("ev_pct")
-            if isinstance(ev_pct, (int, float)):
-                return float(ev_pct)
+    def _signal_ev_pct(signal: Signal) -> float:
         return 0.0
 
-    def _signal_age_minutes(signal: SignalDict) -> float:
-        age_min = signal.get("age_min")
-        if isinstance(age_min, (int, float)):
-            return float(age_min)
-        age_h = signal.get("age_h")
-        if isinstance(age_h, (int, float)):
-            return float(age_h) * 60.0
-        return 0.0
+    def _signal_age_minutes(signal: Signal) -> float:
+        return float(signal.age_min)
 
     def _market_payload_from_value(value: object) -> Market | None:
         from titan_market import Market as _Market
@@ -2214,9 +2209,9 @@ def run_ui(api: TitanBackend) -> None:
         tk.Button(lf, text="🧩 Properties", bg="#2a2012", fg="#ffcc88",
                   font=mono9, padx=10, command=open_properties).pack(side="left", padx=4)
 
-    def _show_signal_detail(signal: SignalDict) -> None:
-        signal_title = str(signal.get("title", "Signal"))
-        signal_outcome = str(signal.get("outcome", ""))
+    def _show_signal_detail(signal: Signal) -> None:
+        signal_title = str(signal.title)
+        signal_outcome = str(signal.outcome)
         popup_title = signal_title if not signal_outcome else f"{signal_title} [{signal_outcome}]"
         win = tk.Toplevel(root)
         win.title(f"Signal Detail — {signal_title[:50]}")
@@ -2229,24 +2224,24 @@ def run_ui(api: TitanBackend) -> None:
         bold9 = font.Font(family="Courier", size=9, weight="bold")
         bold11 = font.Font(family="Courier", size=11, weight="bold")
 
-        score = float(signal.get("score", 0.0) or 0.0)
-        drift = float(signal.get("drift", 0.0) or 0.0)
-        cur = float(signal.get("cur", 0.0) or 0.0)
-        avg_entry = float(signal.get("avg_entry", 0.0) or 0.0)
-        bet = float(signal.get("bet", 0.0) or 0.0)
-        total_flow = float(signal.get("total_flow", 0.0) or 0.0)
-        ver_flow = float(signal.get("ver_flow", 0.0) or 0.0)
-        n_elite = int(signal.get("n_elite", 0) or 0)
-        n_ver = int(signal.get("n_ver", 0) or 0)
-        n_total = int(signal.get("n_total", 0) or 0)
-        tier = str(signal.get("tier", "?"))
-        strategy = str(signal.get("strategy", "?"))
-        newest_ts = float(signal.get("newest_ts", 0.0) or 0.0)
+        score = float(signal.score or 0.0)
+        drift = float(signal.drift or 0.0)
+        cur = float(signal.cur or 0.0)
+        avg_entry = float(signal.avg_entry or 0.0)
+        bet = float(signal.bet or 0.0)
+        total_flow = float(signal.total_flow or 0.0)
+        ver_flow = float(signal.ver_flow or 0.0)
+        n_elite = int(signal.n_elite or 0)
+        n_ver = int(signal.n_ver or 0)
+        n_total = int(signal.n_total or 0)
+        tier = str(signal.tier)
+        strategy = str(signal.strategy)
+        newest_ts = float(signal.newest_ts or 0.0)
         newest_ts_text = datetime.fromtimestamp(newest_ts).strftime("%Y-%m-%d %H:%M:%S") if newest_ts > 0 else "—"
-        first_seen_ts = float(signal.get("first_seen_ts", 0.0) or 0.0)
+        first_seen_ts = float(signal.first_seen_ts or 0.0)
         first_seen_ts_text = datetime.fromtimestamp(first_seen_ts).strftime("%Y-%m-%d %H:%M:%S") if first_seen_ts > 0 else "—"
         pnl_color = "#00ff55" if drift <= 0 else "#ffcc44"
-        icon = "💎" if tier == "CONVICTION" else ("⚡" if bool(signal.get("is_hft")) else "🎯")
+        icon = "💎" if tier == "CONVICTION" else ("⚡" if signal.is_hft else "🎯")
 
         hf = tk.Frame(win, bg="#0a0a20", pady=8)
         hf.pack(fill="x", padx=8, pady=(8, 0))
@@ -2279,13 +2274,13 @@ def run_ui(api: TitanBackend) -> None:
             ("Total Flow", f"${total_flow:,.0f}", "#00ff88"),
             ("Verified Flow", f"${ver_flow:,.0f}", "#88ccff"),
             ("Elite / Verified", f"{n_elite} / {n_ver}", "#ffdd44"),
-            ("Confluence", f"{int(signal.get('n_confluence', 0) or 0)}", "#aaaacc"),
+            ("Confluence", f"{int(signal.n_confluence or 0)}", "#aaaacc"),
             ("Total Whales", f"{n_total}", "#aaaacc"),
-            ("Window", str(signal.get("window", "?")).upper(), "#ff8844"),
-            ("Stop Loss", "OFF" if signal.get("stop_loss_pct") is None else f"{float(signal.get('stop_loss_pct', 0.0) or 0.0) * 100:.0f}%", "#aaaacc"),
+            ("Window", str(signal.strategy).upper(), "#ff8844"),
+            ("Stop Loss", "OFF" if signal.stop_loss_pct is None else f"{float(signal.stop_loss_pct or 0.0) * 100:.0f}%", "#aaaacc"),
             ("Score", f"{score:.0f}", "#ffdd44"),
             ("Tier", tier, "#ff8844"),
-            ("Large Trade", "YES" if bool(signal.get("has_large_trade")) else "NO", "#00ff88" if bool(signal.get("has_large_trade")) else "#aaaaaa"),
+            ("Large Trade", "YES" if signal.has_large_trade else "NO", "#00ff88" if signal.has_large_trade else "#aaaaaa"),
             ("First Seen TS", first_seen_ts_text, "#ffaa44"),
             ("Newest TS", newest_ts_text, "#88ccff"),
         ]
@@ -2297,19 +2292,19 @@ def run_ui(api: TitanBackend) -> None:
         info_f.pack(fill="x", padx=8, pady=(0, 6))
         tk.Label(info_f, text="DETAILS", fg="#00ff88", bg="#060615", font=bold9).pack(anchor="w", padx=4, pady=(4, 2))
         detail_lines = [
-            f"  CID: {signal.get('cid', '')}",
-            f"  Market type: {signal.get('mkt_type', '?')}",
-            f"  Sports: {'yes' if bool(signal.get('is_sports')) else 'no'}",
-            f"  HFT: {'yes' if bool(signal.get('is_hft')) else 'no'}",
-            f"  Conviction: {'yes' if bool(signal.get('has_large_trade')) else 'no'}",
+            f"  CID: {signal.cid}",
+            f"  Market type: {signal.mkt_type}",
+            f"  Sports: {'yes' if signal.is_sports else 'no'}",
+            f"  HFT: {'yes' if signal.is_hft else 'no'}",
+            f"  Conviction: {'yes' if signal.has_large_trade else 'no'}",
         ]
-        names = signal.get("names")
+        names = signal.names
         if isinstance(names, list) and names:
             detail_lines.append(f"  Via: {', '.join(str(x) for x in names[:6])}")
-        exits = signal.get("exits_detected")
+        exits = signal.exits_detected
         if isinstance(exits, list) and exits:
             detail_lines.append(f"  Exit alerts: {len(exits)}")
-        conviction_detail = signal.get("conviction_detail")
+        conviction_detail = signal.conviction_detail
         if isinstance(conviction_detail, str) and conviction_detail.strip():
             detail_lines.append(f"  Conviction detail: {conviction_detail}")
         for line in detail_lines:
@@ -2318,7 +2313,7 @@ def run_ui(api: TitanBackend) -> None:
 
         lf = tk.Frame(win, bg="#060615")
         lf.pack(fill="x", padx=8, pady=6)
-        event_slug = str(signal.get("event_slug", "") or "")
+        event_slug = str(signal.event_slug or "")
         signal_url = f"https://polymarket.com/event/{event_slug}" if event_slug else ""
 
         def copy_title() -> None:
@@ -2344,12 +2339,12 @@ def run_ui(api: TitanBackend) -> None:
                                   subtitle="Double-click nested rows to inspect them.")
 
         def open_market_detail() -> None:
-            market_payload = _market_payload_from_value(signal.get("mkt"))
+            market_payload = _market_payload_from_value(signal.mkt)
             if market_payload is None:
                 market_payload = _load_market_payload(
-                    cid=str(signal.get("cid") or ""),
-                    asset=str(signal.get("asset") or ""),
-                    slug=str(signal.get("slug") or ""),
+                    cid=str(signal.cid or ""),
+                    asset=str(signal.asset or ""),
+                    slug=str(signal.slug or ""),
                 )
             if market_payload is None:
                 log("[signal detail] market payload missing", "WARN")
@@ -2367,7 +2362,7 @@ def run_ui(api: TitanBackend) -> None:
         tk.Button(lf, text="🧩 Properties", bg="#2a2012", fg="#ffcc88",
                   font=mono9, padx=10, command=open_properties).pack(side="left", padx=4)
 
-        price_history: list[tuple[float, float]] = list(signal.get("price_history") or [])  # type: ignore[arg-type]
+        price_history: list[tuple[float, float]] = list(signal.price_history or [])
 
         def _price_chart_rows() -> list[tuple[str, str]]:
             from datetime import datetime as _dt
@@ -2379,7 +2374,7 @@ def run_ui(api: TitanBackend) -> None:
         chart_frame = ChartFrame(win, get_data_rows=_price_chart_rows, col_headers=("Time", "Price"))
         chart_frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
-        oldest_ts = float(signal.get("oldest_ts") or 0.0)
+        oldest_ts = float(signal.oldest_ts or 0.0)
         markers: list[ChartMarker] = []
         if first_seen_ts > 0 and first_seen_ts != oldest_ts:
             markers.append(ChartMarker(ts=first_seen_ts, label="👁 first seen", color="#ffdd44"))
@@ -2423,7 +2418,7 @@ def run_ui(api: TitanBackend) -> None:
             return
         log(
             f"[signal dblclick] opening detail for "
-            f"title={signal.get('title', '?')} outcome={signal.get('outcome', '')}",
+            f"title={signal.title} outcome={signal.outcome}",
             "DEBUG",
         )
         try:
@@ -2472,30 +2467,35 @@ def run_ui(api: TitanBackend) -> None:
         _signal_tree_items.clear()
         for row in signals:
             try:
+                from titan_signals import Signal as _Signal
                 if isinstance(row, dict) and "signal" in row:
-                    s = row.get("signal") or {}
+                    s = row.get("signal")
+                    if not isinstance(s, _Signal):
+                        continue
                     recorded_at = row.get("recorded_at", "")
                     hist_suffix = f" HIST {recorded_at[11:16]}" if isinstance(recorded_at, str) and len(recorded_at) >= 16 else " HIST"
                 else:
                     s = row
                     hist_suffix = ""
-                hft_tag  = "⚡" if s.get("is_hft") else ""
-                exit_tag = " ⚠EXIT" if s.get("exits_detected") else ""
-                mode_str = f"{hft_tag}{s.get('window','?').upper()}{exit_tag}{hist_suffix}"
-                full_title = f"{s.get('title','?')}  [{s.get('outcome','')}]"
+                if not isinstance(s, _Signal):
+                    continue
+                hft_tag  = "⚡" if s.is_hft else ""
+                exit_tag = " ⚠EXIT" if s.exits_detected else ""
+                mode_str = f"{hft_tag}{s.strategy.upper()}{exit_tag}{hist_suffix}"
+                full_title = f"{s.title}  [{s.outcome}]"
                 item_id = sig_tree.insert("", "end", values=(
-                    f"{s.get('score',0):.0f}",
+                    f"{s.score:.0f}",
                     full_title[:90],
-                    s.get("outcome", ""),
-                    f"${s.get('avg_entry',0):.4f}",
-                    f"${s.get('cur',0):.4f}",
-                    f"{(s.get('drift') or 0)*100:+.1f}%",
-                    f"{_signal_age_minutes(cast('SignalDict', s)):.0f}m",
-                    f"${s.get('total_flow',0):,.0f}",
-                    f"{s.get('n_ver',0)}/{s.get('n_total',0)}",
+                    s.outcome,
+                    f"${s.avg_entry:.4f}",
+                    f"${s.cur:.4f}",
+                    f"{(s.drift or 0)*100:+.1f}%",
+                    f"{_signal_age_minutes(s):.0f}m",
+                    f"${s.total_flow:,.0f}",
+                    f"{s.n_ver}/{s.n_total}",
                     mode_str,
-                ), tags=(s.get("tier", ""),))
-                _signal_tree_items[str(item_id)] = cast("SignalDict", s)
+                ), tags=(s.tier,))
+                _signal_tree_items[str(item_id)] = s
             except Exception as e:
                 log(f"[render_signals row error] {e}", "ERR")
         log(
@@ -2511,20 +2511,20 @@ def run_ui(api: TitanBackend) -> None:
         alert_txt.configure(state="normal")
         alert_txt.delete("1.0", tk.END)
         ts  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        top = [s for s in signals if s["tier"] in ("CONVICTION","ALERT","STRONG","HFT","ELITE_ONLY")]
-    
+        top = [s for s in signals if s.tier in ("CONVICTION","ALERT","STRONG","HFT","ELITE_ONLY")]
+
         if not top:
-            med = [s for s in signals if s["tier"] == "MEDIUM"]
+            med = [s for s in signals if s.tier == "MEDIUM"]
             alert_txt.insert(tk.END,
                 f"\n  {'═'*66}\n  No ALERT/STRONG/HFT signals  —  {ts}\n  {'─'*66}\n")
             if med:
                 alert_txt.insert(tk.END, f"  {len(med)} MEDIUM signal(s):\n\n")
                 for s in med:
                     alert_txt.insert(tk.END,
-                        f"    • {s['title'][:60]}\n"
-                        f"      [{s['outcome']}] @ ${s['cur']:.4f} (whale entry ${s['avg_entry']:.4f}) | "
-                        f"drift {s['drift']*100:+.1f}% | score {s['score']:.0f}\n"
-                        f"      via: {', '.join(s.get('names', [])[:3])}\n\n")
+                        f"    • {s.title[:60]}\n"
+                        f"      [{s.outcome}] @ ${s.cur:.4f} (whale entry ${s.avg_entry:.4f}) | "
+                        f"drift {s.drift*100:+.1f}% | score {s.score:.0f}\n"
+                        f"      via: {', '.join((s.names or [])[:3])}\n\n")
             else:
                 alert_txt.insert(tk.END, "  0 signals. Check DIAGNOSTICS tab.\n")
             alert_txt.insert(tk.END, f"  {'═'*66}\n")
@@ -2538,8 +2538,8 @@ def run_ui(api: TitanBackend) -> None:
         )
     
         for i, s in enumerate(top, 1):
-            mkt  = s["mkt"]
-            hrs_obj = mkt.get("hrs_left")
+            mkt  = s.mkt
+            hrs_obj = mkt.hrs_left if mkt is not None else None
             hrs = float(hrs_obj) if isinstance(hrs_obj, (int, float)) else 0.0
             hrs_s = f"{hrs:.0f}h" if hrs else "open"
     
@@ -2550,26 +2550,26 @@ def run_ui(api: TitanBackend) -> None:
                 "HFT":        "⚡⚡ HFT SPIKE",
                 "ELITE_ONLY": "🔥 ELITE-ONLY",
             }
-            icon = tier_icons.get(s["tier"], "🔵")
-    
-            d = s["drift"]
+            icon = tier_icons.get(s.tier, "🔵")
+
+            d = s.drift
             if abs(d) < 0.02:   fresh = "⚡ VERY FRESH"
             elif abs(d) < 0.06: fresh = "✅ FRESH"
             elif abs(d) < 0.10: fresh = "✅ ACCEPTABLE"
             else:                fresh = "⚠ STALE"
     
-            in_market  = s["cid"] in api.get_pnl_summary()["active_market_cids"]
+            in_market  = s.cid in api.get_pnl_summary()["active_market_cids"]
             trade_note = "🤖 AUTO-BOUGHT" if in_market else "⏳ Watching (below ALERT threshold)"
             cd_note    = ""
-            if s["cid"] in api.get_pnl_summary()["cooldown_cids"]:
-                remaining = _cfg.get("EXIT_COOLDOWN_SECONDS", 300) - (time.time() - api.get_pnl_summary()["cooldown_cids"][s["cid"]])
+            if s.cid in api.get_pnl_summary()["cooldown_cids"]:
+                remaining = _cfg.get("EXIT_COOLDOWN_SECONDS", 300) - (time.time() - api.get_pnl_summary()["cooldown_cids"][s.cid])
                 cd_note   = f"\n  ⏳ COOLDOWN: {remaining/60:.0f}min remaining\n"
-    
-            exit_warn = "\n  ⚠ EXIT ALERT: Whale selling detected.\n" if s.get("exits_detected") else ""
-            bd = s["bd"]
-    
+
+            exit_warn = "\n  ⚠ EXIT ALERT: Whale selling detected.\n" if s.exits_detected else ""
+            bd = s.bd
+
             elite_detail = []
-            for w, t in list(s.get("elite_ver", {}).items())[:5]:
+            for w, t in list((s.elite_ver or {}).items())[:5]:
                 wname = _wallet_cache().get(w, {}).get("name") or w[:14]+"…"
                 wprof = _wallet_cache().get(w, {})
                 elite_detail.append(
@@ -2581,28 +2581,28 @@ def run_ui(api: TitanBackend) -> None:
     
             alert_txt.insert(tk.END,
                 f"{'═'*70}\n"
-                f"  {icon}  #{i} [{s['tier']}]  Score: {s['score']:.0f}/100  [{s['window'].upper()}]\n"
+                f"  {icon}  #{i} [{s.tier}]  Score: {s.score:.0f}/100  [{s.strategy.upper()}]\n"
                 f"  {trade_note}\n"
                 f"{'═'*70}\n"
                 f"{exit_warn}{cd_note}\n"
                 f"  MARKET\n  {'─'*50}\n"
-                f"  {s['title']}\n"
-                f"  Outcome: {s['outcome']}\n"
-                f"  Liq ${mkt['liq']:,.0f}  Vol ${mkt['volume']:,.0f}  Closes {mkt['end_date']} ({hrs_s})\n"
-                f"  https://polymarket.com/event/{mkt.get('slug', '')}\n\n"
+                f"  {s.title}\n"
+                f"  Outcome: {s.outcome}\n"
+                f"  Liq ${mkt.liq:,.0f}  Vol ${mkt.volume:,.0f}  Closes {mkt.end_date} ({hrs_s})\n"
+                f"  https://polymarket.com/event/{mkt.slug}\n\n"
                 f"  ACTION\n  {'─'*50}\n"
-                f"  Buy {s['outcome'].upper()} @ ${s['cur']:.4f} ({s['cur']*100:.1f}¢)\n"
-                f"  Whale avg entry:  ${s['avg_entry']:.4f}  →  Now: ${s['cur']:.4f}\n"
-                f"  Drift: {s['drift']*100:+.1f}%  {fresh}\n"
-                f"  Auto-size: ${s['bet']:.2f}  ({s['bet']/max(api.get_pnl_summary()["bankroll"],0.01)*100:.1f}% bankroll)\n"
-                f"  Shares: ~{s['bet']/max(s['cur'],0.01):.1f}\n\n"
-                f"  WHALE INTEL  ({s['n_elite']} elite / {s['n_ver']} total verified)\n  {'─'*50}\n"
+                f"  Buy {s.outcome.upper()} @ ${s.cur:.4f} ({s.cur*100:.1f}¢)\n"
+                f"  Whale avg entry:  ${s.avg_entry:.4f}  →  Now: ${s.cur:.4f}\n"
+                f"  Drift: {s.drift*100:+.1f}%  {fresh}\n"
+                f"  Auto-size: ${s.bet:.2f}  ({s.bet/max(api.get_pnl_summary()['bankroll'],0.01)*100:.1f}% bankroll)\n"
+                f"  Shares: ~{s.bet/max(s.cur,0.01):.1f}\n\n"
+                f"  WHALE INTEL  ({s.n_elite} elite / {s.n_ver} total verified)\n  {'─'*50}\n"
             )
             for line in elite_detail:
                 alert_txt.insert(tk.END, line + "\n")
             alert_txt.insert(tk.END,
-                f"\n  Total verified flow: ${s['ver_flow']:,.0f}  "
-                f"Largest single: ${s.get('max_bet_cash',0):,.0f}\n"
+                f"\n  Total verified flow: ${s.ver_flow:,.0f}  "
+                f"Largest single: ${s.max_bet_cash or 0:,.0f}\n"
                 f"  Age: {_signal_age_minutes(s):.0f}min ago\n\n"
                 f"  SCORE BREAKDOWN\n  {'─'*50}\n"
                 f"  Wallet quality   {bd.get('wallet',0):>5.1f}/30\n"
@@ -2823,11 +2823,11 @@ def run_ui(api: TitanBackend) -> None:
             f"  Total: {len(trades)}  hot:{hot_t}  hft_spikes:{hft_t}\n"
             f"  Verified: {len(ver)}  Elite: {len(elites)}  Watchlist: {api.get_pnl_summary()['watchlist_size']}\n"
             f"  Signals: {len(signals)}\n"
-            f"    💎 CONVICTION: {sum(1 for s in signals if s['tier']=='CONVICTION')}\n"
-            f"    ⚡ HFT:    {sum(1 for s in signals if s['tier']=='HFT')}\n"
-            f"    🚨 ALERT:  {sum(1 for s in signals if s['tier']=='ALERT')}\n"
-            f"    🟡 STRONG: {sum(1 for s in signals if s['tier']=='STRONG')}\n"
-            f"    🔵 MEDIUM: {sum(1 for s in signals if s['tier']=='MEDIUM')}\n\n"
+            f"    💎 CONVICTION: {sum(1 for s in signals if s.tier=='CONVICTION')}\n"
+            f"    ⚡ HFT:    {sum(1 for s in signals if s.tier=='HFT')}\n"
+            f"    🚨 ALERT:  {sum(1 for s in signals if s.tier=='ALERT')}\n"
+            f"    🟡 STRONG: {sum(1 for s in signals if s.tier=='STRONG')}\n"
+            f"    🔵 MEDIUM: {sum(1 for s in signals if s.tier=='MEDIUM')}\n\n"
             f"ELITE ROSTER\n{'─'*50}\n"
         )
         for w, p in sorted(elites.items(), key=lambda x: x[1].get("total_pnl",0), reverse=True):
@@ -3300,7 +3300,7 @@ def run_ui(api: TitanBackend) -> None:
                         self.end_headers()
     
                         whales = sorted(_wallet_cache().values(), key=lambda x: x.get("score", 0), reverse=True)[:10]
-                        signals: list[SignalDict] = _last_signals[:15] if _last_signals else []
+                        signals: list[Signal] = _last_signals[:15] if _last_signals else []
     
                         # Calculate equity
                         open_value = sum((pos.cur_price or pos.entry_price) * pos.shares for pos in _open_positions())
@@ -3321,7 +3321,7 @@ def run_ui(api: TitanBackend) -> None:
                                 {"wallet": w.get("wallet", ""), "name": w.get("name", "Unknown"), "pnl": w.get("total_pnl", 0), "volume": w.get("volume", 0), "score": w.get("score", 0)} for w in whales
                             ],
                             "signals": [
-                                {"question": s.get("title", ""), "outcome": s.get("outcome", ""), "suggested_bet": s.get("bet", 0), "current_price": s.get("cur", 0), "ev_edge": _signal_ev_pct(s) / 100, "confluence_count": s.get("n_confluence", 0)} for s in signals
+                                {"question": s.title, "outcome": s.outcome, "suggested_bet": s.bet, "current_price": s.cur, "ev_edge": _signal_ev_pct(s) / 100, "confluence_count": s.n_confluence} for s in signals
                             ],
                             "open_positions": [
                                 {"title": p.title, "outcome": p.outcome, "entry": p.entry_price, "cur": p.cur_price, "shares": p.shares, "pnl": ((p.cur_price or 0) - p.entry_price) * p.shares}

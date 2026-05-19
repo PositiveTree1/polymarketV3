@@ -37,7 +37,6 @@ import re
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
-from typing import TypedDict, cast
 import titan_state as S
 import titan_config as C
 from titan_config import *
@@ -152,18 +151,124 @@ class Signal:
     def is_sports(self) -> bool:
         return self.mkt.is_sports
 
-    def to_dict(self) -> "SignalDict":
+    snapshot_ts: float | None = None
+
+    def to_json_dict(self) -> dict:
         payload = asdict(self)
         payload.pop("wallets", None)
         payload.pop("_title", None)
         payload.pop("_slug", None)
         payload.pop("_event_slug", None)
+        payload.pop("mkt", None)
+        payload.pop("snapshot_ts", None)
         payload["title"] = self.title
         payload["slug"] = self.slug
         payload["event_slug"] = self.event_slug
         payload["mkt_type"] = self.mkt_type
         payload["is_sports"] = self.is_sports
-        return cast("SignalDict", payload)
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Signal":
+        cid = str(data.get("cid") or "")
+        mkt = S.market_cache.peek(cid) if cid else None
+        if mkt is None:
+            mkt_raw = data.get("mkt")
+            if isinstance(mkt_raw, dict):
+                from titan_db import _market_from_payload
+                mkt = _market_from_payload(mkt_raw)
+            else:
+                mkt = Market(
+                    title=str(data.get("title") or ""),
+                    slug=str(data.get("slug") or ""),
+                    event_slug=str(data.get("event_slug") or ""),
+                    mkt_type=str(data.get("mkt_type") or ""),
+                    is_sports=bool(data.get("is_sports")),
+                )
+
+        outcome = str(data.get("outcome") or "")
+        asset = str(data.get("asset") or "")
+
+        def _whale_obs_map(raw: object) -> dict[str, WhaleObservation]:
+            if not isinstance(raw, dict):
+                return {}
+            out: dict[str, WhaleObservation] = {}
+            for wallet, obs in raw.items():
+                if not isinstance(obs, dict):
+                    continue
+                out[str(wallet)] = WhaleObservation(
+                    wallet=str(obs.get("wallet") or wallet),
+                    name=str(obs.get("name") or ""),
+                    cid=cid,
+                    asset=str(obs.get("asset") or asset),
+                    slug=mkt.slug,
+                    event_slug=mkt.event_slug,
+                    title=mkt.title,
+                    outcome=outcome,
+                    price=float(obs.get("price") or 0.0),
+                    size=float(obs.get("size") or 0.0),
+                    cash=float(obs.get("cash") or 0.0),
+                    ts=float(obs.get("ts") or 0.0),
+                    window=str(obs.get("window") or ""),
+                    source=str(obs.get("source") or ""),
+                    is_elite=bool(obs.get("is_elite")),
+                    is_large_trade=bool(obs.get("is_large_trade")),
+                    hft_spike_ratio=float(obs["hft_spike_ratio"]) if obs.get("hft_spike_ratio") is not None else None,
+                )
+            return out
+
+        price_history_raw = data.get("price_history") or []
+        price_history: list[tuple[float, float]] = [
+            (float(p[0]), float(p[1])) for p in price_history_raw if isinstance(p, (list, tuple)) and len(p) == 2
+        ]
+
+        return cls(
+            cid=str(data.get("cid") or ""),
+            asset=str(data.get("asset") or ""),
+            outcome=str(data.get("outcome") or ""),
+            _title=str(data.get("title") or ""),
+            _slug=str(data.get("slug") or ""),
+            _event_slug=str(data.get("event_slug") or ""),
+            strategy=str(data.get("strategy") or ""),
+            stop_loss_pct=float(data["stop_loss_pct"]) if data.get("stop_loss_pct") is not None else None,
+            ver=_whale_obs_map(data.get("ver")),
+            elite_ver=_whale_obs_map(data.get("elite_ver")),
+            n_ver=int(data.get("n_ver") or 0),
+            n_elite=int(data.get("n_elite") or 0),
+            n_confluence=int(data.get("n_confluence") or 0),
+            n_total=int(data.get("n_total") or 0),
+            avg_entry=float(data.get("avg_entry") or 0.0),
+            cur=float(data.get("cur") or 0.0),
+            drift=float(data.get("drift") or 0.0),
+            slippage=float(data.get("slippage") or 0.0),
+            total_flow=float(data.get("total_flow") or 0.0),
+            ver_flow=float(data.get("ver_flow") or 0.0),
+            max_bet_cash=float(data.get("max_bet_cash") or 0.0),
+            opposing_flow=float(data.get("opposing_flow") or 0.0),
+            newest_ts=float(data.get("newest_ts") or 0.0),
+            oldest_ts=float(data.get("oldest_ts") or 0.0),
+            first_seen_ts=float(data.get("first_seen_ts") or 0.0),
+            age_h=float(data.get("age_h") or 0.0),
+            window=str(data.get("window") or ""),
+            mkt=mkt,
+            avg_wscore=float(data.get("avg_wscore") or 0.0),
+            is_hft=bool(data.get("is_hft")),
+            has_large_trade=bool(data.get("has_large_trade")),
+            conviction_detail=str(data.get("conviction_detail") or ""),
+            elite_only_mode=bool(data.get("elite_only_mode")),
+            sports_conviction_mult=float(data.get("sports_conviction_mult") or 1.0),
+            exits_detected=list(data.get("exits_detected") or []),
+            exits_same_side=list(data.get("exits_same_side") or []),
+            score=float(data.get("score") or 0.0),
+            bd=dict(data.get("bd") or {}),
+            tier=str(data.get("tier") or ""),
+            bet=float(data.get("bet") or 0.0),
+            names=list(data.get("names") or []),
+            source_recent_wr=float(data["source_recent_wr"]) if data.get("source_recent_wr") is not None else None,
+            drift_discount_pct=float(data["drift_discount_pct"]) if data.get("drift_discount_pct") is not None else None,
+            price_history=price_history,
+            snapshot_ts=float(data["snapshot_ts"]) if data.get("snapshot_ts") is not None else None,
+        )
 
     def get_prices(self) -> list[tuple[float, float]]:
         self.load_prices()
@@ -173,83 +278,11 @@ class Signal:
         from titan_prices import PRICES
         points, _, _ = PRICES.get_prices(self.asset)
         self.price_history = points
-        return
 
 
-class _SignalDictRequired(TypedDict):
-    cid:                    str
-    asset:                  str
-    outcome:                str
-    title:                  str
-    slug:                   str
-    event_slug:             str
-    mkt_type:               str
-    is_sports:              bool
-    strategy:               str
-    stop_loss_pct:          float | None
-    ver:                    dict
-    elite_ver:              dict
-    n_ver:                  int
-    n_elite:                int
-    n_confluence:           int
-    n_total:                int
-    avg_entry:              float
-    cur:                    float
-    drift:                  float
-    slippage:               float
-    total_flow:             float
-    ver_flow:               float
-    max_bet_cash:           float
-    opposing_flow:          float
-    newest_ts:              float
-    oldest_ts:              float
-    first_seen_ts:          float
-    age_h:                  float
-    window:                 str
-    mkt:                    dict
-    avg_wscore:             float
-    is_hft:                 bool
-    has_large_trade:        bool
-    conviction_detail:      str
-    elite_only_mode:        bool
-    sports_conviction_mult: float
-    exits_detected:         list
-    exits_same_side:        list
-    score:                  float
-    bd:                     dict
-    tier:                   str
-    bet:                    float
-    names:                  list
-    source_recent_wr:       float | None
-    drift_discount_pct:     float | None
-    price_history:          list[tuple[float, float]]
-
-
-class SignalDict(_SignalDictRequired, total=False):
-    snapshot_ts:            float
-
-
-def get_signal_prices(signal: SignalDict) -> list[tuple[float, float]]:
-    load_signal_prices(signal)
-    return list(signal.get("price_history") or [])
-
-
-def load_signal_prices(signal: SignalDict) -> None:
-    if signal.get("price_history"):
-        return
-    from titan_prices import PRICES
-    asset_id = str(signal.get("asset") or "")
-    if not asset_id:
-        return
-    points, _, _ = PRICES.get_prices(asset_id)
-    if points:
-        signal["price_history"] = points
-    return
-
-
-def load_signal_prices_many(signals: list[SignalDict]) -> list[SignalDict]:
+def load_signal_prices_many(signals: list["Signal"]) -> list["Signal"]:
     for signal in signals:
-        load_signal_prices(signal)
+        signal.load_prices()
     return signals
 
 

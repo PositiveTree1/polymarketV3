@@ -9,11 +9,12 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Iterator, cast
+from typing import TYPE_CHECKING, Iterator
 if TYPE_CHECKING:
     from titan_state import TradeStats
-    from titan_signals import SignalDict
+    from titan_signals import Signal
     from titan_trade import TradeRecord
+    from titan_market import Market
 
 _DB_PATH: str = ""
 def init_db(db_path: str) -> None:
@@ -402,27 +403,28 @@ def _sanitize_signal_observation_map(value: object) -> dict[str, dict[str, objec
     return sanitized
 
 
+def _f(v: object) -> float:
+    return float(v) if isinstance(v, (int, float)) else 0.0
+
+
 def _sanitize_signal_observation_payload(
     payload: dict[str, object],
     wallet: str,
 ) -> dict[str, object]:
+    hft = payload.get("hft_spike_ratio")
     return {
         "wallet": wallet,
         "name": str(payload.get("name") or ""),
         "asset": str(payload.get("asset") or ""),
-        "price": float(payload.get("price") or 0.0),
-        "size": float(payload.get("size") or 0.0),
-        "cash": float(payload.get("cash") or 0.0),
-        "ts": float(payload.get("ts") or 0.0),
+        "price": _f(payload.get("price")),
+        "size": _f(payload.get("size")),
+        "cash": _f(payload.get("cash")),
+        "ts": _f(payload.get("ts")),
         "window": str(payload.get("window") or ""),
         "source": str(payload.get("source") or ""),
         "is_elite": bool(payload.get("is_elite")),
         "is_large_trade": bool(payload.get("is_large_trade")),
-        "hft_spike_ratio": (
-            float(payload["hft_spike_ratio"])
-            if payload.get("hft_spike_ratio") is not None
-            else None
-        ),
+        "hft_spike_ratio": float(hft) if isinstance(hft, (int, float)) else None,
     }
 
 
@@ -498,13 +500,14 @@ def remove_from_watchlist(addresses: set[str]) -> None:
 
 # ── signals ──────────────────────────────────────────────────────────────────
 
-def save_signals(signals: list[dict], ts: float) -> None:
+def save_signals(signals: list["Signal"], ts: float) -> None:
     if not _DB_PATH:
         return
     now = _ts_to_dt(ts)
     rows: list[tuple[str, str, str]] = []
     for signal in signals:
-        sanitized = _sanitize_signal_payload(signal)
+        payload = signal.to_json_dict()
+        sanitized = _sanitize_signal_payload(payload)
         if sanitized is None:
             continue
         rows.append((now, now, json.dumps(sanitized, default=str)))
@@ -523,31 +526,33 @@ def save_rejects(rejects: list[str], ts: float) -> None:
         )
 
 
-def _decode_signal_row_payload(data: str) -> "SignalDict | None":
-    import json
-
+def _decode_signal_row_payload(data: str) -> dict | None:
     decoded = json.loads(data)
     if isinstance(decoded, dict):
-        sanitized = _sanitize_signal_payload(decoded)
-        if sanitized is None:
-            return None
-        return _enrich_signal_payload_from_market_cache(cast("SignalDict", sanitized))
-
+        return _sanitize_signal_payload(decoded)
     if isinstance(decoded, str):
         decoded_text = decoded.strip()
         if decoded_text.startswith("{"):
             nested = json.loads(decoded_text)
             if isinstance(nested, dict):
-                sanitized = _sanitize_signal_payload(nested)
-                if sanitized is None:
-                    return None
-                return _enrich_signal_payload_from_market_cache(cast("SignalDict", sanitized))
-        return None
-
+                return _sanitize_signal_payload(nested)
     return None
 
 
-def load_latest_signals(limit: int = 200) -> list["SignalDict"]:
+def _signal_from_row(payload: dict, snapshot_ts: float | None = None) -> "Signal | None":
+    from titan_signals import Signal
+    try:
+        sig = Signal.from_dict(payload)
+        if snapshot_ts is not None:
+            sig.snapshot_ts = snapshot_ts
+        return sig
+    except Exception as e:
+        import traceback
+        print(f"[titan_db] _signal_from_row failed: {e}\n{traceback.format_exc()}")
+        return None
+
+
+def load_latest_signals(limit: int = 200) -> list["Signal"]:
     if not _DB_PATH:
         return []
     with _connect() as cx:
@@ -559,35 +564,34 @@ def load_latest_signals(limit: int = 200) -> list["SignalDict"]:
             "SELECT data FROM signals WHERE ts = ? ORDER BY id ASC LIMIT ?",
             (latest_ts, limit),
         ).fetchall()
-    signals: list["SignalDict"] = []
+    signals: list[Signal] = []
     for row in rows:
-        signal_data = _decode_signal_row_payload(str(row[0]))
-        if signal_data is not None:
-            signals.append(signal_data)
+        payload = _decode_signal_row_payload(str(row[0]))
+        if payload is not None:
+            sig = _signal_from_row(payload)
+            if sig is not None:
+                signals.append(sig)
     return signals
 
 
-def load_signal_history(limit: int = 200, min_score: float = 0.0, cid: str | None = None) -> list["SignalDict"]:
+def load_signal_history(limit: int = 200, min_score: float = 0.0, cid: str | None = None) -> list["Signal"]:
     if not _DB_PATH:
         return []
-    query = (
-        "SELECT ts, data FROM signals "
-        "ORDER BY id DESC LIMIT ?"
-    )
     with _connect() as cx:
-        rows = cx.execute(query, (limit,)).fetchall()
+        rows = cx.execute("SELECT ts, data FROM signals ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
 
-    out: list["SignalDict"] = []
-    for snapshot_ts, data in reversed(rows):
-        typed_sig = _decode_signal_row_payload(str(data))
-        if typed_sig is None:
+    out: list[Signal] = []
+    for snapshot_ts_raw, data in reversed(rows):
+        payload = _decode_signal_row_payload(str(data))
+        if payload is None:
             continue
-        if typed_sig.get("score", 0) < min_score:
+        if _f(payload.get("score")) < min_score:
             continue
-        if cid and typed_sig.get("cid") != cid:
+        if cid and payload.get("cid") != cid:
             continue
-        typed_sig["snapshot_ts"] = _dt_to_ts(str(snapshot_ts))
-        out.append(typed_sig)
+        sig = _signal_from_row(payload, snapshot_ts=_dt_to_ts(str(snapshot_ts_raw)))
+        if sig is not None:
+            out.append(sig)
     return out
 
 
@@ -618,11 +622,7 @@ def _market_from_payload(payload: dict[str, object]) -> "Market":
     from titan_market import Market
 
     hrs_left_raw = payload.get("hrs_left")
-    hrs_left: float | None
-    if hrs_left_raw is None:
-        hrs_left = None
-    else:
-        hrs_left = float(hrs_left_raw)
+    hrs_left: float | None = float(hrs_left_raw) if isinstance(hrs_left_raw, (int, float)) else None
 
     outcome_labels_raw = payload.get("outcome_labels")
     outcome_labels = [str(item) for item in outcome_labels_raw] if isinstance(outcome_labels_raw, list) else []
@@ -630,29 +630,29 @@ def _market_from_payload(payload: dict[str, object]) -> "Market":
     def _string_float_map(value: object) -> dict[str, float]:
         if not isinstance(value, dict):
             return {}
-        return {str(key): float(item) for key, item in value.items()}
+        return {str(k): float(v) if isinstance(v, (int, float)) else 0.0 for k, v in value.items()}
 
     def _string_int_map(value: object) -> dict[str, int]:
         if not isinstance(value, dict):
             return {}
-        return {str(key): int(item) for key, item in value.items()}
+        return {str(k): int(v) if isinstance(v, (int, float)) else 0 for k, v in value.items()}
 
     def _int_float_map(value: object) -> dict[int, float]:
         if not isinstance(value, dict):
             return {}
-        return {int(key): float(item) for key, item in value.items()}
+        return {int(k) if isinstance(k, (int, float, str)) else 0: float(v) if isinstance(v, (int, float)) else 0.0 for k, v in value.items()}
 
     return Market(
-        yes_price=float(payload.get("yes_price") or 0.5),
-        no_price=float(payload.get("no_price") or 0.5),
+        yes_price=_f(payload.get("yes_price")) or 0.5,
+        no_price=_f(payload.get("no_price")) or 0.5,
         outcome_labels=outcome_labels,
         outcome_prices=_string_float_map(payload.get("outcome_prices")),
         token_index=_string_int_map(payload.get("token_index")),
         index_to_price=_int_float_map(payload.get("index_to_price")),
         asset_to_price=_string_float_map(payload.get("asset_to_price")),
         asset_to_index=_string_int_map(payload.get("asset_to_index")),
-        liq=float(payload.get("liq") or 0.0),
-        volume=float(payload.get("volume") or 0.0),
+        liq=_f(payload.get("liq")),
+        volume=_f(payload.get("volume")),
         title=str(payload.get("title") or ""),
         end_date=str(payload.get("end_date") or ""),
         hrs_left=hrs_left,
@@ -660,29 +660,9 @@ def _market_from_payload(payload: dict[str, object]) -> "Market":
         event_slug=str(payload.get("event_slug") or ""),
         mkt_type=str(payload.get("mkt_type") or ""),
         is_sports=bool(payload.get("is_sports")),
-        ts=float(payload.get("ts") or 0.0),
+        ts=_f(payload.get("ts")),
     )
 
-
-def _enrich_signal_payload_from_market_cache(signal: "SignalDict") -> "SignalDict":
-    import titan_state as S
-
-    cid = str(signal.get("cid") or "")
-    if not cid:
-        return signal
-    market = S.market_cache.peek(cid)
-    if market is None:
-        return signal
-    signal["mkt"] = _market_to_payload(market)
-    signal["mkt_type"] = market.mkt_type
-    signal["is_sports"] = market.is_sports
-    if not signal.get("title"):
-        signal["title"] = market.title
-    if not signal.get("slug"):
-        signal["slug"] = market.slug
-    if not signal.get("event_slug"):
-        signal["event_slug"] = market.event_slug
-    return signal
 
 
 def upsert_market(cid: str, market: object) -> None:

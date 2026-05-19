@@ -5,7 +5,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, Callable, TypedDict
 
 if TYPE_CHECKING:
-    from titan_signals import SignalDict
+    from titan_signals import Signal
     from titan_position import Position
     from titan_trade import TradeRecord
     from titan_types import (
@@ -52,7 +52,7 @@ class TitanAPI:
         self._running: bool = False
         self._start_time: float | None = None
         self._subscribers: dict[str, list[Callable]] = defaultdict(list)
-        self._last_signals: list[SignalDict] = []
+        self._last_signals: list[Signal] = []
         self._last_rejects: list[str] = []
         self._telegram = None
         self._telegram_enabled = False
@@ -163,9 +163,9 @@ class TitanAPI:
         input_schema={"min_score": {"type": "number", "description": "Minimum signal score filter. Typical range 0–100 (integer-like values such as 78 or 81 are normal)."}},
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_signals(self, min_score: float = 0.0) -> list[SignalDict]:
+    def get_signals(self, min_score: float = 0.0) -> list[Signal]:
         from titan_signals import load_signal_prices_many
-        filtered = [s for s in self._last_signals if s.get("score", 0) >= min_score]
+        filtered = [s for s in self._last_signals if s.score >= min_score]
         return load_signal_prices_many(filtered)
 
     @mcp_tool(
@@ -180,7 +180,7 @@ class TitanAPI:
         },
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_signal_history(self, limit: int = 200, min_score: float = 0.0, cid: str | None = None) -> list[SignalDict]:
+    def get_signal_history(self, limit: int = 200, min_score: float = 0.0, cid: str | None = None) -> list[Signal]:
         import titan_db as _DB
         return _DB.load_signal_history(limit=limit, min_score=min_score, cid=cid)
 
@@ -486,25 +486,24 @@ class TitanAPI:
             self._last_signals = DB.load_latest_signals(200)
             self._last_rejects = DB.load_latest_rejects(50)
             import titan_state as _S
-            _S._log(f"📂 Restored {len(self._last_signals)} signal(s) and {len(self._last_rejects)} reject(s) from DB", "INFO")
+            msg = f"Startup recovery: signals={len(self._last_signals)} | rejects={len(self._last_rejects)}"
+            print(msg)
+            _S._log(msg, "INFO")
         except Exception as e:
-            import titan_state as _S
-            _S._log(f"⚠ Failed to restore signals/rejects from DB: {e}", "WARN")
+            import traceback, titan_state as _S
+            msg = f"⚠ Failed to restore signals/rejects from DB: {e}\n{traceback.format_exc()}"
+            print(msg)
+            _S._log(msg, "WARN")
 
     def _on_cycle(self, signals, wallets, rejects, trades) -> None:
-        from titan_signals import Signal
-        from titan_signals import load_signal_prices_many
-        from typing import cast
+        from titan_signals import Signal, load_signal_prices_many
         import titan_db as DB
         ts = time.time()
-        signal_dicts: list[SignalDict] = [
-            s.to_dict() if isinstance(s, Signal) else cast(SignalDict, s)
-            for s in (signals or [])
-        ]
-        if signal_dicts:
-            DB.save_signals(cast(list[dict], signal_dicts), ts)
-            load_signal_prices_many(signal_dicts)
-        self._last_signals = signal_dicts
+        typed_signals: list[Signal] = [s for s in (signals or []) if isinstance(s, Signal)]
+        if typed_signals:
+            DB.save_signals(typed_signals, ts)
+            load_signal_prices_many(typed_signals)
+        self._last_signals = typed_signals
         if rejects:
             DB.save_rejects(rejects, ts)
             for r in reversed(rejects):
@@ -513,7 +512,7 @@ class TitanAPI:
                 self._last_rejects.insert(0, r)
             self._last_rejects = self._last_rejects[:50]
         self._emit("titan/cycle_complete", {
-            "signals": signal_dicts,
+            "signals": typed_signals,
             "wallets": wallets,
             "rejects": rejects,
             "trades": trades,
@@ -588,9 +587,9 @@ class TitanAPI:
         lines.append(f"[SIGNALS ({len(sigs)})]")
         for i, s in enumerate(sigs, 1):
             lines.append(
-                f"  #{i} [{s.get('tier','?')}|{s.get('score',0):.0f}] {s.get('title','?')[:60]} [{s.get('outcome','')}] "
-                f"Price=${s.get('cur',0):.4f} WEntry=${s.get('avg_entry',0):.4f} Drift={s.get('drift',0)*100:+.1f}% "
-                f"via={','.join(s.get('names', [])[:5])}"
+                f"  #{i} [{s.tier}|{s.score:.0f}] {s.title[:60]} [{s.outcome}] "
+                f"Price=${s.cur:.4f} WEntry=${s.avg_entry:.4f} Drift={s.drift*100:+.1f}% "
+                f"via={','.join(s.names[:5])}"
             )
         if not sigs:
             lines.append("  (no signals this cycle)")
@@ -691,10 +690,10 @@ class TitanAPI:
         sigs = self._last_signals
         for i, s in enumerate(sigs, 1):
             lines += [
-                f"  #{i} [{s.get('tier','?')}] Score:{s.get('score',0):.0f}  {s.get('title','?')[:60]}",
-                f"     [{s.get('outcome','')}]  CurPrice: ${s.get('cur',0):.4f}  "
-                f"WhaleEntry: ${s.get('avg_entry',0):.4f}  Drift: {s.get('drift',0)*100:+.1f}%",
-                f"     via: {', '.join(s.get('names', [])[:5])}",
+                f"  #{i} [{s.tier}] Score:{s.score:.0f}  {s.title[:60]}",
+                f"     [{s.outcome}]  CurPrice: ${s.cur:.4f}  "
+                f"WhaleEntry: ${s.avg_entry:.4f}  Drift: {s.drift*100:+.1f}%",
+                f"     via: {', '.join(s.names[:5])}",
                 sep2,
             ]
         if not sigs:

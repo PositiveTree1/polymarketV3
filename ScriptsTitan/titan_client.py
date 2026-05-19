@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Callable
 from titan_trade import TradeRecord
 
 if TYPE_CHECKING:
-    from titan_signals import SignalDict
+    from titan_signals import Signal
     from titan_position import Position
     from titan_trade import TradeRecord
     from titan_types import (
@@ -275,10 +275,10 @@ class TitanClient:
             return [_Position.from_dict(p) if isinstance(p, dict) else p for p in raw]
         return []
 
-    def get_signals(self, min_score: float = 0.0) -> list[SignalDict]:
+    def get_signals(self, min_score: float = 0.0) -> list[Signal]:
         return self._call_tool("get_signals", {"min_score": min_score})  # type: ignore[return-value]
 
-    def get_signal_history(self, limit: int = 200, min_score: float = 0.0, cid: str | None = None) -> list[SignalDict]:
+    def get_signal_history(self, limit: int = 200, min_score: float = 0.0, cid: str | None = None) -> list[Signal]:
         args: dict = {"limit": limit, "min_score": min_score}
         if cid:
             args["cid"] = cid
