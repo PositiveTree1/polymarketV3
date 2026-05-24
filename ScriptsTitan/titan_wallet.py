@@ -12,8 +12,8 @@ v9 ADDITIONS:
      sports markets. These wallets are market makers — their edge comes from
      speed and spread, not from prediction accuracy.
 
-  2. WHALE PERFORMANCE TRACKER: Tracks which whales' copied trades actually
-     made us money. Auto-demotes whales with consistently negative ROI.
+  2. WHALE PERFORMANCE TRACKER: Tracks which wallet' copied trades actually
+     made us money. Auto-demotes wallets with consistently negative ROI.
 
   3. PER-TRADE ALPHA METRIC: alpha_per_trade = total_pnl / n_resolved.
      Wallets need alpha_per_trade >= $20 to be considered genuine alpha.
@@ -561,68 +561,54 @@ def fetch_wallet(wallet: str) -> WalletProfile:
         avg_profit = round((pnl * 0.5) / n_res, 2)
         avg_profit_estimated = True
 
-    score = (
-        0.30 * wb +
-        0.25 * min(1.0, max(0, pct / 30)) +
-        0.15 * min(1.0, cur / 25_000) +
-        0.10 * min(1.0, n_res / 20) +
-        0.10 * min(1.0, n_pos / 10) +
-        0.10 * min(1.0, max(0, avg_profit) / 50)
-    )
-
-    fail_reasons = []
-
-    watchable = (
-        wr    >= MIN_WIN_RATE_WATCH and
-        wb    >= WILSON_MIN_WATCH   and
-        n_res >= MIN_RESOLVED_BETS  and
-        pnl   >= MIN_PNL
-    )
-    if wr < MIN_WIN_RATE_WATCH:   fail_reasons.append(f"WR {wr*100:.0f}%<{MIN_WIN_RATE_WATCH*100:.0f}%")
-    if wb < WILSON_MIN_WATCH:     fail_reasons.append(f"WilsonLB {wb*100:.0f}%<{WILSON_MIN_WATCH*100:.0f}%")
-    if n_res < MIN_RESOLVED_BETS: fail_reasons.append(f"Resolved {n_res}<{MIN_RESOLVED_BETS}")
-    if pnl < MIN_PNL:             fail_reasons.append(f"PnL ${pnl:+,.0f}")
-
-    hft_detected = tph >= HFT_MIN_TRADES_PER_HOUR or (avg_bet > 0 and avg_bet < 50 and n_res > 100)
-    if hft_detected:
-        roi_ok  = True
-        port_ok = cur >= 500 or pnl >= 500
-    else:
-        roi_ok  = (avg_profit >= MIN_AVG_PROFIT_PER_TRADE and avg_bet >= MIN_AVG_BET_SIZE)
-        port_ok = cur >= 500 or pnl >= 500
-
-    verified = watchable and wr >= MIN_WIN_RATE_VER and wb >= WILSON_MIN_VER and roi_ok and port_ok
-
-    if watchable and not roi_ok:
-        est_note = " (estimated)" if avg_profit_estimated else ""
-        fail_reasons.append(
-            f"ROI: avg_profit=${avg_profit:.1f}{est_note}<${MIN_AVG_PROFIT_PER_TRADE}, "
-            f"avg_bet=${avg_bet:.0f}"
-        )
-    if watchable and not port_ok:
-        fail_reasons.append(f"PORT: cur=${cur:,.0f} pnl=${pnl:+,.0f}")
-    if watchable and wr < MIN_WIN_RATE_VER:
-        fail_reasons.append(f"VER_WR {wr*100:.0f}%<{MIN_WIN_RATE_VER*100:.0f}%")
-
-    portfolio_proxy = max(cur, pnl)
     apt = pnl / n_res if n_res > 0 else 0.0
-    _alpha_threshold = 1.0
-    elite = (
-        verified and
-        pnl             >= ELITE_MIN_PNL      and
-        portfolio_proxy >= ELITE_MIN_PORT     and
-        score           >= ELITE_MIN_SCORE    and
-        n_res           >= ELITE_MIN_RESOLVED and
-        apt             >= _alpha_threshold
-    )
 
-    if verified and not elite:
-        reasons = []
-        if pnl             < ELITE_MIN_PNL:      reasons.append(f"PnL ${pnl:+,.0f}<${ELITE_MIN_PNL:,.0f}")
-        if portfolio_proxy < ELITE_MIN_PORT:     reasons.append(f"Port ${portfolio_proxy:,.0f}<${ELITE_MIN_PORT:,.0f}")
-        if score           < ELITE_MIN_SCORE:    reasons.append(f"Score {score:.2f}<{ELITE_MIN_SCORE}")
-        if n_res           < ELITE_MIN_RESOLVED: reasons.append(f"Resolved {n_res}<{ELITE_MIN_RESOLVED}")
-        fail_reasons.append("NOT_ELITE: " + ", ".join(reasons))
+    # ── delegate scoring and tiering to the active WalletSelector ────────────
+    import titan_config as _C
+    sel = _C.get_active_selector()
+
+    raw_for_selector = {
+        "win_rate":       wr,
+        "wilson_lb":      wb,
+        "n_resolved":     n_res,
+        "n_pos":          n_pos,
+        "total_pnl":      pnl,
+        "total_value":    cur,
+        "pnl_pct":        pct,
+        "avg_profit":     avg_profit,
+        "avg_bet":        avg_bet,
+        "trades_per_hour": tph,
+        "alpha_per_trade": apt,
+    }
+
+    if sel is not None:
+        score = sel.score(raw_for_selector)
+        watchable, verified, elite, fail_reasons = sel.is_selected(raw_for_selector, score)
+        from titan_selector import PerformanceSelector
+        hft_detected      = sel.is_hft(tph, avg_bet, n_res) if isinstance(sel, PerformanceSelector) else False
+        sports_bot_detected = False
+        if existing_is_real or (existing_name and _is_auto_name(existing_name)):
+            _check_name = existing_name
+        else:
+            _check_name = wallet[:10] + "…"
+        if isinstance(sel, PerformanceSelector):
+            sports_bot_detected = sel.is_sports_bot(_check_name, tph)
+    else:
+        # fallback: hardcoded defaults so the system keeps running if selector fails to load
+        score = (
+            0.30 * wb +
+            0.25 * min(1.0, max(0, pct / 30)) +
+            0.15 * min(1.0, cur / 25_000) +
+            0.10 * min(1.0, n_res / 20) +
+            0.10 * min(1.0, n_pos / 10) +
+            0.10 * min(1.0, max(0, avg_profit) / 50)
+        )
+        fail_reasons: list[str] = []
+        watchable = wr >= 0.53 and wb >= 0.45 and n_res >= 10 and pnl >= 0
+        verified  = watchable and wr >= 0.56 and wb >= 0.49
+        elite     = False
+        hft_detected       = tph >= HFT_MIN_TRADES_PER_HOUR
+        sports_bot_detected = False
 
     if existing_is_real:
         final_name = existing_name
@@ -631,31 +617,10 @@ def fetch_wallet(wallet: str) -> WalletProfile:
     else:
         final_name = wallet[:10] + "…"
 
-    est_tag = "~" if avg_profit_estimated else ""
-    hft_tag = "⚡HFT" if hft_detected else ""
-
-    try:
-        import titan_config as _C
-        _sports_bot_tph = getattr(_C, "SPORTS_BOT_MIN_TPH", 150)
-    except Exception:
-        _sports_bot_tph = 150
-    _SPORTS_BOT_NAMES = {
-        "gamblingisallyouneed", "swisstony", "rn1", "cannae", "lilybaeum",
-        "billdenter", "billdenter2026", "elkmonkey", "billyel", "sportsguy",
-        "texaskid", "ferrarichampions", "ferrarichampions2026", "snakeball",
-    }
-    _lname = final_name.lower()
-    sports_bot_detected = (
-        tph >= _sports_bot_tph or
-        any(sbn in _lname for sbn in _SPORTS_BOT_NAMES) or
-        (tph >= 50 and avg_bet > 0 and avg_bet < 100)
-    )
+    est_tag   = "~" if avg_profit_estimated else ""
+    hft_tag   = "⚡HFT" if hft_detected else ""
     sports_tag = "🏈SPORTS" if sports_bot_detected else ""
-
-    # v10: recent form tag for display
-    rf_tag = ""
-    if recent_pnl_30d is not None:
-        rf_tag = f" RF30d:${recent_pnl_30d:+.0f}"
+    rf_tag    = f" RF30d:${recent_pnl_30d:+.0f}" if recent_pnl_30d is not None else ""
 
     result: WalletProfile = {
         "score": round(score, 5), "win_rate": wr, "wilson_lb": wb,
@@ -669,10 +634,9 @@ def fetch_wallet(wallet: str) -> WalletProfile:
         "verified": verified, "watchable": watchable, "elite": elite,
         "name": final_name, "ts": now_t, "wr_source": wr_src,
         "fail_reasons": fail_reasons,
-        # v10: recent form fields (6-hour TTL managed separately via recent_ts)
         "recent_pnl_30d": round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
         "recent_pnl_7d":  round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
-        "recent_ts": now_t,  # timestamp of last recent-form computation
+        "recent_ts": now_t,
         "detail": (
             f"Score:{score:.2f} WR:{wr*100:.0f}% WilsonLB:{wb*100:.0f}% "
             f"Res:{n_res} Port:${cur:,.0f} PnL:${pnl:+,.0f}({pct:+.1f}%) "
@@ -725,31 +689,36 @@ def _refresh_recent_form_scores() -> None:
         S._log(f"♻ Recent form refreshed for {refreshed} wallets", "DATA")
 
 
-def discover_new_whales() -> None:
-    S._log("🔍 Running whale discovery…", "DATA")
-    candidates = set()
+def discover_new_wallets() -> None:
+    S._log("🔍 Running wallet discovery…", "DATA")
 
-    top_trades = S.safe_get(f"{DATA_API}/trades", {
-        "limit": 200, "filterType": "CASH", "filterAmount": 5000, "side": "BUY",
-    })
-    if top_trades and isinstance(top_trades, list):
-        for t in top_trades:
-            w = (t.get("proxyWallet") or "").lower()
-            if w and len(w) == 42 and w.startswith("0x"):
-                candidates.add(w)
-
-    for lb_params in [
-        {"limit": 100, "timePeriod": "ALL",   "category": "OVERALL", "orderBy": "PNL"},
-        {"limit": 100, "timePeriod": "MONTH", "category": "OVERALL", "orderBy": "PNL"},
-        {"limit": 100, "timePeriod": "WEEK",  "category": "OVERALL", "orderBy": "PNL"},
-    ]:
-        lb_data = S.safe_get(f"{DATA_API}/leaderboard", lb_params)
-        if lb_data and isinstance(lb_data, list):
-            for entry in lb_data:
-                w = (entry.get("proxyWallet") or entry.get("address") or "").lower()
+    import titan_config as _C
+    sel = _C.get_active_selector()
+    if sel is not None:
+        candidates = set(sel.discover())
+    else:
+        # fallback: leaderboard + high-value trades
+        candidates: set[str] = set()
+        top_trades = S.safe_get(f"{DATA_API}/trades", {
+            "limit": 200, "filterType": "CASH", "filterAmount": 5000, "side": "BUY",
+        })
+        if top_trades and isinstance(top_trades, list):
+            for t in top_trades:
+                w = (t.get("proxyWallet") or "").lower()
                 if w and len(w) == 42 and w.startswith("0x"):
                     candidates.add(w)
-        time.sleep(0.25)
+        for lb_params in [
+            {"limit": 100, "timePeriod": "ALL",   "category": "OVERALL", "orderBy": "PNL"},
+            {"limit": 100, "timePeriod": "MONTH", "category": "OVERALL", "orderBy": "PNL"},
+            {"limit": 100, "timePeriod": "WEEK",  "category": "OVERALL", "orderBy": "PNL"},
+        ]:
+            lb_data = S.safe_get(f"{DATA_API}/leaderboard", lb_params)
+            if lb_data and isinstance(lb_data, list):
+                for entry in lb_data:
+                    w = (entry.get("proxyWallet") or entry.get("address") or "").lower()
+                    if w and len(w) == 42 and w.startswith("0x"):
+                        candidates.add(w)
+            time.sleep(0.25)
 
     new_cands = candidates - {w.lower() for w in S.env().watchlist}
     S._log(f"🔍 {len(candidates)} candidates, {len(new_cands)} new", "DATA")

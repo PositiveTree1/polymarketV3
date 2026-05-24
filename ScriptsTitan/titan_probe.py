@@ -1,7 +1,7 @@
 """
 TITAN PROBE — Live Polymarket Data Inspector.
 A lightweight, standalone tool to verify live data flow 'in front of your eyes'.
-Useful for confirming that the API is hitting and whales are active.
+Useful for confirming that the API is hitting and wallets are active.
 """
 
 import time

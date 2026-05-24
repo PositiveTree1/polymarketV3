@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from titan_position import Position
     from titan_trade import TradeRecord
     from titan_types import (
-        AlertDict, ErrorDict, WhaleDict,
+        AlertDict, ErrorDict, TrackedWalletDict,
         PnlSummaryDict, TradeStatsDict, PortfolioOverviewDict,
     )
 
@@ -201,10 +201,10 @@ class TitanAPI:
         return [{"msg": l} for l in logs if "ALERT" in l or "WARN" in l or "ERR" in l]
 
     @mcp_tool(
-        description="Returns the current elite whale roster with performance metrics.",
+        description="Returns the current tracked wallet roster with performance metrics.",
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_whales(self) -> list[WhaleDict]:
+    def get_tracked_wallets(self) -> list[TrackedWalletDict]:
         import titan_state as _TS
         return [
             {"wallet": w, **p}
@@ -571,13 +571,13 @@ class TitanAPI:
                 pnl_pct  = (cur - entry) / max(entry, 0.001) * 100
                 pnl_abs  = (cur - entry) * pos.shares
                 held_min = (_t.time() - pos.entry_ts) / 60 if pos.entry_ts else 0.0
-                whales   = pos.elite_names or [w[:10]+"…" for w in pos.elite_wallets]
+                wallets   = pos.elite_names or [w[:10]+"…" for w in pos.elite_wallets]
                 lines.append(
                     f"  [{pos.tier}|{pos.score:.0f}pt|{'HFT' if pos.is_hft else '-'}] "
                     f"{pos.title[:60]} [{outcome}] "
                     f"WEntry=${pos.avg_entry or entry:.4f} Entry=${entry:.4f} Now=${cur:.4f} "
                     f"PnL={pnl_pct:+.1f}%(${pnl_abs:+.3f}) Bet=${pos.bet:.2f} "
-                    f"Shares={pos.shares:.2f} Held={held_min:.0f}m via={','.join(whales)}"
+                    f"Shares={pos.shares:.2f} Held={held_min:.0f}m via={','.join(wallets)}"
                 )
         else:
             lines.append("  (no open positions)")
@@ -671,7 +671,7 @@ class TitanAPI:
                 pnl_pct  = (cur - entry) / max(entry, 0.001) * 100
                 pnl_abs  = (cur - entry) * pos.shares
                 held_min = (_t.time() - pos.entry_ts) / 60 if pos.entry_ts else 0.0
-                whales   = pos.elite_names or [w[:10]+"…" for w in pos.elite_wallets]
+                wallets   = pos.elite_names or [w[:10]+"…" for w in pos.elite_wallets]
                 lines += [
                     f"  [{pos.tier}] {pos.title[:60]}",
                     f"    Outcome: {outcome}  Score: {pos.score:.0f}  HFT: {'YES' if pos.is_hft else 'NO'}",
@@ -679,7 +679,7 @@ class TitanAPI:
                     f"Now: ${cur:.4f}  P&L: {pnl_pct:+.1f}% (${pnl_abs:+.3f})",
                     f"    Bet: ${pos.bet:.2f}  Shares: {pos.shares:.2f}  "
                     f"Held: {held_min:.0f}min",
-                    f"    Elite Whales: {', '.join(whales)}",
+                    f"    Elite Wallets: {', '.join(wallets)}",
                     sep2,
                 ]
         else:

@@ -65,7 +65,7 @@ If your runtime supports MCP or tool use, a Titan MCP server may be available fr
 the running server at http://127.0.0.1:8765/mcp. Prefer Titan MCP tools for fresh
 live data when the snapshot may be stale. Relevant tool names can include:
 status, get_status, get_positions, get_closed_positions, get_signals,
-get_signal_history, get_rejects, get_alerts, get_whales, get_pnl_summary,
+get_signal_history, get_rejects, get_alerts, get_tracked_wallets, get_pnl_summary,
 get_trade_history, get_snapshot, get_portfolio_overview, get_recent_errors,
 force_cycle, pause, resume, and update_config.
 
@@ -487,9 +487,9 @@ class AIPanel:
         btn_bar.pack(fill="x")
         self._quick_btns = []
         for label, prompt in [
-            ("📊 Portfolio",  "Summarise my current portfolio with every open position, P&L%, hold time, and whales behind it."),
+            ("📊 Portfolio",  "Summarise my current portfolio with every open position, P&L%, hold time, and wallets behind it."),
             ("⚠ Risk Check",  "Risk assessment: over-concentrated positions, fee-negative bets, what to close first?"),
-            ("🐋 Whales",     "Top 5 verified whales by score. What markets are they active in?"),
+            ("🐋 Wallets",    "Top 5 verified wallets by score. What markets are they active in?"),
             ("📈 P&L",        "Detailed P&L: closed PnL, win rate, average profit, best/worst trade, trend."),
             ("🔍 Diagnose",   "Check last 100 log lines for errors, warnings, or unusual patterns."),
         ]:

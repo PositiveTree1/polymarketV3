@@ -2,7 +2,7 @@
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  TITAN — SINGLE WALLET UI                                                    ║
 ║                                                                              ║
-║  Tabs: SIGNALS · ALERTS · POSITIONS · P&L · WHALES · ANALYSIS · DIAG · LOG · CONFIG
+║  Tabs: SIGNALS · ALERTS · POSITIONS · P&L · WALLETS · ANALYSIS · DIAG · LOG · CONFIG
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -123,7 +123,7 @@ def show_loading_screen(root, api, on_complete):
     BOOT_TASKS = [
         ("Connecting to engine...", lambda: api.get_status()),
         ("Loading P&L and bankroll state...", lambda: api.get_pnl_summary()),
-        ("Fetching verified whale roster...", lambda: api.get_whales()),
+        ("Fetching tracked wallet roster...", lambda: api.get_tracked_wallets()),
         ("Syncing open positions...", lambda: api.get_positions()),
         ("Downloading latest signals...", lambda: api.get_signals()),
         ("TITAN ONLINE — Follow The Whale", lambda: None),
@@ -195,7 +195,7 @@ def run_ui(api: TitanBackend) -> None:
             return []
     def _wallet_cache() -> dict:
         try:
-            return {w["wallet"]: w for w in api.get_whales()}
+            return {w["wallet"]: w for w in api.get_tracked_wallets()}
         except Exception as e:
             _log_ui_error("wallet cache", e)
             return {}
@@ -396,10 +396,10 @@ def run_ui(api: TitanBackend) -> None:
     tab_live = tk.Frame(nb, bg="#080810")
     nb.add(tab_live, text="  🎯 SIGNALS  ")
     
-    sig_cols = ("Sc","Market (Full Title)","Side","WEntry$","Now$","Drift%","Age","Flow$","Whales","Mode")
+    sig_cols = ("Sc","Market (Full Title)","Side","WEntry$","Now$","Drift%","Age","Flow$","Wallets","Mode")
     sig_tree = ttk.Treeview(tab_live, columns=sig_cols, show="headings", height=10)
     sw = {"Sc":45,"Market (Full Title)":420,"Side":110,"WEntry$":72,"Now$":72,
-          "Drift%":65,"Age":50,"Flow$":80,"Whales":55,"Mode":65}
+          "Drift%":65,"Age":50,"Flow$":80,"Wallets":55,"Mode":65}
     for c in sig_cols:
         sig_tree.heading(c, text=c)
         sig_tree.column(c, width=sw[c], anchor="w" if c == "Market (Full Title)" else "center")
@@ -579,10 +579,10 @@ def run_ui(api: TitanBackend) -> None:
             sf2.columnconfigure(i % 4, weight=1)
             stat_cell(sf2, lbl, val, col, i % 4, i // 4)
 
-        # Whales
+        # Wallets
         wf = tk.Frame(win, bg="#060615")
         wf.pack(fill="x", padx=8)
-        tk.Label(wf, text="WHALE WALLETS", fg="#00ff88", bg="#060615", font=bold9).pack(anchor="w", padx=4, pady=(4,2))
+        tk.Label(wf, text="SELECTED WALLETS", fg="#00ff88", bg="#060615", font=bold9).pack(anchor="w", padx=4, pady=(4,2))
         seen_wallets: set[str] = set()
         elite_wallets: list[str] = []
         for wallet_addr in pos.elite_wallets + pos.whale_wallets:
@@ -817,14 +817,14 @@ def run_ui(api: TitanBackend) -> None:
             sf2.columnconfigure(i % 4, weight=1)
             stat_cell(sf2, lbl, val, col, i % 4, i // 4)
     
-        # Whales — show name + how much each whale put into this trade
+        # Wallets — show name + how much each whale put into this trade
         wf = tk.Frame(win, bg="#060615")
         wf.pack(fill="x", padx=8)
         whale_names = trade.whale_names
         whale_addrs = trade.elite_wallets
         whale_cash  = trade.whale_buy_cash  # addr → $ amount
         if whale_names or whale_addrs:
-            tk.Label(wf, text="VIA WHALES:", fg="#00ff88", bg="#060615", font=mono9).pack(anchor="w", padx=12, pady=(4,2))
+            tk.Label(wf, text="VIA WALLETS:", fg="#00ff88", bg="#060615", font=mono9).pack(anchor="w", padx=12, pady=(4,2))
             for i, name in enumerate(whale_names[:6]):
                 addr = whale_addrs[i] if i < len(whale_addrs) else ""
                 cash_val = whale_cash.get(addr.lower(), whale_cash.get(addr, 0))
@@ -1385,10 +1385,10 @@ def run_ui(api: TitanBackend) -> None:
     #  TAB 5: WHALE ROSTER
     # ═══════════════════════════════════════════════════════════════════════════════
 
-    tab_whales = tk.Frame(nb, bg="#080810")
-    nb.add(tab_whales, text="  🐳 WHALES  ")
+    tab_wallets = tk.Frame(nb, bg="#080810")
+    nb.add(tab_wallets, text="  🐳 WALLETS  ")
     
-    wh_header = tk.Frame(tab_whales, bg="#0d0d1a", pady=4)
+    wh_header = tk.Frame(tab_wallets, bg="#0d0d1a", pady=4)
     wh_header.pack(fill="x", padx=4, pady=(4,0))
     tk.Label(wh_header, text="WHALE ROSTER", fg="#00ff88", bg="#0d0d1a", font=bold_hd).pack(side="left", padx=8)
     wh_filter_var = tk.StringVar(value="ALL")
@@ -1400,7 +1400,7 @@ def run_ui(api: TitanBackend) -> None:
                        ).pack(side="left", padx=4)
     
     wh_cols = ("Name","Wallet","Score","WinRate","WilsonLB","Res","Portfolio","PnL","AvgBet","TPH","Status","HFT")
-    wh_tree = ttk.Treeview(tab_whales, columns=wh_cols, show="headings")
+    wh_tree = ttk.Treeview(tab_wallets, columns=wh_cols, show="headings")
     ww = {"Name":130,"Wallet":180,"Score":58,"WinRate":65,"WilsonLB":72,
           "Res":50,"Portfolio":100,"PnL":90,"AvgBet":78,"TPH":55,"Status":80,"HFT":40}
     for c in wh_cols:
@@ -1410,7 +1410,7 @@ def run_ui(api: TitanBackend) -> None:
     wh_tree.tag_configure("VER",   foreground="#ffdd00", background="#181400")
     wh_tree.tag_configure("PAR",   foreground="#55aaff", background="#000d1a")
     wh_tree.tag_configure("REJ",   foreground="#554444", background="#0c0c18")
-    wh_vsb = tk.Scrollbar(tab_whales, command=wh_tree.yview)
+    wh_vsb = tk.Scrollbar(tab_wallets, command=wh_tree.yview)
     wh_tree.configure(yscrollcommand=wh_vsb.set)
     wh_vsb.pack(side="right", fill="y")
     wh_tree.pack(fill="both", expand=True, padx=4, pady=4)
@@ -1742,8 +1742,166 @@ def run_ui(api: TitanBackend) -> None:
     
     cfg_editor.bind("<KeyRelease>", _highlight_json)
     _load_config_into_editor()
-    
-    
+
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    #  TAB 10: WALLET SELECTOR
+    # ═══════════════════════════════════════════════════════════════════════════════
+    tab_selector = tk.Frame(nb, bg="#080810")
+    nb.add(tab_selector, text="  🎯 SELECTOR  ")
+
+    _sel_status_var = tk.StringVar(value="")
+
+    def _sel_load():
+        """Read wallet_selector section from config JSON and populate widgets."""
+        try:
+            import titan_config as _tc, json as _j
+            with open(_tc.get_config_file(), encoding="utf-8") as _f:
+                _raw = _j.load(_f)
+            ws = _raw.get("wallet_selector", {})
+            active = ws.get("active_selector", "performance")
+            _sel_var.set(active)
+            params = (ws.get("selectors") or {}).get(active, {})
+            for key, var in _sel_fields.items():
+                val = params.get(key, "")
+                var.set("" if val == "" else str(val))
+            _sel_status_var.set(f"  Loaded · active: {active}")
+        except Exception as e:
+            _sel_status_var.set(f"  ❌ Load failed: {e}")
+
+    def _sel_save():
+        """Write current widget values back into wallet_selector section and save."""
+        try:
+            import titan_config as _tc, json as _j
+            cfg_path = _tc.get_config_file()
+            with open(cfg_path, encoding="utf-8") as _f:
+                _raw = _j.load(_f)
+            active = _sel_var.get().strip()
+            if "wallet_selector" not in _raw:
+                _raw["wallet_selector"] = {"_group": "Wallet Selector"}
+            _raw["wallet_selector"]["active_selector"] = active
+            if "selectors" not in _raw["wallet_selector"]:
+                _raw["wallet_selector"]["selectors"] = {}
+            if active not in _raw["wallet_selector"]["selectors"]:
+                _raw["wallet_selector"]["selectors"][active] = {}
+            target = _raw["wallet_selector"]["selectors"][active]
+            _int_keys = {"min_resolved_bets", "elite_min_resolved"}
+            _list_keys = {"leaderboard_periods"}
+            for key, var in _sel_fields.items():
+                raw_val = var.get().strip()
+                if not raw_val:
+                    continue
+                if key in _list_keys:
+                    target[key] = [v.strip() for v in raw_val.split(",")]
+                elif key in _int_keys:
+                    target[key] = int(raw_val)
+                else:
+                    try:
+                        target[key] = float(raw_val)
+                    except ValueError:
+                        target[key] = raw_val
+            with open(cfg_path, "w", encoding="utf-8") as _f:
+                _j.dump(_raw, _f, indent=4)
+            _tc.reload()
+            _sel_status_var.set(f"  ✅ Saved & reloaded — takes effect next cycle")
+            log("🎯 Wallet selector config saved and reloaded", "INFO")
+        except Exception as e:
+            _sel_status_var.set(f"  ❌ Save failed: {e}")
+
+    # ── toolbar ───────────────────────────────────────────────────────────────
+    sel_toolbar = tk.Frame(tab_selector, bg="#0d0d1a", pady=6)
+    sel_toolbar.pack(fill="x")
+
+    tk.Label(sel_toolbar, text="Active selector:", fg="#778899", bg="#0d0d1a",
+             font=mono).pack(side="left", padx=(12, 4))
+
+    _sel_var = tk.StringVar(value="performance")
+    _sel_choices = ["performance"]
+    try:
+        from titan_selector import available_selectors as _avail_sel
+        _sel_choices = [s["id"] for s in _avail_sel()]
+    except Exception:
+        pass
+    sel_dropdown = tk.OptionMenu(sel_toolbar, _sel_var, *_sel_choices, command=lambda _: _sel_load())
+    sel_dropdown.config(bg="#1a1a2a", fg="#00ff88", font=mono, activebackground="#0d0d1a",
+                        highlightthickness=0)
+    sel_dropdown.pack(side="left", padx=4)
+
+    tk.Button(sel_toolbar, text="💾 SAVE & APPLY", bg="#002a00", fg="#00ff88",
+              font=bold_hd, padx=14, command=_sel_save).pack(side="left", padx=10)
+    tk.Button(sel_toolbar, text="↺ Reload", bg="#1a1a2a", fg="#778899",
+              font=mono, padx=8, command=_sel_load).pack(side="left", padx=4)
+    tk.Label(sel_toolbar, textvariable=_sel_status_var, fg="#556677",
+             bg="#0d0d1a", font=mono).pack(side="left", padx=10)
+
+    # ── params grid ───────────────────────────────────────────────────────────
+    sel_canvas = tk.Canvas(tab_selector, bg="#080810", highlightthickness=0)
+    sel_vsb = tk.Scrollbar(tab_selector, orient="vertical", command=sel_canvas.yview, bg="#0d0d1a")
+    sel_canvas.configure(yscrollcommand=sel_vsb.set)
+    sel_vsb.pack(side="right", fill="y")
+    sel_canvas.pack(fill="both", expand=True)
+
+    sel_inner = tk.Frame(sel_canvas, bg="#080810")
+    sel_canvas_win = sel_canvas.create_window((0, 0), window=sel_inner, anchor="nw")
+    sel_inner.bind("<Configure>", lambda e: sel_canvas.configure(scrollregion=sel_canvas.bbox("all")))
+    sel_canvas.bind("<Configure>", lambda ev: sel_canvas.itemconfig(sel_canvas_win, width=ev.width))
+
+    _PARAM_META: list[tuple[str, str, str]] = [
+        # (field_key, label, section_header_or_"")
+        ("",                          "",                               "── Discovery ──"),
+        ("min_trade_cash_discovery",  "Min trade cash for discovery",   ""),
+        ("leaderboard_periods",       "Leaderboard periods (CSV)",      ""),
+        ("",                          "",                               "── Watchable gate ──"),
+        ("min_win_rate_watch",        "Min win rate (watchable)",       ""),
+        ("wilson_min_watch",          "Wilson LB (watchable)",          ""),
+        ("min_resolved_bets",         "Min resolved bets",              ""),
+        ("min_pnl",                   "Min PnL ($)",                    ""),
+        ("",                          "",                               "── Verified gate ──"),
+        ("min_win_rate_ver",          "Min win rate (verified)",        ""),
+        ("wilson_min_ver",            "Wilson LB (verified)",           ""),
+        ("min_avg_profit",            "Min avg profit/trade ($)",       ""),
+        ("min_avg_bet",               "Min avg bet ($)",                ""),
+        ("min_portfolio_or_pnl",      "Min portfolio or PnL ($)",       ""),
+        ("",                          "",                               "── Elite gate ──"),
+        ("elite_min_pnl",             "Elite min PnL ($)",              ""),
+        ("elite_min_portfolio",       "Elite min portfolio ($)",        ""),
+        ("elite_min_score",           "Elite min score",                ""),
+        ("elite_min_resolved",        "Elite min resolved bets",        ""),
+        ("elite_alpha_per_trade",     "Elite min alpha/trade ($)",      ""),
+        ("",                          "",                               "── Scoring weights ──"),
+        ("weight_wilson",             "Weight: Wilson LB",              ""),
+        ("weight_pnl_pct",            "Weight: PnL %",                  ""),
+        ("weight_portfolio",          "Weight: Portfolio size",         ""),
+        ("weight_trade_count",        "Weight: Trade count",            ""),
+        ("weight_open_positions",     "Weight: Open positions",         ""),
+        ("weight_alpha",              "Weight: Alpha/trade",            ""),
+        ("",                          "",                               "── Bot filters ──"),
+        ("hft_tph_threshold",         "HFT trades/hour threshold",      ""),
+        ("sports_bot_tph_threshold",  "Sports bot trades/hour threshold",""),
+    ]
+
+    _sel_fields: dict[str, tk.StringVar] = {}
+    row_idx = 0
+    for field_key, label, section in _PARAM_META:
+        if section:
+            tk.Label(sel_inner, text=section, fg="#00ff88", bg="#080810",
+                     font=bold_hd, pady=6, padx=16).grid(
+                row=row_idx, column=0, columnspan=2, sticky="w")
+            row_idx += 1
+            continue
+        var = tk.StringVar()
+        _sel_fields[field_key] = var
+        tk.Label(sel_inner, text=label, fg="#aaaacc", bg="#080810",
+                 font=mono, anchor="w", width=36).grid(
+            row=row_idx, column=0, sticky="w", padx=(24, 8), pady=2)
+        tk.Entry(sel_inner, textvariable=var, bg="#0d0d1a", fg="#ffcc44",
+                 font=mono, width=20, insertbackground="#00ff88").grid(
+            row=row_idx, column=1, sticky="w", pady=2)
+        row_idx += 1
+
+    _sel_load()
+
+
     # ═══════════════════════════════════════════════════════════════════════════════
     #  RENDERERS
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -2275,7 +2433,7 @@ def run_ui(api: TitanBackend) -> None:
             ("Verified Flow", f"${ver_flow:,.0f}", "#88ccff"),
             ("Elite / Verified", f"{n_elite} / {n_ver}", "#ffdd44"),
             ("Confluence", f"{int(signal.n_confluence or 0)}", "#aaaacc"),
-            ("Total Whales", f"{n_total}", "#aaaacc"),
+            ("Total Wallet", f"{n_total}", "#aaaacc"),
             ("Window", str(signal.strategy).upper(), "#ff8844"),
             ("Stop Loss", "OFF" if signal.stop_loss_pct is None else f"{float(signal.stop_loss_pct or 0.0) * 100:.0f}%", "#aaaacc"),
             ("Score", f"{score:.0f}", "#ffdd44"),
@@ -2428,7 +2586,7 @@ def run_ui(api: TitanBackend) -> None:
 
     def _build_wallet_cache(value: object) -> dict[str, dict[str, object]]:
         if not isinstance(value, list):
-            raise TypeError(f"whales must be a list, got {type(value).__name__}")
+            raise TypeError(f"wallet must be a list, got {type(value).__name__}")
         wallet_cache: dict[str, dict[str, object]] = {}
         for idx, item in enumerate(value):
             whale_row = _require_row_object(item, f"whale[{idx}]")
@@ -2575,7 +2733,7 @@ def run_ui(api: TitanBackend) -> None:
                 elite_detail.append(
                     f"    🔥 {wname:<20} WR:{wprof.get('win_rate',0)*100:.0f}%  "
                     f"PnL:${wprof.get('total_pnl',0):+,.0f}  Score:{wprof.get('score',0):.2f}  "
-                    f"Entry:${t['price']:.4f}  Cash:${t['cash']:,.0f}  "
+                    f"Entry:${t.price:.4f}  Cash:${t.cash:,.0f}  "
                     f"{'⚡HFT' if wprof.get('hft') else ''}"
                 )
     
@@ -2736,7 +2894,7 @@ def run_ui(api: TitanBackend) -> None:
             pos_tree.see(iid_to_select)
     
     
-    def render_whales(wallets):
+    def render_wallets(wallets):
         all_wallets = dict(_wallet_cache())
         all_wallets.update(wallets)
         filt = wh_filter_var.get()
@@ -2802,7 +2960,7 @@ def run_ui(api: TitanBackend) -> None:
         analysis_txt.delete("1.0", tk.END)
         ts     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ver    = {w: p for w, p in wallets.items() if p.get("verified")}
-        elites = {w["wallet"]: w for w in api.get_whales()}
+        elites = {w["wallet"]: w for w in api.get_tracked_wallets()}
         hot_t  = sum(1 for t in trades if t.get("window") == "hot")
         hft_t  = sum(1 for t in trades if t.get("source") in ("hft_spike_poll",))
         st        = api.get_trade_stats()
@@ -3033,8 +3191,8 @@ def run_ui(api: TitanBackend) -> None:
         except Exception as _e: log(f"[render_open_positions error] {_e}", "ERR")
         try: refresh_pnl_tab()
         except Exception as _e: _log_ui_error("refresh_pnl_tab error", _e)
-        try: render_whales(_last_wallets)
-        except Exception as _e: log(f"[render_whales error] {_e}", "ERR")
+        try: render_wallets(_last_wallets)
+        except Exception as _e: log(f"[render_wallets error] {_e}", "ERR")
 
         cycle_var.set(f"Cycle: {_cycle_num[0]}")
 
@@ -3176,14 +3334,14 @@ def run_ui(api: TitanBackend) -> None:
                 except Exception as e:
                     root.after(0, lambda err=e: _log_ui_error("boot load rejects", err, "WARN"))
                 try:
-                    _last_wallets = _build_wallet_cache(api.get_whales())
+                    _last_wallets = _build_wallet_cache(api.get_tracked_wallets())
                 except Exception as e:
-                    root.after(0, lambda err=e: _log_ui_error("boot load whales", err, "WARN"))
-                root.after(0, lambda: log(f"📂 Boot signals: {len(_last_signals)} signal(s), {len(_last_rejects)} reject(s), {len(_last_wallets)} whale(s)", "INFO"))
+                    root.after(0, lambda err=e: _log_ui_error("boot load wallets", err, "WARN"))
+                root.after(0, lambda: log(f"📂 Boot signals: {len(_last_signals)} signal(s), {len(_last_rejects)} reject(s), {len(_last_wallets)} wallet(s)", "INFO"))
                 if _last_signals or _last_rejects:
                     _pending_update[0] = True
                 n_pos   = len(api.get_positions())
-                n_whale = len(api.get_whales())
+                n_whale = len(api.get_tracked_wallets())
                 eq_hist = api.get_pnl_summary().get("equity_history", [])
                 n_eq    = len(eq_hist)
                 if n_eq >= 2:
@@ -3299,7 +3457,7 @@ def run_ui(api: TitanBackend) -> None:
                         self.send_header('Access-Control-Allow-Origin', '*')
                         self.end_headers()
     
-                        whales = sorted(_wallet_cache().values(), key=lambda x: x.get("score", 0), reverse=True)[:10]
+                        wallets = sorted(_wallet_cache().values(), key=lambda x: x.get("score", 0), reverse=True)[:10]
                         signals: list[Signal] = _last_signals[:15] if _last_signals else []
     
                         # Calculate equity
@@ -3317,8 +3475,8 @@ def run_ui(api: TitanBackend) -> None:
                                 "total_trades": api.get_trade_stats()["sell_count"]
                             },
                             "pnl_history": [round(v, 4) for _, v in (api.get_pnl_summary()["equity_history"][-200:] if api.get_pnl_summary()["equity_history"] else [])],
-                            "whales": [
-                                {"wallet": w.get("wallet", ""), "name": w.get("name", "Unknown"), "pnl": w.get("total_pnl", 0), "volume": w.get("volume", 0), "score": w.get("score", 0)} for w in whales
+                            "wallets": [
+                                {"wallet": w.get("wallet", ""), "name": w.get("name", "Unknown"), "pnl": w.get("total_pnl", 0), "volume": w.get("volume", 0), "score": w.get("score", 0)} for w in wallets
                             ],
                             "signals": [
                                 {"question": s.title, "outcome": s.outcome, "suggested_bet": s.bet, "current_price": s.cur, "ev_edge": _signal_ev_pct(s) / 100, "confluence_count": s.n_confluence} for s in signals

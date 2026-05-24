@@ -10,7 +10,7 @@ import titan_state as S
 import titan_db as DB
 import titan_prices
 from titan_prices import PricesCacheSrv
-from titan_config import STATE_FILE, WHALE_FILE, STATE_DB, BANKROLL_START, SEED_WATCHLIST
+from titan_config import STATE_FILE, WALLET_FILE, STATE_DB, BANKROLL_START, SEED_WATCHLIST
 from titan_wallet import WalletProfile
 
 
@@ -55,7 +55,7 @@ def save_whale_roster():
         if hedge:
             saveable["__hedge_wallets__"] = {"hedge_set": hedge}
 
-        with open(WHALE_FILE, "w") as f:
+        with open(WALLET_FILE, "w") as f:
             json.dump(saveable, f, indent=2)
     except Exception as e:
         S._log(f"⚠ Whale save failed: {e}", "WARN")
@@ -288,14 +288,14 @@ def _migrate_null_cid_trades(state: dict) -> None:
 
 def _load_whale_roster() -> dict[str, int]:
     whale_info = {"loaded": 0, "total": len(S.env().wallet_cache)}
-    if not os.path.exists(WHALE_FILE):
-        S._log(f"📂 No whale roster found at {WHALE_FILE} — starting fresh discovery", "INFO")
+    if not os.path.exists(WALLET_FILE):
+        S._log(f"📂 No whale roster found at {WALLET_FILE} — starting fresh discovery", "INFO")
         return whale_info
     try:
         from titan_wallet import _whale_performance
         from titan_signals import restore_known_hedge_wallets
 
-        with open(WHALE_FILE) as f:
+        with open(WALLET_FILE) as f:
             saved = json.load(f)
 
         hedge_entry = saved.pop("__hedge_wallets__", {})
@@ -316,9 +316,9 @@ def _load_whale_roster() -> dict[str, int]:
                     S.env().watchlist.add(addr)
 
         if loaded:
-            S._log(f"📂 Loaded {loaded} whale(s) from {WHALE_FILE} ({len(S.env().wallet_cache)} total in cache)", "INFO")
+            S._log(f"📂 Loaded {loaded} whale(s) from {WALLET_FILE} ({len(S.env().wallet_cache)} total in cache)", "INFO")
         else:
-            S._log(f"📂 No new whales loaded from {WHALE_FILE} (all already cached or file empty)", "INFO")
+            S._log(f"📂 No new whales loaded from {WALLET_FILE} (all already cached or file empty)", "INFO")
         whale_info["loaded"] = loaded
         whale_info["total"] = len(S.env().wallet_cache)
     except Exception as e:

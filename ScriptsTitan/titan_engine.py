@@ -30,7 +30,7 @@ from titan_state import _log, safe_get
 
 import titan_db as DB
 from titan_persistence import load_state, save_state, save_whale_roster, save_whale_roster_async
-from titan_wallet  import (fetch_wallet, get_elite_wallets, discover_new_whales,
+from titan_wallet  import (fetch_wallet, get_elite_wallets, discover_new_wallets,
                            scan_top_market_holders, get_whale_performance_summary,
                            _refresh_recent_form_scores)
 from titan_market  import get_market, fetch_trades, fetch_hft_spike_trades
@@ -67,7 +67,7 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
     S.env().cycle_count += 1
 
     if S.env().cycle_count % DISCOVERY_INTERVAL_CYCLES == 0:
-        threading.Thread(target=discover_new_whales, daemon=True).start()
+        threading.Thread(target=discover_new_wallets, daemon=True).start()
     if S.env().cycle_count % 5 == 0:
         threading.Thread(target=scan_top_market_holders, daemon=True).start()
     if S.env().cycle_count % 20 == 2:
@@ -153,9 +153,9 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
         rebuilt = {}
         for key, pos in S.env().open_positions.items():
             cid = pos.cid or key[0]
-            whales = set(pos.elite_wallets + pos.whale_wallets)
-            if whales:
-                rebuilt[cid] = whales
+            lwallets = set(pos.elite_wallets + pos.whale_wallets)
+            if lwallets:
+                rebuilt[cid] = lwallets
         if rebuilt:
             whale_exits = check_whale_exits(rebuilt, entry_times)
 

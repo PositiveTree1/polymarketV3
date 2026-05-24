@@ -157,8 +157,8 @@ _RESOURCES = [
         "mimeType": "text/plain",
     },
     {
-        "uri": "titan://whales",
-        "name": "Elite Whale Roster",
+        "uri": "titan://wallets",
+        "name": "Elite wallet Roster",
         "description": "Current elite wallet list with performance metrics",
         "mimeType": "application/json",
     },
@@ -172,8 +172,8 @@ def _read_resource(uri: str, api: TitanAPI) -> str:
         return api.get_snapshot(compressed=True)
     if uri == "titan://logs":
         return api.get_logs(lines=200)
-    if uri == "titan://whales":
-        return json.dumps(api.get_whales(), indent=2)
+    if uri == "titan://wallets":
+        return json.dumps(api.get_tracked_wallets(), indent=2)
     return f"ERROR: unknown resource URI '{uri}'"
 
 
@@ -229,8 +229,8 @@ def _get_prompt(name: str, api: TitanAPI) -> dict:
             ],
         }
     if name == "titan_whale_brief":
-        whales = api.get_whales()
-        whales_text = json.dumps(whales, indent=2)
+        wallets = api.get_tracked_wallets()
+        wallets_text = json.dumps(wallets, indent=2)
         return {
             "description": _PROMPTS[2]["description"],
             "messages": [
@@ -238,7 +238,7 @@ def _get_prompt(name: str, api: TitanAPI) -> dict:
                     "role": "user",
                     "content": {
                         "type": "text",
-                        "text": f"Summarise recent activity from these elite Polymarket whales:\n\n{whales_text}",
+                        "text": f"Summarise recent activity from these elite Polymarket wallets:\n\n{wallets_text}",
                     },
                 }
             ],

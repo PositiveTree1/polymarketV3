@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from titan_position import Position
     from titan_trade import TradeRecord
     from titan_types import (
-        AlertDict, ErrorDict, WhaleDict,
+        AlertDict, ErrorDict, TrackedWalletDict,
         PnlSummaryDict, TradeStatsDict, PortfolioOverviewDict,
     )
 
@@ -290,8 +290,8 @@ class TitanClient:
     def get_alerts(self) -> list[AlertDict]:
         return self._call_tool("get_alerts")  # type: ignore[return-value]
 
-    def get_whales(self) -> list[WhaleDict]:
-        return self._call_tool("get_whales")  # type: ignore[return-value]
+    def get_tracked_wallets(self) -> list[TrackedWalletDict]:
+        return self._call_tool("get_tracked_wallets")  # type: ignore[return-value]
 
     def get_pnl_summary(self) -> PnlSummaryDict:
         return self._call_tool("get_pnl_summary")  # type: ignore[return-value]

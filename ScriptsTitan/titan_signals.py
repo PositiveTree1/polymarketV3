@@ -1029,27 +1029,27 @@ def _build_drift_discount_signals(raw_trades: list, wallets: dict,
 
         # "Still holding" check — verify whale hasn't exited since their buy
         if check_holding:
-            exited_whales = []
+            exited_wallets = []
             for w, t in all_ver.items():
                 buy_ts = t.ts
                 sells = fetch_wallet_sells(w, buy_ts - 60, limit=50)
                 for s in sells:
                     if (s.cid == cid or s.asset == asset_hint) and s.ts > buy_ts:
-                        exited_whales.append(w)
+                        exited_wallets.append(w)
                         break
                 time.sleep(0.05)
 
-            if exited_whales:
-                exited_names = [S.env().wallet_cache.get(w, {}).get("name", w[:10]) for w in exited_whales[:2]]
-                # If ALL whales exited, reject
-                if len(exited_whales) >= len(all_ver):
+            if exited_wallets:
+                exited_names = [S.env().wallet_cache.get(w, {}).get("name", w[:10]) for w in exited_wallets[:2]]
+                # If ALL wallets exited, reject
+                if len(exited_wallets) >= len(all_ver):
                     rejects.append(
                         f"  {outcome:<12} {title[:40]}\n"
-                        f"    ↳ [DD] All whales exited: {exited_names}"
+                        f"    ↳ [DD] All wallets exited: {exited_names}"
                     )
                     continue
                 # Partial exit — remove exited wallets, continue with remaining
-                for w in exited_whales:
+                for w in exited_wallets:
                     all_ver.pop(w, None)
                     elite_wallets.pop(w, None)
                     verified_wallets.pop(w, None)

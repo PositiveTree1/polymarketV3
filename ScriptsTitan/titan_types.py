@@ -4,7 +4,7 @@ Import with TYPE_CHECKING to avoid runtime circular imports:
 
     from typing import TYPE_CHECKING
     if TYPE_CHECKING:
-        from titan_types import AlertDict, WhaleDict, ...
+        from titan_types import AlertDict, TrackedWalletDict, ...
 """
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ class ErrorDict(TypedDict):
     message: str
 
 
-class WhaleDict(TypedDict):
-    # identity (key injected by get_whales)
+class TrackedWalletDict(TypedDict):
+    # identity (key injected by get_tracked_wallets)
     wallet:             str
     name:               str
     ts:                 float
@@ -54,6 +54,9 @@ class WhaleDict(TypedDict):
     # debug
     detail:             str
     fail_reasons:       list[str]
+
+
+WhaleDict = TrackedWalletDict  # backward compat alias
 
 
 class PnlSummaryDict(TypedDict):

@@ -58,7 +58,7 @@ PROFIT_TARGET_ENABLED: bool = True
 VERBOSE_HTTP: bool = False
 VIP_WALLETS: list = [];  PRIORITY_WALLETS: list = [];  SEED_WATCHLIST: list = []
 DATA_API: str = "";  GAMMA_API: str = "";  HEADERS: dict = {}
-STATE_FILE: str = "";  WHALE_FILE: str = "";  STATE_DB: str = ""
+STATE_FILE: str = "";  WALLET_FILE: str = "";  STATE_DB: str = ""
 
 # v10: Multi-strategy configuration dicts
 ACTIVE_STRATEGIES: list = ["recent_form", "drift_discount", "consensus_basket"]
@@ -69,6 +69,17 @@ strategy_consensus_basket: dict = {}
 strategy_scoring: dict = {}
 strategy_kelly: dict = {}
 position_management_ext: dict = {}
+
+# Wallet selector config
+wallet_selector: dict = {}
+
+# Active selector instance — rebuilt on each reload()
+_active_selector = None
+
+
+def get_active_selector():
+    """Return the currently active WalletSelector instance (built from config)."""
+    return _active_selector
 
 
 def _load_json():
@@ -95,6 +106,10 @@ def _extract(cfg):
                 if not key.startswith("_"):
                     strat_flat[key] = val
             flat[group_key] = strat_flat
+            continue
+        # wallet selector block — store as nested dict directly
+        if group_key == "wallet_selector":
+            flat["wallet_selector"] = {k: v for k, v in group_val.items() if not k.startswith("_")}
             continue
         for key, entry in group_val.items():
             if key.startswith("_"):
@@ -157,6 +172,17 @@ def reload():
     g["strategy_kelly"]           = flat.get("strategy_kelly", {})
     g["position_management_ext"]  = flat.get("position_management_ext", {})
 
+    # Wallet selector — build active instance from config
+    ws_cfg = flat.get("wallet_selector", {})
+    g["wallet_selector"] = ws_cfg
+    _sel_id     = ws_cfg.get("active_selector", "performance")
+    _sel_params = (ws_cfg.get("selectors") or {}).get(_sel_id, {})
+    try:
+        from titan_selector import build_selector as _build_selector
+        g["_active_selector"] = _build_selector(_sel_id, _sel_params)
+    except Exception:
+        g["_active_selector"] = None
+
     for key, val in flat.items():
         if key not in ("vip_wallets", "priority_wallets", "seed_watchlist") and not key.startswith("strategy_"):
             g[key] = val
@@ -190,9 +216,9 @@ def reload():
         "Origin":     "https://polymarket.com",
         "Referer":    "https://polymarket.com/",
     }
-    g["STATE_FILE"] = "titan_state.json"
-    g["WHALE_FILE"] = "titan_whales.json"
-    g["STATE_DB"]   = "titan_state.db"
+    g["STATE_FILE"] = os.path.join(_ROOT_DIR, "titan_state.json")
+    g["WALLET_FILE"] = os.path.join(_ROOT_DIR, "titan_wallets.json")
+    g["STATE_DB"]   = os.path.join(_ROOT_DIR, "titan_state.db")
 
 
 reload()
