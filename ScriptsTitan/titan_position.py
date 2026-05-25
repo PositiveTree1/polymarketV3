@@ -288,8 +288,8 @@ class Position:
         return list(self.buy_trade.elite_wallets)
 
     @property
-    def whale_names(self) -> list[str]:
-        return list(self.buy_trade.whale_names)
+    def wallet_names(self) -> list[str]:
+        return list(self.buy_trade.wallet_names)
 
     @property
     def whale_buy_cash(self) -> dict[str, float]:

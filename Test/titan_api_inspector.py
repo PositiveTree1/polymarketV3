@@ -394,7 +394,7 @@ def step2_public_feed():
 def step3_wallet_positions(wallets):
     print("\n" + "═"*60)
     print("STEP 3 — Wallet positions")
-    print("  mirrors: titan_wallet.fetch_wallet() → /positions")
+    print("  mirrors: titan_wallet.get_compute_and_store_wallet() → /positions")
     print("═"*60)
 
     step_data = {}

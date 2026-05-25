@@ -33,6 +33,19 @@ class SelectorParams:
         return cls(**{k: v for k, v in d.items() if k in valid})
 
 
+@dataclass
+class DiscoveryConfig:
+    use_large_trades: bool
+    large_trade_limit: int
+    min_trade_cash: float
+    trade_side: str
+    use_leaderboard: bool
+    leaderboard_limit: int
+    leaderboard_category: str
+    leaderboard_order_by: str
+    leaderboard_periods: list[str]
+
+
 class WalletSelector(ABC):
     """
     Base class for all wallet-of-interest selectors.
@@ -59,6 +72,10 @@ class WalletSelector(ABC):
         score: result of self.score(raw).
         """
 
+    # Fetch candidate wallet addresses from large recent buy trades and leaderboard
+    # snapshots, returning a de-duplicated input set for later evaluation. This
+    # method does discovery only: it does not score wallets or decide whether they
+    # are watchable, verified, or elite; that happens later via score()/is_selected().
     def discover(self) -> list[str]:
         """
         Return a list of candidate wallet addresses.
@@ -69,34 +86,50 @@ class WalletSelector(ABC):
         from titan_config import DATA_API
 
         candidates: set[str] = set()
+        discovery = self.discovery_config()
 
-        top_trades = S.safe_get(f"{DATA_API}/trades", {
-            "limit": 200, "filterType": "CASH",
-            "filterAmount": self._discovery_min_cash(), "side": "BUY",
-        })
-        if top_trades and isinstance(top_trades, list):
-            for t in top_trades:
-                w = (t.get("proxyWallet") or "").lower()
-                if w and len(w) == 42 and w.startswith("0x"):
-                    candidates.add(w)
-
-        for lb_params in [
-            {"limit": 100, "timePeriod": "ALL",   "category": "OVERALL", "orderBy": "PNL"},
-            {"limit": 100, "timePeriod": "MONTH", "category": "OVERALL", "orderBy": "PNL"},
-            {"limit": 100, "timePeriod": "WEEK",  "category": "OVERALL", "orderBy": "PNL"},
-        ]:
-            lb_data = S.safe_get(f"{DATA_API}/leaderboard", lb_params)
-            if lb_data and isinstance(lb_data, list):
-                for entry in lb_data:
-                    w = (entry.get("proxyWallet") or entry.get("address") or "").lower()
+        if discovery.use_large_trades:
+            top_trades = S.safe_get(f"{DATA_API}/trades", {
+                "limit": discovery.large_trade_limit,
+                "filterType": "CASH",
+                "filterAmount": discovery.min_trade_cash,
+                "side": discovery.trade_side,
+            })
+            if top_trades and isinstance(top_trades, list):
+                for t in top_trades:
+                    w = (t.get("proxyWallet") or "").lower()
                     if w and len(w) == 42 and w.startswith("0x"):
                         candidates.add(w)
-            time.sleep(0.25)
+
+        if discovery.use_leaderboard:
+            for period in discovery.leaderboard_periods:
+                lb_data = S.safe_get(f"{DATA_API}/leaderboard", {
+                    "limit": discovery.leaderboard_limit,
+                    "timePeriod": period,
+                    "category": discovery.leaderboard_category,
+                    "orderBy": discovery.leaderboard_order_by,
+                })
+                if lb_data and isinstance(lb_data, list):
+                    for entry in lb_data:
+                        w = (entry.get("proxyWallet") or entry.get("address") or "").lower()
+                        if w and len(w) == 42 and w.startswith("0x"):
+                            candidates.add(w)
+                time.sleep(0.25)
 
         return list(candidates)
 
-    def _discovery_min_cash(self) -> float:
-        return getattr(self.params, "min_trade_cash_discovery", 5000.0)
+    def discovery_config(self) -> DiscoveryConfig:
+        return DiscoveryConfig(
+            use_large_trades=True,
+            large_trade_limit=200,
+            min_trade_cash=5000.0,
+            trade_side="BUY",
+            use_leaderboard=True,
+            leaderboard_limit=100,
+            leaderboard_category="OVERALL",
+            leaderboard_order_by="PNL",
+            leaderboard_periods=["ALL", "MONTH", "WEEK"],
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -106,7 +139,14 @@ class WalletSelector(ABC):
 @dataclass
 class PerformanceSelectorParams(SelectorParams):
     # Discovery
+    discovery_use_large_trades: bool = True
+    discovery_large_trade_limit: int = 200
     min_trade_cash_discovery: float = 5000.0
+    discovery_trade_side: str = "BUY"
+    discovery_use_leaderboard: bool = True
+    discovery_leaderboard_limit: int = 100
+    discovery_leaderboard_category: str = "OVERALL"
+    discovery_leaderboard_order_by: str = "PNL"
     leaderboard_periods: list[str] = field(default_factory=lambda: ["ALL", "MONTH", "WEEK"])
 
     # WATCHABLE gate
@@ -152,7 +192,7 @@ _SPORTS_BOT_NAMES = frozenset({
 class PerformanceSelector(WalletSelector):
     """
     Selects wallets based on statistical performance: win rate, PnL, portfolio size.
-    Replicates and supersedes the original fetch_wallet() tiering logic.
+    Replicates and supersedes the original get_compute_and_store_wallet() tiering logic.
     """
 
     selector_id = "performance"
@@ -164,6 +204,20 @@ class PerformanceSelector(WalletSelector):
     @property
     def p(self) -> PerformanceSelectorParams:
         return self.params  # type: ignore[return-value]
+
+    def discovery_config(self) -> DiscoveryConfig:
+        p = self.p
+        return DiscoveryConfig(
+            use_large_trades=p.discovery_use_large_trades,
+            large_trade_limit=p.discovery_large_trade_limit,
+            min_trade_cash=p.min_trade_cash_discovery,
+            trade_side=p.discovery_trade_side,
+            use_leaderboard=p.discovery_use_leaderboard,
+            leaderboard_limit=p.discovery_leaderboard_limit,
+            leaderboard_category=p.discovery_leaderboard_category,
+            leaderboard_order_by=p.discovery_leaderboard_order_by,
+            leaderboard_periods=p.leaderboard_periods,
+        )
 
     def score(self, raw: dict) -> float:
         p = self.p

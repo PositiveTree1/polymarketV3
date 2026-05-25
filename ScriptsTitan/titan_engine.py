@@ -30,8 +30,8 @@ from titan_state import _log, safe_get
 
 import titan_db as DB
 from titan_persistence import load_state, save_state, save_whale_roster, save_whale_roster_async
-from titan_wallet  import (fetch_wallet, get_elite_wallets, discover_new_wallets,
-                           scan_top_market_holders, get_whale_performance_summary,
+from titan_wallet  import (get_compute_and_store_wallet, get_elite_wallets, discover_new_wallets,
+                           scan_top_market_holders, get_wallet_performance_summary,
                            _refresh_recent_form_scores)
 from titan_market  import get_market, fetch_trades, fetch_hft_spike_trades
 from titan_signals import build_signals, check_wallet_exist, _adaptive_bet_caps
@@ -44,7 +44,7 @@ def _rescore_watchlist():
     now_t = time.time()
     must  = set(w.lower() for w in VIP_WALLETS) | set(w.lower() for w in PRIORITY_WALLETS)
     stale = [
-        w for w in list(S.env().watchlist)
+        w for w in S.get_watchlist()
         if w not in must
         and (now_t - S.env().wallet_cache.get(w, {}).get("ts", 0)) >= WALLET_TTL
     ]
@@ -54,7 +54,7 @@ def _rescore_watchlist():
     _log(f"♻ Re-scoring {len(to_score)} wallets…", "DATA")
     for w in to_score:
         try:
-            fetch_wallet(w)
+            get_compute_and_store_wallet(w)
             time.sleep(0.15)
         except Exception:
             pass
@@ -95,7 +95,7 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
         return a and b and a[0].isupper() and b[0].isupper() and a.isalpha() and b.isalpha()
 
     for w in feed_wallets:
-        p = fetch_wallet(w)
+        p = get_compute_and_store_wallet(w)
         trade_name = next(
             (t.name for t in trades
              if t.wallet.lower() == w and t.name and not t.name.endswith("…")),
@@ -140,15 +140,15 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
             names = [S.env().wallet_cache.get(w, {}).get("name", w[:10]+"…") for w in elite_ws[:8]]
             _log(f"🔥 Elite ({len(elite_ws)}, ⚡{hft_count} HFT): {', '.join(names)}", "INFO")
 
-    # Whale exit monitoring
+    # Wallet exit monitoring
     cid_to_wallet_sets = {cid: set(ws) for cid, ws in S.env().position_whale_map.items()}
     entry_times = {
         (pos.cid or key[0]): pos.entry_ts
         for key, pos in S.env().open_positions.items()
     }
-    whale_exits = {}
+    wallet_exits = {}
     if cid_to_wallet_sets:
-        whale_exits = check_wallet_exist(cid_to_wallet_sets, entry_times)
+        wallet_exits = check_wallet_exist(cid_to_wallet_sets, entry_times)
     elif S.env().open_positions:
         rebuilt = {}
         for key, pos in S.env().open_positions.items():
@@ -157,9 +157,9 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
             if lwallets:
                 rebuilt[cid] = lwallets
         if rebuilt:
-            whale_exits = check_wallet_exist(rebuilt, entry_times)
+            wallet_exits = check_wallet_exist(rebuilt, entry_times)
 
-    signals, rejects = build_signals(trades, wallets, whale_exits)
+    signals, rejects = build_signals(trades, wallets, wallet_exits)
 
     # v10: Break down signal count by strategy for the cycle log
     strat_counts: dict = {}
@@ -179,7 +179,7 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
             clean_r = r.replace("\n", " ")
             _log(f"  ❌ HFT Spike rejected: {clean_r}", "INFO")
 
-    trade_events = auto_trade(signals, whale_exits)
+    trade_events = auto_trade(signals, wallet_exits)
     for ev_type, msg, _color in trade_events:
         level = "TRADE" if ev_type in ("OPEN", "CLOSE") else "WARN"
         _log(msg, level)
@@ -199,11 +199,11 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
     if len(_eq) > 5000:
         del _eq[:500]
 
-    # Whale report card every 50 cycles
+    # Wallet report card every 50 cycles
     if S.env().cycle_count % 50 == 0 and S.env().cycle_count > 0:
-        perf = get_whale_performance_summary()
+        perf = get_wallet_performance_summary()
         if perf:
-            _log("📊 WHALE PERFORMANCE (copy-trade outcomes):", "INFO")
+            _log("📊 WALLET PERFORMANCE (copy-trade outcomes):", "INFO")
             for rec in perf[:10]:
                 emoji = "✅" if rec["total_pnl"] >= 0 else "❌"
                 week_tag = f"  7d:${rec['weekly_pnl']:+.2f}({rec['weekly_trades']}t)" if rec.get("weekly_trades") else ""

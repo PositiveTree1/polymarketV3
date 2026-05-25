@@ -252,7 +252,7 @@ def get_whale_weekly_pnl(wallet: str) -> float:
     return sum(p for ts, p in recent if ts >= week_ago)
 
 
-def get_whale_performance_summary() -> list[WhalePerformanceSummary]:
+def get_wallet_performance_summary() -> list[WhalePerformanceSummary]:
     """
     Return a sorted summary of all whale performance records.
     Sorted by total PnL (worst first for easy identification of bad sources).
@@ -493,7 +493,7 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
 # ─────────────────────────────────────────────────────────────────────────────
 #  WALLET SCORING
 # ─────────────────────────────────────────────────────────────────────────────
-def fetch_wallet(wallet: str) -> WalletProfile:
+def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
     wallet = wallet.lower()
     now_t  = time.time()
     cached = S.env().wallet_cache.get(wallet)
@@ -648,8 +648,6 @@ def fetch_wallet(wallet: str) -> WalletProfile:
     }
 
     S.env().wallet_cache[wallet] = result
-    if watchable:
-        S.env().watchlist.add(wallet)
     return result
 
 
@@ -689,66 +687,48 @@ def _refresh_recent_form_scores() -> None:
         S._log(f"♻ Recent form refreshed for {refreshed} wallets", "DATA")
 
 
+# Discover candidate wallets from the active selector, score/cache each new
+# wallet, add watchable ones to the watchlist, then prune the watchlist to
+# keep verified wallets first within the size cap.
 def discover_new_wallets() -> None:
     S._log("🔍 Running wallet discovery…", "DATA")
 
     import titan_config as _C
     sel = _C.get_active_selector()
-    if sel is not None:
-        candidates = set(sel.discover())
-    else:
-        # fallback: leaderboard + high-value trades
-        candidates: set[str] = set()
-        top_trades = S.safe_get(f"{DATA_API}/trades", {
-            "limit": 200, "filterType": "CASH", "filterAmount": 5000, "side": "BUY",
-        })
-        if top_trades and isinstance(top_trades, list):
-            for t in top_trades:
-                w = (t.get("proxyWallet") or "").lower()
-                if w and len(w) == 42 and w.startswith("0x"):
-                    candidates.add(w)
-        for lb_params in [
-            {"limit": 100, "timePeriod": "ALL",   "category": "OVERALL", "orderBy": "PNL"},
-            {"limit": 100, "timePeriod": "MONTH", "category": "OVERALL", "orderBy": "PNL"},
-            {"limit": 100, "timePeriod": "WEEK",  "category": "OVERALL", "orderBy": "PNL"},
-        ]:
-            lb_data = S.safe_get(f"{DATA_API}/leaderboard", lb_params)
-            if lb_data and isinstance(lb_data, list):
-                for entry in lb_data:
-                    w = (entry.get("proxyWallet") or entry.get("address") or "").lower()
-                    if w and len(w) == 42 and w.startswith("0x"):
-                        candidates.add(w)
-            time.sleep(0.25)
+    if sel is None:
+        raise RuntimeError("Wallet discovery requires an active selector, but none is configured.")
+    candidates = set(sel.discover())
 
-    new_cands = candidates - {w.lower() for w in S.env().watchlist}
+    current_watchlist = set(S.get_watchlist())
+    new_cands = candidates - current_watchlist
     S._log(f"🔍 {len(candidates)} candidates, {len(new_cands)} new", "DATA")
 
     discovered = 0
     for w in list(new_cands)[:25]:
-        prof = fetch_wallet(w)
-        if prof.get("watchable"):
-            S.env().watchlist.add(w)
-            if prof.get("verified"):
-                discovered += 1
-                tag = "🔥ELITE" if prof["elite"] else ("⚡HFT" if prof.get("hft") else "✅VER")
-                S._log(
-                    f"🆕 {tag} {w[:14]}… "
-                    f"Score:{prof['score']:.2f} WR:{prof['win_rate']*100:.0f}% "
-                    f"PnL:${prof['total_pnl']:+,.0f} TPH:{prof.get('trades_per_hour',0):.1f}",
-                    "INFO"
-                )
+        prof = get_compute_and_store_wallet(w)
+        if prof.get("verified"):
+            discovered += 1
+            tag = "🔥ELITE" if prof["elite"] else ("⚡HFT" if prof.get("hft") else "✅VER")
+            S._log(
+                f"🆕 {tag} {w[:14]}… "
+                f"Score:{prof['score']:.2f} WR:{prof['win_rate']*100:.0f}% "
+                f"PnL:${prof['total_pnl']:+,.0f} TPH:{prof.get('trades_per_hour',0):.1f}",
+                "INFO"
+            )
         time.sleep(0.12)
 
-    if len(S.env().watchlist) > MAX_WATCHLIST_SIZE:
-        verified_set = {w for w in S.env().watchlist if S.env().wallet_cache.get(w, {}).get("verified")}
-        unverified   = [w for w in S.env().watchlist if w not in verified_set]
+    wl = S.get_watchlist()
+    if len(wl) > MAX_WATCHLIST_SIZE:
+        import titan_db as DB
+        verified_set = {w for w in wl if S.env().wallet_cache.get(w, {}).get("verified")}
+        unverified   = [w for w in wl if w not in verified_set]
         keep_unver   = max(0, MAX_WATCHLIST_SIZE - len(verified_set))
-        S.env().watchlist.clear()
-        S.env().watchlist.update(verified_set)
-        S.env().watchlist.update(set(unverified[:keep_unver]))
-        S._log(f"🧹 Watchlist pruned to {len(S.env().watchlist)}", "DATA")
+        for w in unverified[keep_unver:]:
+            S.env().wallet_cache[w]["watchable"] = False
+            DB.set_watchable(w, False)
+        S._log(f"🧹 Watchlist pruned to {MAX_WATCHLIST_SIZE} ({len(unverified[keep_unver:])} toggled off)", "DATA")
 
-    S._log(f"🔍 Discovery done — {discovered} new. Watchlist: {len(S.env().watchlist)}", "DATA")
+    S._log(f"🔍 Discovery done — {discovered} new. Watchlist: {len(S.get_watchlist())}", "DATA")
 
 
 def scan_top_market_holders() -> None:
@@ -773,12 +753,11 @@ def scan_top_market_holders() -> None:
                     if w and w.startswith("0x") and len(w) == 42:
                         candidates.add(w)
             time.sleep(0.08)
-        new_cands = candidates - {w.lower() for w in S.env().watchlist}
+        new_cands = candidates - set(S.get_watchlist())
         added = 0
         for w in list(new_cands)[:20]:
-            prof = fetch_wallet(w)
+            prof = get_compute_and_store_wallet(w)
             if prof.get("watchable"):
-                S.env().watchlist.add(w)
                 added += 1
                 if prof.get("verified"):
                     tag = "🔥ELITE" if prof["elite"] else ("⚡HFT" if prof.get("hft") else "✅VER")

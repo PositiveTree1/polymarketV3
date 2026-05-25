@@ -7,6 +7,10 @@ v10: Added multi-strategy config blocks (strategy_recent_form, strategy_drift_di
 """
 
 import json, os
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from titan_selector import WalletSelector
 
 _SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 _ROOT_DIR    = os.path.dirname(_SCRIPT_DIR)
@@ -58,7 +62,7 @@ PROFIT_TARGET_ENABLED: bool = True
 VERBOSE_HTTP: bool = False
 VIP_WALLETS: list = [];  PRIORITY_WALLETS: list = [];  SEED_WATCHLIST: list = []
 DATA_API: str = "";  GAMMA_API: str = "";  HEADERS: dict = {}
-STATE_FILE: str = "";  WALLET_FILE: str = "";  STATE_DB: str = ""
+STATE_FILE: str = "";  STATE_DB: str = ""
 
 # v10: Multi-strategy configuration dicts
 ACTIVE_STRATEGIES: list = ["recent_form", "drift_discount", "consensus_basket"]
@@ -74,10 +78,10 @@ position_management_ext: dict = {}
 wallet_selector: dict = {}
 
 # Active selector instance — rebuilt on each reload()
-_active_selector = None
+_active_selector: "WalletSelector | None" = None
 
 
-def get_active_selector():
+def get_active_selector() -> "WalletSelector | None":
     """Return the currently active WalletSelector instance (built from config)."""
     return _active_selector
 
@@ -242,7 +246,6 @@ def reload():
         "Referer":    "https://polymarket.com/",
     }
     g["STATE_FILE"] = os.path.join(_ROOT_DIR, "titan_state.json")
-    g["WALLET_FILE"] = os.path.join(_ROOT_DIR, "titan_wallets.json")
     g["STATE_DB"]   = os.path.join(_ROOT_DIR, "titan_state.db")
 
 

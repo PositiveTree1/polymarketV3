@@ -1,6 +1,6 @@
 """
 TITAN — Persistence layer. Single-wallet edition.
-Saves: titan_state.json, titan_whales.json, titan_state.db
+Saves: titan_state.json, titan_state.db
 """
 
 import os, json, threading, time
@@ -10,16 +10,13 @@ import titan_state as S
 import titan_db as DB
 import titan_prices
 from titan_prices import PricesCacheSrv
-from titan_config import STATE_FILE, WALLET_FILE, STATE_DB, BANKROLL_START, SEED_WATCHLIST
+from titan_config import STATE_FILE, STATE_DB, BANKROLL_START, MAX_WATCHLIST_SIZE
 from titan_wallet import WalletProfile
 
 
 def save_state():
     try:
         env = S.env()
-
-        if env.watchlist:
-            DB.upsert_watchlist(env.watchlist)
 
         state = {
             "bankroll":           env.paper_bankroll,
@@ -38,25 +35,13 @@ def save_state():
 
 def save_whale_roster():
     try:
-        from titan_wallet import _whale_performance
-        from titan_signals import get_known_hedge_wallets
-
-        saveable = {
-            addr: {k: v for k, v in profile.items() if k != "ts"}
-            for addr, profile in S.env().wallet_cache.items()
-            if profile.get("verified") or profile.get("watchable")
-        }
-        for addr in saveable:
-            perf = _whale_performance.get(addr.lower())
-            if perf:
-                saveable[addr]["copy_performance"] = perf
-
-        hedge = list(get_known_hedge_wallets())
-        if hedge:
-            saveable["__hedge_wallets__"] = {"hedge_set": hedge}
-
-        with open(WALLET_FILE, "w") as f:
-            json.dump(saveable, f, indent=2)
+        saved = 0
+        for addr, profile in S.env().wallet_cache.items():
+            if profile.get("verified") or profile.get("watchable"):
+                DB.upsert_wallet_profile(addr, profile)
+                saved += 1
+        if saved:
+            S._log(f"💾 Whale roster saved: {saved} profiles to DB", "DATA")
     except Exception as e:
         S._log(f"⚠ Whale save failed: {e}", "WARN")
 
@@ -71,25 +56,17 @@ def load_state():
     srv = PricesCacheSrv()
     srv.init_db(STATE_DB)
     titan_prices.PRICES = srv
-    whale_info = _load_whale_roster()
-    recovery_info = _load_trading_state()
-    startup_line_1 = (
-        "Startup recovery: "
-        f"markets={len(S.market_cache)} | "
-        f"whales_loaded={whale_info['loaded']} | whales_total={whale_info['total']} | "
-        f"watchlist={recovery_info['watchlist']} | trades={recovery_info['trades']}"
+    _load_wallets_from_db()
+    ri = _load_trading_state()
+    wl = S.get_watchlist()
+    line = (
+        f"Startup: markets={len(S.market_cache)} | "
+        f"wallets={len(S.env().wallet_cache)} watchable={len(wl)} | "
+        f"trades={ri['trades']} open={ri['open_positions']} closed={ri['closed_trades']} | "
+        f"equity_pts={ri['equity_points']} cooldowns={ri['cooldowns']}"
     )
-    startup_line_2 = (
-        "Startup recovery: "
-        f"open_positions={recovery_info['open_positions']} | "
-        f"closed_trades={recovery_info['closed_trades']} | "
-        f"equity_points={recovery_info['equity_points']} | "
-        f"cooldowns={recovery_info['cooldowns']}"
-    )
-    print(startup_line_1)
-    print(startup_line_2)
-    S._log(f"📦 {startup_line_1}", "INFO")
-    S._log(f"📦 {startup_line_2}", "INFO")
+    print(line)
+    S._log(f"📦 {line}", "INFO")
 
 
 def _load_trading_state() -> dict[str, int]:
@@ -122,16 +99,7 @@ def _load_trading_state() -> dict[str, int]:
             if str(asset)
         }
 
-        db_wl = DB.load_watchlist()
-        if db_wl:
-            env.watchlist.update(db_wl)
-        else:
-            saved_wl = state.get("watchlist", [])
-            if saved_wl:
-                env.watchlist.update(saved_wl)
-                DB.upsert_watchlist(env.watchlist)
-                S._log(f"📂 Watchlist migrated from JSON: {len(saved_wl)} addresses", "INFO")
-        recovery_info["watchlist"] = len(env.watchlist)
+        recovery_info["watchlist"] = len(S.get_watchlist())
 
         json_trades = state.get("trade_history", [])
         if json_trades and DB.get_trade_count() == 0:
@@ -173,7 +141,7 @@ def _load_trading_state() -> dict[str, int]:
         S._log(
             f"📂 State loaded: bankroll=${env.paper_bankroll:.2f} | "
             f"{env.trade_stats.sell_count} closed trades | {n_pos} open | "
-            f"{len(env.cooldown_cids)} cooldowns | {len(env.watchlist)} watchlist",
+            f"{len(env.cooldown_cids)} cooldowns | {len(S.get_watchlist())} watchlist",
             "INFO"
         )
 
@@ -286,41 +254,48 @@ def _migrate_null_cid_trades(state: dict) -> None:
         S._log(f"📂 Migrated {updated} trade record(s): repaired cids from JSON+consistency check", "INFO")
 
 
-def _load_whale_roster() -> dict[str, int]:
-    whale_info = {"loaded": 0, "total": len(S.env().wallet_cache)}
-    if not os.path.exists(WALLET_FILE):
-        S._log(f"📂 No whale roster found at {WALLET_FILE} — starting fresh discovery", "INFO")
-        return whale_info
+def _make_stub(addr: str, detail: str) -> "WalletProfile":
+    return cast(WalletProfile, {  # type: ignore[arg-type]
+        "score": 0.10, "win_rate": 0.0, "wilson_lb": 0.0, "alpha_per_trade": 0.0,
+        "n_resolved": 0, "n_pos": 0, "total_value": 0.0,
+        "total_pnl": 0.0, "pnl_pct": 0.0, "avg_pos_size": 0.0,
+        "avg_profit": 0.0, "avg_bet": 0.0, "trades_per_hour": 0.0,
+        "recent_pnl_30d": None, "recent_pnl_7d": None, "recent_ts": 0.0,
+        "verified": False, "watchable": True, "elite": False, "hft": False, "sports_bot": False,
+        "name": addr[:10] + "…", "ts": 0.0,
+        "detail": detail, "wr_source": "none", "fail_reasons": [],
+    })
+
+
+def _load_wallets_from_db() -> None:
+    from titan_config import SEED_WATCHLIST
     try:
-        from titan_wallet import _whale_performance
-        from titan_signals import restore_known_hedge_wallets
-
-        with open(WALLET_FILE) as f:
-            saved = json.load(f)
-
-        hedge_entry = saved.pop("__hedge_wallets__", {})
-        if hedge_entry.get("hedge_set"):
-            restore_known_hedge_wallets(hedge_entry["hedge_set"])
-
-        loaded = 0
-        for addr, profile in saved.items():
-            addr = addr.lower()
-            if addr not in S.env().wallet_cache:
-                profile["ts"] = 0
-                perf = profile.pop("copy_performance", None)
-                if perf:
-                    _whale_performance[addr] = perf
+        profiles = DB.load_watchable_wallets(MAX_WATCHLIST_SIZE)
+        with_profile = 0
+        legacy = 0
+        for addr, profile in profiles.items():
+            if addr in S.env().wallet_cache:
+                continue
+            if profile is not None:
                 S.env().wallet_cache[addr] = cast(WalletProfile, profile)
-                loaded += 1
-                if profile.get("watchable"):
-                    S.env().watchlist.add(addr)
+                with_profile += 1
+            else:
+                S.env().wallet_cache[addr] = _make_stub(addr, "legacy")
+                legacy += 1
 
-        if loaded:
-            S._log(f"📂 Loaded {loaded} whale(s) from {WALLET_FILE} ({len(S.env().wallet_cache)} total in cache)", "INFO")
-        else:
-            S._log(f"📂 No new whales loaded from {WALLET_FILE} (all already cached or file empty)", "INFO")
-        whale_info["loaded"] = loaded
-        whale_info["total"] = len(S.env().wallet_cache)
+        # Ensure SEED_WATCHLIST addresses are always watchable, within the cap
+        seeds_added = 0
+        for addr in SEED_WATCHLIST:
+            a = addr.lower()
+            if a not in S.env().wallet_cache and len(S.get_watchlist()) < MAX_WATCHLIST_SIZE:
+                S.env().wallet_cache[a] = _make_stub(a, "seed")
+                DB.set_watchable(a, True)
+                seeds_added += 1
+
+        S._log(
+            f"📂 Wallets loaded: {with_profile} with profile, {legacy} legacy, {seeds_added} seeds | "
+            f"watchable={len(S.get_watchlist())}",
+            "INFO",
+        )
     except Exception as e:
-        S._log(f"⚠ Whale load failed ({e})", "WARN")
-    return whale_info
+        S._log(f"⚠ Wallet load failed ({e})", "WARN")

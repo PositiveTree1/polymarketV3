@@ -817,12 +817,12 @@ def run_ui(api: TitanBackend) -> None:
         # Wallets — show name + how much each whale put into this trade
         wf = tk.Frame(win, bg="#060615")
         wf.pack(fill="x", padx=8)
-        whale_names = trade.whale_names
+        wallet_names = trade.wallet_names
         whale_addrs = trade.elite_wallets
         whale_cash  = trade.whale_buy_cash  # addr → $ amount
-        if whale_names or whale_addrs:
+        if wallet_names or whale_addrs:
             tk.Label(wf, text="VIA WALLETS:", fg="#00ff88", bg="#060615", font=mono9).pack(anchor="w", padx=12, pady=(4,2))
-            for i, name in enumerate(whale_names[:6]):
+            for i, name in enumerate(wallet_names[:6]):
                 addr = whale_addrs[i] if i < len(whale_addrs) else ""
                 cash_val = whale_cash.get(addr.lower(), whale_cash.get(addr, 0))
                 cash_str = f"  —  put in ${cash_val:,.0f}" if cash_val > 0 else ""
@@ -1353,7 +1353,7 @@ def run_ui(api: TitanBackend) -> None:
         hist_tree.delete(*hist_tree.get_children())
         _hist_tree_items.clear()
         for t in reversed(history[-200:]):
-            whale_str = ", ".join(t.whale_names[:2]) or "—"
+            whale_str = ", ".join(t.wallet_names[:2]) or "—"
             if t.type == "BUY":
                 iid = hist_tree.insert("", "end", values=(
                     t.ts_str or "—", "BUY", t.title[:40], t.outcome,
@@ -1775,14 +1775,22 @@ def run_ui(api: TitanBackend) -> None:
             if active not in _raw["wallet_selector"]["selectors"]:
                 _raw["wallet_selector"]["selectors"][active] = {}
             target = _raw["wallet_selector"]["selectors"][active]
-            _int_keys = {"min_resolved_bets", "elite_min_resolved"}
+            _int_keys = {
+                "discovery_large_trade_limit",
+                "discovery_leaderboard_limit",
+                "min_resolved_bets",
+                "elite_min_resolved",
+            }
             _list_keys = {"leaderboard_periods"}
+            _bool_keys = {"discovery_use_large_trades", "discovery_use_leaderboard"}
             for key, var in _sel_fields.items():
                 raw_val = var.get().strip()
                 if not raw_val:
                     continue
                 if key in _list_keys:
                     target[key] = [v.strip() for v in raw_val.split(",")]
+                elif key in _bool_keys:
+                    target[key] = raw_val.lower() in {"1", "true", "yes", "on"}
                 elif key in _int_keys:
                     target[key] = int(raw_val)
                 else:
@@ -1836,57 +1844,136 @@ def run_ui(api: TitanBackend) -> None:
     sel_inner.bind("<Configure>", lambda e: sel_canvas.configure(scrollregion=sel_canvas.bbox("all")))
     sel_canvas.bind("<Configure>", lambda ev: sel_canvas.itemconfig(sel_canvas_win, width=ev.width))
 
-    _PARAM_META: list[tuple[str, str, str]] = [
-        # (field_key, label, section_header_or_"")
-        ("",                          "",                               "── Discovery ──"),
-        ("min_trade_cash_discovery",  "Min trade cash for discovery",   ""),
-        ("leaderboard_periods",       "Leaderboard periods (CSV)",      ""),
-        ("",                          "",                               "── Watchable gate ──"),
-        ("min_win_rate_watch",        "Min win rate (watchable)",       ""),
-        ("wilson_min_watch",          "Wilson LB (watchable)",          ""),
-        ("min_resolved_bets",         "Min resolved bets",              ""),
-        ("min_pnl",                   "Min PnL ($)",                    ""),
-        ("",                          "",                               "── Verified gate ──"),
-        ("min_win_rate_ver",          "Min win rate (verified)",        ""),
-        ("wilson_min_ver",            "Wilson LB (verified)",           ""),
-        ("min_avg_profit",            "Min avg profit/trade ($)",       ""),
-        ("min_avg_bet",               "Min avg bet ($)",                ""),
-        ("min_portfolio_or_pnl",      "Min portfolio or PnL ($)",       ""),
-        ("",                          "",                               "── Elite gate ──"),
-        ("elite_min_pnl",             "Elite min PnL ($)",              ""),
-        ("elite_min_portfolio",       "Elite min portfolio ($)",        ""),
-        ("elite_min_score",           "Elite min score",                ""),
-        ("elite_min_resolved",        "Elite min resolved bets",        ""),
-        ("elite_alpha_per_trade",     "Elite min alpha/trade ($)",      ""),
-        ("",                          "",                               "── Scoring weights ──"),
-        ("weight_wilson",             "Weight: Wilson LB",              ""),
-        ("weight_pnl_pct",            "Weight: PnL %",                  ""),
-        ("weight_portfolio",          "Weight: Portfolio size",         ""),
-        ("weight_trade_count",        "Weight: Trade count",            ""),
-        ("weight_open_positions",     "Weight: Open positions",         ""),
-        ("weight_alpha",              "Weight: Alpha/trade",            ""),
-        ("",                          "",                               "── Bot filters ──"),
-        ("hft_tph_threshold",         "HFT trades/hour threshold",      ""),
-        ("sports_bot_tph_threshold",  "Sports bot trades/hour threshold",""),
+    _PARAM_META: list[tuple[str, str, str, str]] = [
+        # (field_key, label, section_header_or_"", description)
+        ("",                          "",                                "── Discovery ──",       ""),
+        ("discovery_use_large_trades","Use large trade feed",           "",
+         "Calls the Polymarket trades API each cycle and collects wallets behind every large buy above min_trade_cash_discovery. "
+         "Best way to find wallets actively deploying capital right now. Disable only if you rely solely on the leaderboard."),
+        ("discovery_large_trade_limit","Large trade fetch limit",       "",
+         "How many recent large trades to pull per discovery call — each trade yields one candidate wallet address. "
+         "200 is a safe default; going higher gives broader coverage but increases API call time and rate-limit risk."),
+        ("min_trade_cash_discovery",  "Large trade min cash ($)",       "",
+         "Only trades at or above this USD size are used as discovery candidates. "
+         "Raise it (e.g. $10 000) to focus on serious positions and cut retail noise; lower it to cast a wider net at the cost of more low-quality candidates."),
+        ("discovery_trade_side",      "Large trade side",               "",
+         "Which side of the market to scan. BUY captures wallets taking a conviction position — the main alpha signal. "
+         "SELL captures exits. BOTH captures all activity. BUY is almost always the right choice for alpha discovery."),
+        ("discovery_use_leaderboard", "Use leaderboard feed",           "",
+         "Also pulls the Polymarket leaderboard for each configured time period and adds those ranked wallets as candidates. "
+         "Captures proven long-term performers who may not appear in today's large trades. Use alongside the trade feed for maximum coverage."),
+        ("discovery_leaderboard_limit","Leaderboard rows per period",   "",
+         "How many top-ranked wallets to pull per leaderboard period. Each period is a separate API call. "
+         "Total leaderboard candidates = this value multiplied by the number of configured periods."),
+        ("discovery_leaderboard_category", "Leaderboard category",      "",
+         "Which Polymarket leaderboard ranking to query. OVERALL covers all markets and is the broadest view of alpha generators. "
+         "Narrower categories like CRYPTO exist but OVERALL gives the most relevant universe for copy trading."),
+        ("discovery_leaderboard_order_by", "Leaderboard order by",      "",
+         "Sort field used when calling the leaderboard API. PNL ranks wallets by total profit — the most relevant signal. "
+         "VOLUME would surface high-frequency traders, which is usually not what you want here. Keep as PNL."),
+        ("leaderboard_periods",       "Leaderboard periods (CSV)",      "",
+         "Time windows queried on the leaderboard, e.g. ALL,MONTH,WEEK. ALL catches proven long-term performers; WEEK catches wallets running hot right now. "
+         "Multiple periods ensure both types are discovered each cycle without requiring a restart."),
+        ("",                          "",                                "── Watchable gate ──",  ""),
+        ("min_win_rate_watch",        "Min win rate",                   "",
+         "First hard gate: the wallet's raw win rate (resolved wins / total resolved bets) must meet this to enter the watchlist at all. "
+         "0.53 = 53% wins. Any wallet below this is rejected immediately. Too low and you watch losers; too high and you miss real edges."),
+        ("wilson_min_watch",          "Wilson lower bound",             "",
+         "Second hard gate: the Wilson lower-bound confidence interval on the win rate must meet this. "
+         "Unlike raw win rate, Wilson LB accounts for sample size — 5 wins from 5 bets scores much lower than 100 wins from 188 bets. "
+         "This prevents lucky short streaks from entering the watchlist."),
+        ("min_resolved_bets",         "Min resolved bets",              "",
+         "Wallet must have at least this many fully settled bets before it is evaluated at all. "
+         "With fewer bets the win rate and Wilson LB are statistically meaningless. 10 is the practical minimum; 20+ gives much stronger confidence."),
+        ("min_pnl",                   "Min PnL ($)",                    "",
+         "Total realised cash PnL across all resolved positions must be at or above this. "
+         "0 means break-even or better. A positive value like $500 ensures the wallet has demonstrated real monetary edge, not just a winning percentage on micro-bets."),
+        ("",                          "",                                "── Verified gate ──",   ""),
+        ("min_win_rate_ver",          "Min win rate (verified)",        "",
+         "Stricter win rate applied on top of the watchable gate for a wallet to reach verified status. "
+         "Verified wallets are polled more frequently and their signals carry more weight in the engine. "
+         "0.56 is 3 points above the watchable floor — meaningful but not extreme."),
+        ("wilson_min_ver",            "Wilson lower bound (verified)",  "",
+         "Stricter Wilson LB for verified status. Because verified wallets drive actual copy trades, confidence in their win rate must be higher. "
+         "0.49 means the lower bound of the 95% confidence interval on their win rate is still above 49% — strong statistical evidence of edge."),
+        ("min_avg_profit",            "Min avg profit/trade ($)",       "",
+         "Average dollar profit per resolved trade (total PnL / resolved bets) must meet this. "
+         "Blocks wallets that win many tiny bets — a 60% win rate on $0.10 trades is useless to copy. "
+         "This check is bypassed for HFT wallets where per-trade profit naturally compresses due to volume."),
+        ("min_avg_bet",               "Min avg bet ($)",                "",
+         "Average bet size must be at least this. A wallet betting $2 per trade cannot generate meaningful absolute PnL regardless of win rate. "
+         "Also ensures the wallet's positions are large enough to be worth copying at our own bet sizing. Bypassed for detected HFT wallets."),
+        ("min_portfolio_or_pnl",      "Min portfolio or PnL ($)",       "",
+         "Either the wallet's current total open position value OR its lifetime PnL must exceed this — whichever is larger is used. "
+         "The OR logic is intentional: a wallet that banked $2 000 but is flat today still qualifies, as does one actively holding $2 000 open. "
+         "Ensures verified wallets are economically meaningful, not just statistically good."),
+        ("",                          "",                                "── Elite gate ──",      ""),
+        ("elite_min_pnl",             "Elite min total PnL ($)",        "",
+         "Lifetime cash PnL must exceed this for elite status. Elite wallets receive the highest polling priority and strongest copy signal weight. "
+         "$40 000 default means only wallets that have extracted serious money from the market qualify — not just a lucky month."),
+        ("elite_min_portfolio",       "Elite min portfolio ($)",        "",
+         "max(current open value, lifetime PnL) must exceed this. A $80 000 threshold ensures elite wallets are not just historically profitable "
+         "but currently deploying major capital — strong evidence of active conviction rather than past glory."),
+        ("elite_min_score",           "Elite min composite score",      "",
+         "The wallet's 0–1 composite score (weighted sum of Wilson LB, PnL %, portfolio, trade count, open positions, alpha/trade) must meet this. "
+         "0.72 means the wallet scores well across all dimensions simultaneously. Adjust the weights below to change what this score rewards."),
+        ("elite_min_resolved",        "Elite min resolved bets",        "",
+         "Minimum settled bets for elite status. Combined with the Wilson LB gate this ensures the wallet's edge is both large and statistically well-evidenced. "
+         "20 bets is a solid floor; below that the score is too unstable to trust with elite-level copy weight."),
+        ("elite_alpha_per_trade",     "Elite min alpha/trade ($)",      "",
+         "Alpha per trade = total PnL / resolved bets — the cleanest measure of per-bet dollar edge. "
+         "$40 000 PnL across 40 000 bets is $1/trade (thin). $40 000 from 200 bets is $200/trade (elite). "
+         "Default 1.0 sets a minimal floor; raise it to demand genuine per-trade impact."),
+        ("",                          "",                                "── Scoring weights ──", ""),
+        ("weight_wilson",             "Weight: Wilson LB",              "",
+         "Share of the 0–1 composite score driven by Wilson lower-bound win rate. At 0.30 this is the dominant factor — "
+         "a wallet with a high and statistically confident win rate scores well here. All six weights must sum to 1.0."),
+        ("weight_pnl_pct",            "Weight: PnL %",                  "",
+         "Share driven by PnL as a percentage of initial invested capital. Capped internally at 30% for normalisation — "
+         "a 30%+ return scores full marks. Rewards relative return so a small but highly efficient wallet can still rank well."),
+        ("weight_portfolio",          "Weight: Portfolio size",         "",
+         "Share driven by current open portfolio value, normalised against $25 000. "
+         "Rewards wallets actively deploying capital right now. An idle wallet with a great historical record scores zero here, keeping the list biased toward active participants."),
+        ("weight_trade_count",        "Weight: Trade count",            "",
+         "Share driven by number of resolved bets, normalised against 20 bets. "
+         "Small bonus for wallets with more data, reinforcing statistical confidence alongside Wilson LB. Keep this low — quantity alone is not quality."),
+        ("weight_open_positions",     "Weight: Open positions",         "",
+         "Share driven by number of currently open positions, normalised against 10. "
+         "Wallets holding many active bets right now are more likely to generate copyable signals this cycle. A wallet that has not traded in weeks scores zero here."),
+        ("weight_alpha",              "Weight: Alpha/trade",            "",
+         "Share driven by average profit per resolved trade, normalised against $50/trade. "
+         "Directly rewards dollar edge per bet. Combined with weight_wilson this creates a score that values both consistency and magnitude of edge."),
+        ("",                          "",                                "── Bot filters ──",     ""),
+        ("hft_tph_threshold",         "HFT trades/hour threshold",      "",
+         "Wallets exceeding this trades-per-hour rate are tagged HFT (high-frequency trader). "
+         "HFT is also triggered if avg_bet < $50 with more than 100 resolved bets. "
+         "The HFT tag bypasses the avg_profit and avg_bet verified-gate checks — HFT edge comes from volume not per-trade size — and adjusts their polling frequency upward."),
+        ("sports_bot_tph_threshold",  "Sports bot trades/hour threshold","",
+         "Wallets above this TPH are tagged as sports bots. Sports bots are market makers in sports/politics markets — their edge is speed and spread, not prediction accuracy. "
+         "They are excluded from copy trading even if they pass all scoring gates. "
+         "A wallet is also tagged sports bot if it matches a known sports bot name or has a mid-range TPH (50–100) with predominantly sports market activity."),
     ]
 
     _sel_fields: dict[str, tk.StringVar] = {}
     row_idx = 0
-    for field_key, label, section in _PARAM_META:
+    for field_key, label, section, desc in _PARAM_META:
         if section:
             tk.Label(sel_inner, text=section, fg="#00ff88", bg="#080810",
                      font=bold_hd, pady=6, padx=16).grid(
-                row=row_idx, column=0, columnspan=2, sticky="w")
+                row=row_idx, column=0, columnspan=3, sticky="w")
             row_idx += 1
             continue
         var = tk.StringVar()
         _sel_fields[field_key] = var
         tk.Label(sel_inner, text=label, fg="#aaaacc", bg="#080810",
-                 font=mono, anchor="w", width=36).grid(
+                 font=mono, anchor="w", width=30).grid(
             row=row_idx, column=0, sticky="w", padx=(24, 8), pady=2)
         tk.Entry(sel_inner, textvariable=var, bg="#0d0d1a", fg="#ffcc44",
-                 font=mono, width=20, insertbackground="#00ff88").grid(
-            row=row_idx, column=1, sticky="w", pady=2)
+                 font=mono, width=18, insertbackground="#00ff88").grid(
+            row=row_idx, column=1, sticky="w", pady=2, padx=(0, 16))
+        tk.Label(sel_inner, text=desc, fg="#556677", bg="#080810",
+                 font=mono, anchor="w", wraplength=520, justify="left").grid(
+            row=row_idx, column=2, sticky="w", pady=2)
         row_idx += 1
 
     _sel_load()
@@ -1899,41 +1986,94 @@ def run_ui(api: TitanBackend) -> None:
 
     _sb_status_var = tk.StringVar(value="")
 
-    # Per-builder param metadata: (field_key, label, type)
+    # Per-builder param metadata: (field_key, label, type, description)
     # type: "float", "int", "bool", "float_none" (None allowed)
-    _SB_PARAM_META: dict[str, list[tuple[str, str, str]]] = {
+    _SB_PARAM_META: dict[str, list[tuple[str, str, str, str]]] = {
         "consensus_basket": [
-            ("min_elite_confluence",    "Min elite confluence",          "int"),
-            ("max_signal_age_h",        "Max signal age (h)",            "float"),
-            ("price_min",               "Price min",                     "float"),
-            ("price_max",               "Price max",                     "float"),
-            ("min_score",               "Min score",                     "float"),
-            ("max_positions",           "Max positions",                 "int"),
-            ("max_bet_abs",             "Max bet ($)",                   "float"),
-            ("stop_loss_pct",           "Stop loss % (blank = none)",    "float_none"),
-            ("opposition_ratio_block",  "Opposition ratio block",        "float"),
-            ("conviction_portfolio_pct","Conviction portfolio %",        "float"),
+            ("min_elite_confluence",    "Min elite confluence",          "int",
+             "How many distinct elite wallets must have bought the same outcome before a signal fires. "
+             "Default 1 = a single elite is enough. Raise to 2+ to require independent agreement — fewer signals but higher conviction."),
+            ("max_signal_age_h",        "Max signal age (h)",            "float",
+             "Signal is rejected if the most recent elite trade on it is older than this (hours). "
+             "Default 0.5h (30 min). Older trades indicate stale conviction; lower = fresher entries only."),
+            ("price_min",               "Price min",                     "float",
+             "Outcome is skipped if its current price is below this. "
+             "Default 0.20 — below 20¢ the market implies <20% probability, too speculative to copy reliably."),
+            ("price_max",               "Price max",                     "float",
+             "Outcome is skipped if its current price is above this. "
+             "Default 0.72 — above 72¢ the upside is thin and the outcome is near-certain, limiting edge."),
+            ("min_score",               "Min score",                     "float",
+             "Minimum composite signal score (0–100) after all scoring factors are applied. "
+             "Default 50. Signals below this are dropped even if all other gates pass. Raise to filter weaker setups."),
+            ("max_positions",           "Max positions",                 "int",
+             "Maximum simultaneous open positions allowed from this builder. "
+             "Enforced externally by the portfolio manager — once reached, new signals are suppressed until a slot frees up."),
+            ("max_bet_abs",             "Max bet ($)",                   "float",
+             "Hard ceiling on bet size applied inside kelly_bet(). Overrides the global MAX_BET_ABS for this builder. "
+             "Default $1.20 — Consensus Basket uses small bets because the signal relies on a single elite confirmation."),
+            ("stop_loss_pct",           "Stop loss % (blank = none)",    "float_none",
+             "Soft stop loss stored on each signal. Position is exited if it drops this far from entry. "
+             "Default -0.35 (exit at -35%). Leave blank for no stop. Must be negative."),
+            ("opposition_ratio_block",  "Opposition ratio block",        "float",
+             "Signal is rejected if opposite-side elite cash / total elite cash > this ratio. "
+             "Default 0.60 — if 60%+ of smart-money flow is betting against our side, the trade is skipped. Raise to tolerate more disagreement."),
+            ("conviction_portfolio_pct","Conviction portfolio %",        "float",
+             "A wallet trade qualifies as 'large conviction' if it is >= this fraction of the wallet's portfolio AND >= $500. "
+             "Default 0.005 (0.5%). Signals with at least one conviction trade receive a score bonus. Raise to demand larger relative bets."),
         ],
         "recent_form": [
-            ("max_tph",                 "Max trades/hour (HFT filter)",  "float"),
-            ("min_pnl_30d",             "Min PnL 30d ($)",               "float"),
-            ("min_pnl_7d",              "Min PnL 7d ($)",                "float"),
-            ("max_signal_age_h",        "Max signal age (h)",            "float"),
-            ("min_score",               "Min score",                     "float"),
-            ("price_min",               "Price min",                     "float"),
-            ("price_max",               "Price max",                     "float"),
-            ("max_positions",           "Max positions",                 "int"),
-            ("stop_loss_pct",           "Stop loss % (blank = none)",    "float_none"),
+            ("max_tph",                 "Max trades/hour (HFT filter)",  "float",
+             "Wallets with trades-per-hour above this are excluded from Recent Form qualification. "
+             "Default 20 — above this the wallet is effectively HFT and its directional signals are noise. Passed directly to is_recent_form_qualified()."),
+            ("min_pnl_30d",             "Min PnL 30d ($)",               "float",
+             "Wallet must have recent_pnl_30d >= this to qualify. Default 0 = break-even or better over 30 days. "
+             "Raise to require wallets currently on a profitable streak."),
+            ("min_pnl_7d",              "Min PnL 7d ($)",                "float",
+             "Wallet must have recent_pnl_7d >= this. Default -50 allows a small recent drawdown. "
+             "Set to 0 or above to require the wallet to be profitable right now, not just over the month."),
+            ("max_signal_age_h",        "Max signal age (h)",            "float",
+             "Trade older than this (hours) is rejected. Default 0.75h (45 min) — slightly looser than Consensus Basket "
+             "because Recent Form needs fewer wallets and can tolerate slightly older data."),
+            ("min_score",               "Min score",                     "float",
+             "Minimum signal score after all scoring factors. Default 42, intentionally lower than Consensus Basket (50) "
+             "— Recent Form targets emerging wallets whose scores haven't peaked yet."),
+            ("price_min",               "Price min",                     "float",
+             "Outcome skipped if price < this. Default 0.18, slightly looser than Consensus Basket, "
+             "allowing entry on slightly lower-probability outcomes where momentum wallets may have early edge."),
+            ("price_max",               "Price max",                     "float",
+             "Outcome skipped if price > this. Default 0.78, slightly higher than Consensus Basket — "
+             "recent-form wallets sometimes take late high-probability positions that still carry edge."),
+            ("max_positions",           "Max positions",                 "int",
+             "Maximum simultaneous open positions from this builder. Default 4, tighter than Consensus Basket — "
+             "Recent Form signals carry less multi-wallet confirmation so fewer concurrent bets reduces correlated risk."),
+            ("stop_loss_pct",           "Stop loss % (blank = none)",    "float_none",
+             "Stop loss stored on each signal. Default None (no stop). "
+             "Leave blank to hold through volatility; set a negative value (e.g. -0.30) to limit downside on weaker signals."),
         ],
         "drift_discount": [
-            ("min_discount_pct",               "Min discount %",                "float"),
-            ("max_discount_pct",               "Max discount %",                "float"),
-            ("max_signal_age_h",               "Max signal age (h)",            "float"),
-            ("price_min",                      "Price min",                     "float"),
-            ("price_max",                      "Price max",                     "float"),
-            ("max_positions",                  "Max positions",                 "int"),
-            ("require_still_holding_check",    "Require still-holding check",   "bool"),
-            ("stop_loss_pct",                  "Stop loss % (blank = none)",    "float_none"),
+            ("min_discount_pct",        "Min discount %",                "float",
+             "Signal only fires if (whale_entry_price - current_price) / whale_entry_price >= this. "
+             "Default 0.04 — the market must have drifted at least 4 points below the wallet's entry to confirm a real discount."),
+            ("max_discount_pct",        "Max discount %",                "float",
+             "Signal is rejected if the discount exceeds this. Default 0.12 — beyond 12 points the market "
+             "is likely pricing in new negative information; the discount becomes a warning, not an opportunity."),
+            ("max_signal_age_h",        "Max signal age (h)",            "float",
+             "Wallet trade older than this is excluded. Default 6.0h — much looser than other builders because "
+             "a discount opportunity can develop hours after the original entry and still be valid."),
+            ("price_min",               "Price min",                     "float",
+             "Current price (after drift) must be >= this. Default 0.20 — even discounted, below 20¢ is too speculative."),
+            ("price_max",               "Price max",                     "float",
+             "Current price must be <= this. Default 0.72 — if price is still high despite drift the discount is negligible."),
+            ("max_positions",           "Max positions",                 "int",
+             "Maximum simultaneous open positions from this builder. Default 3 — mispricing opportunities are rarer "
+             "than consensus, so fewer slots are needed."),
+            ("require_still_holding_check", "Require still-holding check", "bool",
+             "If True, calls fetch_wallet_sells() to verify the whale hasn't exited since their buy. "
+             "If all tracked wallets have sold, the signal is rejected. Partial exits are removed from scoring. "
+             "Disable (False) only to skip the API call if latency is a concern — the signal becomes much riskier."),
+            ("stop_loss_pct",           "Stop loss % (blank = none)",    "float_none",
+             "Stop loss stored on each signal. Default None — Drift Discount positions are held longer by design "
+             "and a stop could trigger on normal volatility before the discount closes. Set only if you want a hard floor."),
         ],
     }
 
@@ -1956,7 +2096,7 @@ def run_ui(api: TitanBackend) -> None:
             for bid in _SB_IDS:
                 _sb_enabled_vars[bid].set(bid in active_builders)
                 params = builders_cfg.get(bid, {})
-                for field_key, _, _ in _SB_PARAM_META.get(bid, []):
+                for field_key, _, _, _ in _SB_PARAM_META.get(bid, []):
                     var = _sb_fields[bid].get(field_key)
                     if var is None:
                         continue
@@ -1983,7 +2123,7 @@ def run_ui(api: TitanBackend) -> None:
                     sb["builders"][bid] = {}
                 target = sb["builders"][bid]
                 target["enabled"] = _sb_enabled_vars[bid].get()
-                for field_key, _, ftype in _SB_PARAM_META.get(bid, []):
+                for field_key, _, ftype, _ in _SB_PARAM_META.get(bid, []):
                     var = _sb_fields[bid].get(field_key)
                     if var is None:
                         continue
@@ -2051,17 +2191,20 @@ def run_ui(api: TitanBackend) -> None:
         _sb_builder_frames[bid] = frm
         tk.Label(frm, text=f"── {_SB_LABELS[bid]} parameters ──",
                  fg="#00ff88", bg="#080810", font=bold_hd, pady=8, padx=16).grid(
-            row=0, column=0, columnspan=2, sticky="w")
+            row=0, column=0, columnspan=3, sticky="w")
         row_idx = 1
-        for field_key, label, _ in _SB_PARAM_META.get(bid, []):
+        for field_key, label, _, desc in _SB_PARAM_META.get(bid, []):
             var = tk.StringVar()
             _sb_fields[bid][field_key] = var
             tk.Label(frm, text=label, fg="#aaaacc", bg="#080810",
-                     font=mono, anchor="w", width=36).grid(
+                     font=mono, anchor="w", width=30).grid(
                 row=row_idx, column=0, sticky="w", padx=(24, 8), pady=2)
             tk.Entry(frm, textvariable=var, bg="#0d0d1a", fg="#ffcc44",
-                     font=mono, width=20, insertbackground="#00ff88").grid(
-                row=row_idx, column=1, sticky="w", pady=2)
+                     font=mono, width=18, insertbackground="#00ff88").grid(
+                row=row_idx, column=1, sticky="w", pady=2, padx=(0, 16))
+            tk.Label(frm, text=desc, fg="#556677", bg="#080810",
+                     font=mono, anchor="w", wraplength=520, justify="left").grid(
+                row=row_idx, column=2, sticky="w", pady=2)
             row_idx += 1
 
     _sb_show_builder("consensus_basket")
@@ -2070,7 +2213,7 @@ def run_ui(api: TitanBackend) -> None:
     # ── Tab order ─────────────────────────────────────────────────────────────
     nb.add(tab_selector,  text="  🎯 SELECTOR  ")
     nb.add(tab_wallets,   text="  🐳 WALLETS  ")
-    nb.add(tab_sb,        text="  🔨 BUILDERS  ")
+    nb.add(tab_sb,        text="  🔨 SIGN. CRAFT  ")
     nb.add(tab_live,      text="  📡 SIGNALS  ")
     nb.add(tab_alerts,    text="  🚨 ALERTS  ")
     nb.add(tab_positions, text="  📋 POSITIONS  ")
@@ -2983,7 +3126,10 @@ def run_ui(api: TitanBackend) -> None:
                 pnl_usd = pos.pnl_usdc
                 pnl_pct = pos.pnl_pct or ((exit_p - entry) / max(entry, 0.001) * 100)
                 hold_min  = (pos.exit_ts - pos.entry_ts) / 60 if pos.exit_ts and pos.entry_ts else 0.0
-                whale_str = ", ".join(pos.whale_names[:2])
+                whale_str = ", ".join(
+                    _wallet_cache().get(w, {}).get("name", w[:10] + "…")
+                    for w in pos.elite_wallets[:2]
+                )
                 tag       = "CLOSED_WIN" if pnl_usd >= 0 else "CLOSED_LOSS"
                 reason    = pos.reason or "CLOSED"
                 iid = pos_tree.insert("", "end", values=(
@@ -3093,7 +3239,7 @@ def run_ui(api: TitanBackend) -> None:
             elif p.get("score", 0) >= 0.4: tag = "PAR"
             else:                          tag = "REJ"
     
-            in_watch = False
+            in_watch = bool(p.get("watchable"))
             status = ("🔥 ELITE"  if p.get("elite") else
                       "✅ VER"    if p.get("verified") else
                       "👁 WATCH"  if in_watch else "❌")

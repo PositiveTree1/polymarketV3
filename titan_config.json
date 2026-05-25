@@ -669,7 +669,14 @@
     "active_selector": "performance",
     "selectors": {
       "performance": {
+        "discovery_use_large_trades": true,
+        "discovery_large_trade_limit": 200,
         "min_trade_cash_discovery": 5000.0,
+        "discovery_trade_side": "BUY",
+        "discovery_use_leaderboard": true,
+        "discovery_leaderboard_limit": 100,
+        "discovery_leaderboard_category": "OVERALL",
+        "discovery_leaderboard_order_by": "PNL",
         "leaderboard_periods": [
           "ALL",
           "MONTH",

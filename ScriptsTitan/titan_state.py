@@ -86,7 +86,6 @@ class WalletEnv:
         self.wallet_cache:        dict[str, "WalletProfile"]            = {}
         self.SYSTEM_LOGS:         list[str]                             = load_logs_from_disk()
         self.logged_signals:      dict[str, float]                      = {}
-        self.watchlist:           set[str]                              = set(w.lower() for w in SEED_WATCHLIST)
         self.cycle_count:         int                                    = 0
         self.active_signal_cids:  dict[str, set[str]]                   = {}
         self.LAST_SIGNALS:        list["Signal"]                        = []
@@ -112,12 +111,18 @@ _wallet.wallet_cache = _shared_wallet_cache
 _http_trace_lock = threading.Lock()
 _recent_http_traces = deque(maxlen=400)
 
+
 # Compatibility shim: engine code that calls S.wallets[i] or S.env()
 wallets    = [_wallet]   # single-element list — legacy code still works
 active_idx = 0
 
 def env() -> WalletEnv:
     return _wallet
+
+
+def get_watchlist() -> list[str]:
+    """Return addresses currently marked watchable=True in wallet_cache."""
+    return [w for w, p in _shared_wallet_cache.items() if p.get("watchable")]
 
 def __getattr__(name):
     if hasattr(_wallet, name):

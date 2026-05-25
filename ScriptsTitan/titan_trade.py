@@ -24,7 +24,7 @@ class TradeRecord:
     is_conviction:        bool = False
     market_url:           str = ""
     elite_wallets:        list[str] = field(default_factory=list)
-    whale_names:          list[str] = field(default_factory=list)
+    wallet_names:         list[str] = field(default_factory=list)
     whale_buy_cash:       dict[str, float] = field(default_factory=dict)
     slug:                 str = ""
     event_slug:           str = ""
@@ -86,7 +86,7 @@ class TradeRecord:
             is_conviction=bool(value.get("is_conviction") or False),
             market_url=str(value.get("market_url") or ""),
             elite_wallets=[str(item) for item in value.get("elite_wallets", []) if isinstance(value.get("elite_wallets", []), list)],
-            whale_names=[str(item) for item in value.get("whale_names", []) if isinstance(value.get("whale_names", []), list)],
+            wallet_names=[str(item) for item in value.get("wallet_names", []) if isinstance(value.get("wallet_names", []), list)],
             whale_buy_cash=whale_buy_cash,
             slug=str(value.get("slug") or ""),
             event_slug=str(value.get("event_slug") or ""),

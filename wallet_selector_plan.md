@@ -9,7 +9,7 @@
 | 2 | Implement `PerformanceSelectorParams` dataclass | ✅ Done |
 | 2 | Implement `PerformanceSelector.discover()` | ✅ Done |
 | 2 | Implement `PerformanceSelector.score()` + `is_selected()` | ✅ Done |
-| 3 | Wire `titan_wallet.py` — `fetch_wallet` delegates score/tier to selector | ✅ Done |
+| 3 | Wire `titan_wallet.py` — `get_compute_and_store_wallet` delegates score/tier to selector | ✅ Done |
 | 3 | Wire `titan_wallet.py` — `discover_new_wallets` delegates to `selector.discover()` | ✅ Done |
 | 3 | Wire `titan_engine.py` — call `discover_new_wallets` | ✅ Done |
 | 3 | Wire `titan_market.py` — read tier from `WalletProfile` (no change needed; tier flags unchanged) | ✅ Done |
@@ -31,13 +31,13 @@ Cleanly separate the logic that identifies "wallets of interest" from the rest o
 ## Current Architecture (Problem)
 
 ```
-titan_wallet.py → discover_new_whales() / fetch_wallet()
+titan_wallet.py → discover_new_whales() / get_compute_and_store_wallet()
 titan_market.py → _poll_vip_and_elite() / _poll_watchlist()
 titan_signals.py → filters wallets inline per strategy
 titan_config.json → thresholds scattered throughout
 ```
 
-- Selection logic is embedded inside `titan_wallet.py` (`fetch_wallet`, `discover_new_whales`)
+- Selection logic is embedded inside `titan_wallet.py` (`get_compute_and_store_wallet`, `discover_new_whales`)
 - Parameters are mixed into `titan_config.json` without clear ownership
 - Signal strategies re-filter wallets locally instead of consuming a clean "selected wallet" result
 - The name "whale" implies large capital — wrong for all future selectors
@@ -63,7 +63,7 @@ Signals + Reporting
 | `whale` / `WhaleDict` | `tracked_wallet` / `TrackedWallet` |
 | `get_whales()` | `get_tracked_wallets()` |
 | `discover_new_whales()` | `discover_candidates()` |
-| `fetch_wallet()` (qualification) | moved into selector |
+| `get_compute_and_store_wallet()` (qualification) | moved into selector |
 | `ELITE`, `VIP`, `WATCHLIST` tiers | selectors own their tier semantics |
 
 ---
@@ -107,7 +107,7 @@ Parameters for each selector live in their own `@dataclass`, loaded from the sel
 
 ### 2. First concrete selector: `PerformanceSelector`
 
-This replaces the current `fetch_wallet` tiering logic (WATCHABLE → VERIFIED → ELITE).
+This replaces the current `get_compute_and_store_wallet` tiering logic (WATCHABLE → VERIFIED → ELITE).
 
 ```python
 @dataclass
@@ -249,10 +249,10 @@ Switching selector in the dropdown:
 ### Phase 2 — PerformanceSelector
 4. Implement `PerformanceSelectorParams` dataclass (all current thresholds)
 5. Implement `PerformanceSelector.discover()` — wraps current `discover_new_whales`
-6. Implement `PerformanceSelector.score()` + `is_selected()` — wraps current `fetch_wallet` tiering
+6. Implement `PerformanceSelector.score()` + `is_selected()` — wraps current `get_compute_and_store_wallet` tiering
 
 ### Phase 3 — Wire into the pipeline
-7. In `titan_wallet.py`: replace direct calls to `discover_new_whales` / `fetch_wallet` with `active_selector.discover()` + `active_selector.is_selected()`
+7. In `titan_wallet.py`: replace direct calls to `discover_new_whales` / `get_compute_and_store_wallet` with `active_selector.discover()` + `active_selector.is_selected()`
 8. In `titan_market.py`: polling tier decisions (`_poll_vip_and_elite`, `_poll_watchlist`) read from `TrackedWallet` tier field set by selector, not hardcoded logic
 9. In `titan_signals.py`: strategies consume `TrackedWallet` objects; wallet-level filtering criteria come from `TrackedWallet.tier`, not re-implemented inline
 

@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from titan_signals import Signal
     from titan_trade import TradeRecord
     from titan_market import Market
+    from titan_wallet import WalletProfile
 
 _DB_PATH: str = ""
 def init_db(db_path: str) -> None:
@@ -128,14 +129,14 @@ def init_db(db_path: str) -> None:
         _migrate_add_columns(cx)
         _migrate_price_history_table(cx)
         scanned_rows, updated_rows = _migrate_strip_signal_embedded_market_data(cx)
-    cleanup_line = f"Signal cleanup: scanned={scanned_rows} updated={updated_rows}"
-    print(cleanup_line)
-    try:
-        import titan_state as S
-
-        S._log(cleanup_line, "INFO")
-    except Exception:
-        pass
+    if updated_rows:
+        cleanup_line = f"Signal cleanup: scanned={scanned_rows} updated={updated_rows}"
+        print(cleanup_line)
+        try:
+            import titan_state as S
+            S._log(cleanup_line, "INFO")
+        except Exception:
+            pass
 
 
 @contextmanager
@@ -235,6 +236,12 @@ def _migrate_ts_columns(cx: sqlite3.Connection) -> None:
 
 
 def _migrate_add_columns(cx: sqlite3.Connection) -> None:
+    wl_cols = {row[1] for row in cx.execute("PRAGMA table_info(watchlist)").fetchall()}
+    if "watchable" not in wl_cols:
+        cx.execute("ALTER TABLE watchlist ADD COLUMN watchable INTEGER NOT NULL DEFAULT 1")
+    if "profile_json" not in wl_cols:
+        cx.execute("ALTER TABLE watchlist ADD COLUMN profile_json TEXT")
+
     existing = {row[1] for row in cx.execute("PRAGMA table_info(trade_history)").fetchall()}
     if "asset" not in existing:
         cx.execute("ALTER TABLE trade_history ADD COLUMN asset TEXT")
@@ -466,35 +473,68 @@ def load_equity_history(limit: int = 4000) -> list[tuple[float, float]]:
 
 # ── watchlist ────────────────────────────────────────────────────────────────
 
-def upsert_watchlist(addresses: set[str]) -> None:
-    """Add new addresses; existing ones are ignored (INSERT OR IGNORE)."""
-    if not addresses or not _DB_PATH:
+
+def upsert_wallet_profile(addr: str, profile: "WalletProfile") -> None:
+    if not _DB_PATH:
         return
     now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    rows = [(addr.lower(), now) for addr in addresses]
+    watchable = 1 if profile.get("watchable") or profile.get("verified") else 0
+    blob = json.dumps({k: v for k, v in profile.items() if k != "ts"})
     with _connect() as cx:
-        cx.executemany(
-            "INSERT OR IGNORE INTO watchlist (address, added_at) VALUES (?, ?)",
-            rows,
+        cx.execute(
+            """
+            INSERT INTO watchlist (address, added_at, watchable, profile_json)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(address) DO UPDATE SET
+                watchable    = excluded.watchable,
+                profile_json = excluded.profile_json
+            """,
+            (addr.lower(), now, watchable, blob),
         )
 
 
-def load_watchlist() -> set[str]:
-    """Return the full set of watched addresses."""
+def load_watchable_wallets(limit: int) -> "dict[str, WalletProfile | None]":
+    """Return watchable=1 addresses up to limit, ordered by score DESC.
+    Value is a WalletProfile if profile_json exists, else None (address known but not yet scored).
+    """
     if not _DB_PATH:
-        return set()
+        return {}
+    import time as _time
+    now_t = _time.time()
+    stale_ts = now_t - 600 + 60  # re-score soon after load
     with _connect() as cx:
-        rows = cx.execute("SELECT address FROM watchlist").fetchall()
-    return {r[0] for r in rows}
+        rows = cx.execute(
+            """
+            SELECT address, profile_json
+            FROM watchlist
+            WHERE watchable=1
+            ORDER BY COALESCE(json_extract(profile_json, '$.score'), 0) DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    result: dict[str, WalletProfile | None] = {}
+    for addr, blob in rows:
+        if blob:
+            try:
+                profile = json.loads(blob)
+                profile["ts"] = stale_ts
+                result[addr] = profile
+            except Exception:
+                result[addr] = None
+        else:
+            result[addr] = None
+    return result
 
 
-def remove_from_watchlist(addresses: set[str]) -> None:
-    if not addresses or not _DB_PATH:
+def set_watchable(addr: str, flag: bool) -> None:
+    if not _DB_PATH:
         return
+    now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     with _connect() as cx:
-        cx.executemany(
-            "DELETE FROM watchlist WHERE address = ?",
-            [(addr.lower(),) for addr in addresses],
+        cx.execute(
+            "INSERT INTO watchlist (address, added_at, watchable) VALUES (?, ?, ?) ON CONFLICT(address) DO UPDATE SET watchable=excluded.watchable",
+            (addr.lower(), now, 1 if flag else 0),
         )
 
 
@@ -786,7 +826,7 @@ def _row_to_trade(row: sqlite3.Row, wallets: list[dict], audits: list[dict]) -> 
 
     ts_value = row_data.get("ts")
     elite_wallets = [str(wallet["wallet"]) for wallet in wallets]
-    whale_names = [str(wallet["name"]) for wallet in wallets if wallet.get("name")]
+    wallet_names = [str(wallet["name"]) for wallet in wallets if wallet.get("name")]
     whale_buy_cash = {
         str(wallet["wallet"]): float(wallet["cash"])
         for wallet in wallets
@@ -817,7 +857,7 @@ def _row_to_trade(row: sqlite3.Row, wallets: list[dict], audits: list[dict]) -> 
         is_conviction=bool(row_data.get("is_conviction")),
         market_url=_as_str(row_data.get("market_url")),
         elite_wallets=elite_wallets,
-        whale_names=whale_names,
+        wallet_names=wallet_names,
         whale_buy_cash=whale_buy_cash,
     )
 
@@ -854,7 +894,7 @@ def append_trade(trade: TradeRecord) -> None:
         trade_id = cur.lastrowid
 
         wallets = trade.elite_wallets
-        names = trade.whale_names
+        names = trade.wallet_names
         cash_map = trade.whale_buy_cash
         wallet_rows = [
             (trade_id, w, names[i] if i < len(names) else None, cash_map.get(w))

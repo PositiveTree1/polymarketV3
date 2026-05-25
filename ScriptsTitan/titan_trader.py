@@ -281,7 +281,7 @@ def _build_entry_audit(sig: Signal, cur: float, shares: float, bet: float, ev_in
             "conviction_detail": sig.conviction_detail,
             "exits_detected": list(sig.exits_detected),
             "elite_wallets": list(sig.elite_ver.keys()),
-            "whale_names": list(sig.names),
+            "wallet_names": list(sig.names),
             "elite_trades": _compact_elite_trade_snapshot(sig.elite_ver),
         },
         "market_snapshot": _compact_market_snapshot(
@@ -615,7 +615,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             strategy=pos.strategy,
             elite_wallets=pos.elite_wallets,
             whale_buy_cash=pos.whale_buy_cash,
-            whale_names=[
+            wallet_names=[
                 S.env().wallet_cache.get(w, {}).get("name", w[:10]+"…")
                 for w in pos.elite_wallets[:3]
             ],
@@ -638,7 +638,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         record_whale_trade_performance(pos.elite_wallets, pnl_usdc_net, won=(pnl_usdc_net >= 0))
 
         emoji = "✅" if pnl_usdc_net >= 0 else "❌"
-        whale_str = ", ".join(trade_record.whale_names)
+        whale_str = ", ".join(trade_record.wallet_names)
         strat_tag = pos.strategy[:2].upper()
         events.append((
             "CLOSE",
@@ -847,7 +847,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             strategy=strat,
             stop_loss_pct=sig_stop_loss,
             elite_wallets=elite_wallet_addrs,
-            whale_names=elite_names,
+            wallet_names=elite_names,
             whale_buy_cash=whale_buy_cash,
             avg_entry=sig.avg_entry,
             score=sig.score,

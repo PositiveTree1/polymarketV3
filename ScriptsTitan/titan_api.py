@@ -113,7 +113,7 @@ class TitanAPI:
             "uptime_s": round(time.time() - self._start_time, 1) if self._start_time else None,
             "last_cycle_at": last_cycle_at,
             "open_positions": len(env.open_positions),
-            "watchlist_size": len(env.watchlist),
+            "watchlist_size": len(_TS.get_watchlist()),
             "recent_error_count": recent_errors,
             "auth_enabled": False,
         }
@@ -159,7 +159,7 @@ class TitanAPI:
         return positions[:limit]
 
     @mcp_tool(
-        description="Returns current whale-triggered trading signals with confidence scores.",
+        description="Returns current wallet-triggered trading signals with confidence scores.",
         input_schema={"min_score": {"type": "number", "description": "Minimum signal score filter. Typical range 0–100 (integer-like values such as 78 or 81 are normal)."}},
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
@@ -230,7 +230,7 @@ class TitanAPI:
             "equity_history": env.equity_history[-2000:] if env.equity_history else [],
             "cooldown_cids": dict(env.cooldown_cids),
             "active_market_cids": list(env.active_market_cids),
-            "watchlist_size": len(env.watchlist),
+            "watchlist_size": len(_TS.get_watchlist()),
         }
 
     @mcp_tool("Return aggregated trade statistics (win rate, PnL, etc.)")
@@ -275,7 +275,7 @@ class TitanAPI:
             "session_pnl": round(env.session_pnl, 4),
             "total_pnl": round(env.paper_bankroll - BANKROLL_START, 4),
             "open_positions": len(env.open_positions),
-            "watchlist_size": len(env.watchlist),
+            "watchlist_size": len(_TS.get_watchlist()),
             "cycle_count": env.cycle_count,
             "recent_error_count": recent_errors,
         }
@@ -556,7 +556,7 @@ class TitanAPI:
             f"  Bank=${br:.4f}  Start=${BANKROLL_START:.2f}  "
             f"SessionPnL=${_w().session_pnl:+.4f}  TotalPnL=${br - BANKROLL_START:+.4f}",
             f"  Cycles={_w().cycle_count}  OpenPos={len(_w().open_positions)}  "
-            f"Cooldowns={len(_w().cooldown_cids)}  Watchlist={len(_w().watchlist)}  "
+            f"Cooldowns={len(_w().cooldown_cids)}  Watchlist={len(_TS.get_watchlist())}  "
             f"Elites={sum(1 for p in _w().wallet_cache.values() if p.get('elite'))}",
             f"  Trades={st.sell_count}({st.win_count}W/{st.loss_count}L) WR={st.win_rate*100:.0f}%",
             "",
@@ -620,12 +620,12 @@ class TitanAPI:
             typ     = t.type or "?"
             icon    = "BUY" if typ == "BUY" else ("WIN" if (t.pnl_usdc or 0) >= 0 else "LOSS")
             pnl_str = f" PnL=${(t.pnl_usdc or 0):+.4f}({(t.pnl_pct or 0):+.1f}%)" if typ == "SELL" else ""
-            whale_str = ",".join(t.whale_names[:2]) or "?"
+            wallet_str = ",".join(t.wallet_names[:2]) or "?"
             lines.append(
                 f"  [{icon}|{t.tier or '?'}] {t.ts_str or '?'} "
                 f"{t.title[:40]} [{t.outcome}] "
                 f"Price=${t.price:.4f} Bet=${t.bet:.2f}"
-                f"{pnl_str} via={whale_str}"
+                f"{pnl_str} via={wallet_str}"
             )
         if not recent_trades:
             lines.append("  (no trades yet)")
@@ -657,7 +657,7 @@ class TitanAPI:
             f"  Cycle Count     : {_w().cycle_count}",
             f"  Open Positions  : {len(_w().open_positions)}",
             f"  Cooldowns       : {len(_w().cooldown_cids)}",
-            f"  Watchlist       : {len(_w().watchlist)}",
+            f"  Watchlist       : {len(_TS.get_watchlist())}",
             f"  Elite Count     : {sum(1 for p in _w().wallet_cache.values() if p.get('elite'))}",
             "└─────────────────────────────────────────────────────────────────────┘", "",
         ]
@@ -726,7 +726,7 @@ class TitanAPI:
             typ  = t.type or "?"
             icon = "🛒" if typ == "BUY" else ("✅" if (t.pnl_usdc or 0) >= 0 else "❌")
             pnl_str = f"P&L ${(t.pnl_usdc or 0):+.4f} ({(t.pnl_pct or 0):+.1f}%)" if typ == "SELL" else ""
-            whale_str = ", ".join(t.whale_names[:2]) or "?"
+            whale_str = ", ".join(t.wallet_names[:2]) or "?"
             lines.append(
                 f"  {icon} {t.ts_str or '?'}  {typ:<4}  [{t.tier or '?'}]  "
                 f"{t.title[:36]}  [{t.outcome}]"

@@ -121,7 +121,7 @@ class Market:
 
 
 from titan_config import *
-from titan_wallet import WalletProfile, fetch_wallet, get_elite_wallets, is_hft_wallet
+from titan_wallet import WalletProfile, get_compute_and_store_wallet, get_elite_wallets, is_hft_wallet
 
 _SPORTS_KEYWORDS = (
     "vs", "spread", "o/u", "over", "under", "winner", "set ", "game ",
@@ -875,7 +875,7 @@ def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list[WhaleObse
     for wallet in sorted(all_to_poll):
         prof: WalletProfile = next(
             (e.wallet_cache[wallet] for e in S.wallets if wallet in e.wallet_cache),
-            fetch_wallet(wallet),
+            get_compute_and_store_wallet(wallet),
         )
         is_elite = prof.get("elite", False)
         hft      = is_hft_wallet(prof)
@@ -910,20 +910,18 @@ def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list[WhaleObse
 # ─────────────────────────────────────────────────────────────────────────────
 def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) -> list[WhaleObservation]:
     candidates = set()
-    for e in S.wallets:
-        for w in e.watchlist:
-            if w not in already_polled and e.wallet_cache.get(w, {}).get("verified"):
-                candidates.add(w)
+    e = S.env()
+    for w in S.get_watchlist():
+        prof = e.wallet_cache.get(w)
+        if w not in already_polled and prof is not None and prof["verified"]:
+            candidates.add(w)
     candidates = list(candidates)[:50]
 
     results : list[WhaleObservation] = []
+    cache = S.env().wallet_cache
     for wallet in candidates:
-        prof = {}
-        for e in S.wallets:
-            if wallet in e.wallet_cache:
-                prof = e.wallet_cache[wallet]
-                break
-        avg_bet = prof.get("avg_bet", 0)
+        prof = cache.get(wallet)
+        avg_bet = prof["avg_bet"] if prof is not None else 0
         trades : list[WhaleObservation]  = _poll_wallet_trades(
             wallet, 100, max(50.0, float(MIN_TRADE_CASH)),
             hot_cutoff, warm_cutoff, "watchlist_poll",
