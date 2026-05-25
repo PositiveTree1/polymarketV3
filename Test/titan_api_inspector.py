@@ -519,7 +519,7 @@ def step5_wallet_activity_redeems(wallets):
 def step6_wallet_activity_sells(wallets):
     print("\n" + "═"*60)
     print("STEP 6 — Wallet activity: SELLs (exit detection)")
-    print("  mirrors: titan_signals.check_wallet_exist() and whale_still_holding()")
+    print("  mirrors: titan_signals.check_wallet_exist()")
     print("═"*60)
 
     step_data = {}
@@ -697,7 +697,7 @@ def step8_market_data(trades):
 def step9_whale_exit_check(trades):
     print("\n" + "═"*60)
     print("STEP 9 — Whale exit / still-holding check")
-    print("  mirrors: titan_signals.check_wallet_exist() + whale_still_holding()")
+    print("  mirrors: titan_signals.check_wallet_exist() ")
     print("═"*60)
 
     cids_by_wallet = {}

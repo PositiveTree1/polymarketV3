@@ -2,6 +2,7 @@
 
 > Use this file to bootstrap a new AI session without re-explaining the project.
 > Entry point: `run_titan.py` | Version: v10 Multi-Strategy | Mode: Single Wallet (paper trading)
+> Single-wallet instance: `_wallet = WalletEnv()` in `titan_state.py`. Shared cache: `_shared_wallet_cache` (assigned to `_wallet.wallet_cache`). No separate watchlist object — "watchable" is a boolean flag on `WalletProfile`; `get_watchlist()` filters the cache.
 
 ---
 
@@ -20,7 +21,8 @@ Polymarket API
 Wallet Selector Classes          ← fetch, score, and classify wallets
       │
       ▼
-List of Selected Wallets         ← elite / verified / watchlist / HFT tiers
+List of Selected Wallets         ← elite / verified / HFT tiers
+                                   (watchable = flag on WalletProfile, not a separate object)
       │
       ▼
 Signal Builder Classes           ← build signals from selected wallets' trades
@@ -48,7 +50,7 @@ Accounting                       ← P&L, equity curve, win rate, expectancy
 | `run_titan.py` | CLI entry point (ui / server / client modes) |
 | `ScriptsTitan/titan_api.py` | Orchestrates trader, market data, signals, telegram |
 | `ScriptsTitan/titan_engine.py` | Core trading loop. Calls all other modules. |
-| `ScriptsTitan/titan_state.py` | Shared mutable state (open positions, bankroll, trade history, logs) |
+| `ScriptsTitan/titan_state.py` | Single `WalletEnv` instance (`_wallet`), shared `_shared_wallet_cache`, open positions, bankroll, trade history, logs |
 | `ScriptsTitan/titan_config.py` | Loads `titan_config.json`; hot-reload supported |
 | `ScriptsTitan/titan_selector.py` | **Wallet Selector** — fetches, scores, classifies wallets from Polymarket API |
 | `ScriptsTitan/titan_wallet.py` | Wallet balance, addresses, trade history integration |
@@ -97,12 +99,14 @@ Accounting                       ← P&L, equity curve, win rate, expectancy
 
 ## Wallet Selector — Classification Tiers
 
-| Tier | Criteria |
+Tiers are boolean flags on `WalletProfile` stored in `_shared_wallet_cache`. There is no separate watchlist object — `get_watchlist()` filters the cache for `watchable=True`.
+
+| Flag | Criteria |
 |---|---|
-| **ELITE** | High score, min PnL, min resolved bets, min win rate, min portfolio value |
-| **Verified** | Lower thresholds than elite, still trusted |
-| **Watchlist** | Being monitored, not yet confirmed |
-| **HFT** | High trades-per-hour (≥100 TPH), different signal path |
+| `elite` | High score, min PnL, min resolved bets, min win rate, min portfolio value |
+| `verified` | Lower thresholds than elite, still trusted |
+| `watchable` | Being monitored, not yet confirmed (replaces old Watchlist concept) |
+| `hft` | High trades-per-hour (≥100 TPH), different signal path |
 
 Wallet score is based on: win rate, Wilson lower bound, total PnL, avg bet size, portfolio size, resolved bets count.
 
@@ -149,7 +153,7 @@ Three builders run in parallel via `build_signals()`, each implemented as a `Sig
 
 Each builder owns a typed `@dataclass` of parameters (`RecentFormParams`, `DriftDiscountParams`, `ConsensusBasketParams`). Active builders are configured via `signal_builders.active_builders` in `titan_config.json`. The `build_signals()` dispatcher iterates `C.get_active_builders()` — adding a new strategy requires only a new `SignalBuilderBase` subclass; no changes to the dispatcher.
 
-The underlying `_build_*` functions remain in `titan_signals.py` as private helpers; builders call them with their typed params injected. Builder params are editable at runtime from the **Signal Builders** tab (Tab 12) in the UI — changes hot-reload on the next cycle.
+The underlying `_build_*` functions remain in `titan_signals.py` as private helpers; builders call them with their typed params injected. Builder params are editable at runtime from the **🔨 SIGN. CRAFT** tab in the UI — changes hot-reload on the next cycle.
 
 ---
 
@@ -204,18 +208,21 @@ Displayed in the **P&L tab** of the UI (equity curve chart + stats grid + trade 
 
 ## UI Tabs
 
+Tabs in order as shown in the notebook:
+
 | Tab | Content |
 |---|---|
-| SIGNALS | Live treeview of all signals this cycle. Score, drift, wallet count, mode. |
-| ALERTS | Formatted detail for tradeable signals (ALERT/STRONG/HFT/CONVICTION). Auto-buy status shown. |
-| POSITIONS | Open paper positions. Live P&L, hold time, wallet source. Double-click for detail popup. |
-| P&L | Equity curve graph. Stats grid (total PnL, win rate, expectancy). Trade history table. |
-| WALLETS | Selected wallet roster with score, WR, Wilson LB, PnL, TPH. Filterable by tier. |
-| ANALYSIS | Cycle summary: signal counts by tier, elite roster, account stats. |
-| DIAG | Rejections (why signals were blocked), cooldowns, failed wallet scores. |
-| LOG | Full system log. "Copy Snapshot for AI" button copies entire state as text. |
-| CONFIG | JSON editor for `titan_config.json`. Save & hot-reload. Guide panel on right. |
-| SIGNAL BUILDERS | Per-builder parameter editor. Dropdown selects builder; Apply hot-reloads config and rebuilds builder instances. |
+| 🎯 SELECTOR | Wallet selector parameter editor. Live-reload selector config; shows selector tier thresholds. |
+| 🐳 WALLETS | Selected wallet roster with score, WR, Wilson LB, PnL, TPH. Filterable by tier. |
+| 🔨 SIGN. CRAFT | Signal builder parameter editor. Active builder checkboxes; per-builder param grids; Apply hot-reloads config. |
+| 📡 SIGNALS | Live treeview of all signals this cycle. Score, drift, wallet count, mode. |
+| 🚨 ALERTS | Formatted detail for tradeable signals (ALERT/STRONG/HFT/CONVICTION). Auto-buy status shown. |
+| 📋 POSITIONS | Open paper positions. Live P&L, hold time, wallet source. Double-click for detail popup. |
+| 📈 P&L | Equity curve graph. Stats grid (total PnL, win rate, expectancy). Trade history table. |
+| 📊 ANALYSIS | Cycle summary: signal counts by tier, elite roster, account stats. |
+| 🔍 DIAG | Rejections (why signals were blocked), cooldowns, failed wallet scores. |
+| 📜 LOG | Full system log. "Copy Snapshot for AI" button copies entire state as text. |
+| ⚙ CONFIG | JSON editor for `titan_config.json`. Save & hot-reload. Guide panel on right. |
 
 ---
 

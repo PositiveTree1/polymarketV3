@@ -101,19 +101,12 @@ def _load_trading_state() -> dict[str, int]:
 
         recovery_info["watchlist"] = len(S.get_watchlist())
 
-        json_trades = state.get("trade_history", [])
-        if json_trades and DB.get_trade_count() == 0:
-            DB.bulk_insert_trades(json_trades)
-            S._log(f"📂 Trade history migrated from JSON: {len(json_trades)} records", "INFO")
-
         loaded_stats = DB.load_trade_stats()
         if loaded_stats is not None:
             env.trade_stats = cast(S.TradeStats, loaded_stats)
         else:
             _rebuild_trade_stats(env)
             DB.upsert_trade_stats(env.trade_stats)
-
-        _migrate_null_cid_trades(state)
 
         from titan_position import group_trades_by_position, build_position_from_trades
         all_trades = DB.load_trade_history(limit=5000)
@@ -204,54 +197,6 @@ def _rebuild_equity_from_trades(env):
     )
 
 
-def _migrate_null_cid_trades(state: dict) -> None:
-    """Repair corrupt cids in trade_history using two sources of truth:
-    1. JSON open_positions: authority for open BUY cids (matched by title+outcome).
-    2. Consistency: if a SELL's cid doesn't match any BUY with the same title+outcome, null it out.
-    """
-    import sqlite3
-    with sqlite3.connect(STATE_DB) as cx:
-        rows = cx.execute("SELECT id, type, title, outcome, cid FROM trade_history").fetchall()
-
-        # Build title+outcome -> set of cids seen on BUY trades
-        buy_cids: dict[tuple[str, str], set[str]] = {}
-        for _, typ, title, outcome, cid in rows:
-            if typ == "BUY" and cid:
-                buy_cids.setdefault((title or "", outcome or ""), set()).add(cid)
-
-        # Override with JSON open_positions as definitive source for open BUYs
-        json_authority: dict[tuple[str, str], dict] = {}
-        for d in state.get("open_positions", {}).values():
-            cid = str(d.get("cid") or "")
-            if not cid:
-                continue
-            key = (str(d.get("title") or ""), str(d.get("outcome") or ""))
-            json_authority[key] = {
-                "cid":        cid,
-                "asset":      str(d.get("asset") or ""),
-                "slug":       str(d.get("slug") or ""),
-                "event_slug": str(d.get("event_slug") or ""),
-                "market_url": str(d.get("market_url") or ""),
-            }
-            buy_cids[key] = {cid}
-
-        updated = 0
-        for row_id, typ, title, outcome, db_cid in rows:
-            key = (title or "", outcome or "")
-            info = json_authority.get(key)
-            if info and db_cid != info["cid"]:
-                cx.execute(
-                    "UPDATE trade_history SET cid=?, asset=?, slug=?, event_slug=?, market_url=? WHERE id=?",
-                    (info["cid"], info["asset"], info["slug"], info["event_slug"], info["market_url"], row_id),
-                )
-                updated += 1
-            elif typ == "SELL" and db_cid and db_cid not in (buy_cids.get(key) or set()):
-                # SELL cid points to a different market — corrupt, detach it
-                cx.execute("UPDATE trade_history SET cid=NULL WHERE id=?", (row_id,))
-                updated += 1
-
-    if updated:
-        S._log(f"📂 Migrated {updated} trade record(s): repaired cids from JSON+consistency check", "INFO")
 
 
 def _make_stub(addr: str, detail: str) -> "WalletProfile":

@@ -2842,6 +2842,15 @@ def run_ui(api: TitanBackend) -> None:
                   font=mono9, padx=10, command=open_properties).pack(side="left", padx=4)
 
         price_history: list[tuple[float, float]] = list(signal.price_history or [])
+        oldest_ts = float(signal.oldest_ts or 0.0)
+
+        # Ensure a price point exists at the whale entry timestamp so the BUY
+        # marker lands at the correct (x, y).  Only insert if the history has no
+        # point within 30 s of oldest_ts.
+        if oldest_ts > 0 and avg_entry > 0:
+            has_entry_point = any(abs(ts - oldest_ts) < 30 for ts, _ in price_history)
+            if not has_entry_point:
+                price_history = sorted(price_history + [(oldest_ts, avg_entry)], key=lambda p: p[0])
 
         def _price_chart_rows() -> list[tuple[str, str]]:
             from datetime import datetime as _dt
@@ -2853,7 +2862,6 @@ def run_ui(api: TitanBackend) -> None:
         chart_frame = ChartFrame(win, get_data_rows=_price_chart_rows, col_headers=("Time", "Price"))
         chart_frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
-        oldest_ts = float(signal.oldest_ts or 0.0)
         markers: list[ChartMarker] = []
         if first_seen_ts > 0 and first_seen_ts != oldest_ts:
             markers.append(ChartMarker(ts=first_seen_ts, label="👁 first seen", color="#ffdd44"))
@@ -2869,6 +2877,7 @@ def run_ui(api: TitanBackend) -> None:
             history=price_history or None,
             title=signal_title,
             entry_price=avg_entry,
+            entry_ts=oldest_ts if oldest_ts > 0 else None,
             empty_message="No price history available",
         )
 
@@ -3479,7 +3488,7 @@ def run_ui(api: TitanBackend) -> None:
         if signals_live is not None:
             _last_signals[:] = signals_live
         if signal_history:
-            _signal_history_cache[0] = signal_history
+            _signal_history_cache[0] = _require_signal_rows(signal_history)
 
         signals = signals_live if (not _show_signal_history[0] and signals_live is not None) else _last_signals
         signal_rows = _signal_history_cache[0] if _show_signal_history[0] else signals

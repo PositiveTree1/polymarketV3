@@ -913,13 +913,6 @@ def append_trade(trade: TradeRecord) -> None:
             )
 
 
-def bulk_insert_trades(trades: list[TradeRecord]) -> None:
-    if not trades or not _DB_PATH:
-        return
-    for trade in trades:
-        append_trade(trade)
-
-
 def load_trade_history(limit: int = 5000) -> list["TradeRecord"]:
     if not _DB_PATH:
         return []
@@ -994,12 +987,6 @@ def load_trade_stats() -> "TradeStats | None":
     return s
 
 
-def get_trade_count() -> int:
-    if not _DB_PATH:
-        return 0
-    with _connect() as cx:
-        row = cx.execute("SELECT COUNT(*) FROM trade_history").fetchone()
-    return int(row[0]) if row else 0
 
 
 def delete_all_trades() -> None:

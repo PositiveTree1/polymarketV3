@@ -1,4 +1,4 @@
-# 🐳 TITAN — Whale Mirror Engine
+# TITAN — Wallet Mirror Engine
 
 > Automated paper-trading bot for [Polymarket](https://polymarket.com) prediction markets.  
 > Monitors selected wallets and mirrors their trades in real time.
@@ -9,7 +9,7 @@
 
 ## What is TITAN?
 
-TITAN watches the Polymarket CLOB feed 24/7, identifies wallets with a proven track record (high win rate, positive PnL, large resolved bet history), and automatically paper-trades alongside them. When a whale buys, TITAN buys. When the whale sells, TITAN sells.
+TITAN watches the Polymarket CLOB feed 24/7, selects wallets with a proven track record (high win rate, positive PnL, large resolved bet history), and automatically paper-trades alongside them. When a selected wallet buys, TITAN buys. When it sells, TITAN sells.
 
 **It does not place real on-chain orders.** All trades are simulated against a virtual bankroll. Use it to validate a strategy before risking real money.
 
@@ -17,11 +17,11 @@ TITAN watches the Polymarket CLOB feed 24/7, identifies wallets with a proven tr
 
 ## Features
 
-- **Whale detection** — Scores every wallet in the public feed and auto-promotes the best performers to Elite status
+- **Wallet selection** — Scores every wallet in the public feed and auto-promotes the best performers to Elite status
 - **Two signal paths** — Standard 15s cycle for regular signals + 3s HFT fast loop for spike detection
 - **Multi-strategy engine (v10)** — Three parallel strategies: Recent Form, Drift Discount, Consensus Basket
 - **Auto-trading** — Fires paper buys/sells automatically on CONVICTION, ALERT, and HFT signals
-- **Live desktop UI** — 9-tab Tkinter dashboard: signals, alerts, positions, P&L graph, whale roster, diagnostics, config editor
+- **Live desktop UI** — 9-tab Tkinter dashboard: signals, alerts, positions, P&L graph, wallet roster, diagnostics, config editor
 - **Hot-reload config** — Edit parameters in-app and they take effect on the next cycle, no restart needed
 - **Telegram bot** — Optional remote monitoring: get P&L screenshots, open a web dashboard, or ask questions in plain text
 - **Web dashboard** — JSON API + HTML page served locally, tunnelable via Cloudflare
@@ -139,7 +139,7 @@ All settings live in the repo-root `titan_config.json`. You can edit it:
 | `MAX_ENTRY_PRICE` | `0.72` | Only enter markets priced below 72¢ |
 | `PROFIT_TARGET_PCT` | `0.20` | Auto-exit at +20% |
 | `STOP_LOSS_PCT` | `-0.30` | Hard stop at −30% |
-| `WHALE_EXIT_SELL` | `true` | Mirror whale exits immediately |
+| `WALLET_EXIT_SELL` | `true` | Mirror selected wallet exits immediately |
 | `MAX_OPEN_POSITIONS` | *(set in json)* | Max simultaneous open positions |
 
 **Too few signals?** Try: lower `MIN_SCORE` to 40, lower `MIN_TRADE_CASH`, lower `MIN_LIQUIDITY`, raise `MAX_SIGNAL_AGE_H`.
@@ -151,10 +151,10 @@ All settings live in the repo-root `titan_config.json`. You can edit it:
 | Tab | Description |
 |---|---|
 | 🎯 SIGNALS | Live table of all scored signals this cycle |
-| 🚨 ALERTS | Detailed view of tradeable signals (auto-buy status, score breakdown, whale intel) |
+| 🚨 ALERTS | Detailed view of tradeable signals (auto-buy status, score breakdown, wallet intel) |
 | 📋 POSITIONS | Open paper positions with live P&L, hold time, price chart. Double-click for full detail. |
 | 📈 P&L | Equity curve, win rate, expectancy, full trade history |
-| 🐳 WHALES | Whale roster filtered by tier (All / Elite / Verified / HFT) |
+| 👛 WALLETS | Selected wallet roster filtered by tier (All / Elite / Verified / HFT) |
 | 📊 ANALYSIS | Per-cycle summary: signal counts by tier, elite metrics, account stats |
 | 🔍 DIAG | Why signals were rejected, active cooldowns, failed wallet scores |
 | 📜 LOG | Full system log + **"Copy Snapshot for AI"** button |
@@ -171,10 +171,10 @@ When running in `--mode server`, the following tools are available to any MCP cl
 | `get_status` | read | Engine health, uptime, cycle count, error count |
 | `get_portfolio_overview` | read | Equity, bankroll, session P&L, position count — best first call |
 | `get_positions` | read | Open positions. `brief=true` (default) returns clean summary; `brief=false` returns full dict |
-| `get_signals` | read | Whale-triggered signals. Filter by `min_score` (typical range 0–100) |
+| `get_signals` | read | Signals from selected wallets. Filter by `min_score` (typical range 0–100) |
 | `get_alerts` | read | Recent WARN/ERROR/ALERT log entries |
-| `get_whales` | read | Elite whale roster with performance metrics |
-| `get_pnl_summary` | read | Bankroll, P&L, equity curve tail, cooldown/watchlist state |
+| `get_wallets` | read | Elite wallet roster with performance metrics |
+| `get_pnl_summary` | read | Bankroll, P&L, equity curve tail, cooldown state |
 | `get_trade_history` | read | Full buy/sell history |
 | `get_closed_positions` | read | Closed positions enriched with price history |
 | `get_recent_errors` | read | Structured ERROR/CRITICAL log events |
@@ -194,7 +194,7 @@ Signals are grouped by `(market, outcome)`. Each one is scored 0–100:
 | Component | Max pts |
 |---|---|
 | Wallet quality | 30 |
-| Confluence (# agreeing whales) | 18 |
+| Confluence (# agreeing wallets) | 18 |
 | Recency | 20 |
 | Price in ideal zone | 15 |
 | Market quality (liq/vol) | 10 |
@@ -205,7 +205,7 @@ Signals are grouped by `(market, outcome)`. Each one is scored 0–100:
 
 | Tier | Meaning | Auto-trade |
 |---|---|---|
-| 💎 CONVICTION | Whale commits ≥ 0.5% portfolio or ≥ $1000 | Yes |
+| 💎 CONVICTION | Selected wallet commits ≥ 0.5% portfolio or ≥ $1000 | Yes |
 | 🚨 ALERT | High-score signal, all gates passed | Yes |
 | ⚡ HFT | HFT wallet spike (20–40× their average) | Yes |
 | 🟡 STRONG | Good signal, below auto-trade threshold | Display only |
@@ -215,10 +215,10 @@ Signals are grouped by `(market, outcome)`. Each one is scored 0–100:
 
 ## Exit Logic
 
-TITAN's philosophy: **follow the whale out**.
+TITAN's philosophy: **follow the wallet out**.
 
-1. If the whale who triggered the buy **sells** → immediate exit (`WHALE_EXIT_SELL`)
-2. Profit target hit (+20% default) → exit even if whale still holds
+1. If the wallet that triggered the buy **sells** → immediate exit (`WALLET_EXIT_SELL`)
+2. Profit target hit (+20% default) → exit even if wallet still holds
 3. Trailing stop activates at +15%, trails 10% from peak
 4. Hard stop loss at −30% (optional, toggleable)
 5. Min hold guard prevents premature exits
@@ -250,13 +250,15 @@ ScriptsTitan/
   titan_client.py         ← MCP client shim — duck-types TitanAPI, speaks HTTP
   titan_ui.py             ← Tkinter dashboard. Accepts TitanAPI or TitanClient.
   titan_engine.py         ← Main orchestration. 15s loop + 3s HFT loop.
-  titan_signals.py        ← Signal building + multi-strategy scoring.
-  titan_wallet.py         ← Wallet fetching, scoring, elite discovery.
+  titan_signals.py        ← Signal scoring, filtering, deduplication.
+  titan_signal_builder.py ← Strategy builders (Recent Form, Drift Discount, Consensus Basket).
+  titan_selector.py       ← Wallet selection — fetches, scores, classifies wallets.
+  titan_wallet.py         ← Wallet data, scoring helpers.
   titan_market.py         ← Market metadata + CLOB price feeds.
   titan_trader.py         ← Paper trade execution + Kelly sizing.
   titan_state.py          ← Shared singleton state (positions, bankroll, logs).
   titan_config.py         ← Config loader + hot-reload.
-  titan_persistence.py    ← Save/load state & whale roster to disk.
+  titan_persistence.py    ← Save/load state & wallet roster to disk.
   titan_telegram.py       ← Optional Telegram bot.
 ```
 
@@ -282,4 +284,4 @@ In `--mode server`, any connected MCP client (e.g. Claude Desktop) can call `get
 
 ## Disclaimer
 
-TITAN is a research and paper-trading tool. It does not execute real trades. Past whale performance does not guarantee future results. Use at your own risk.
+TITAN is a research and paper-trading tool. It does not execute real trades. Past wallet performance does not guarantee future results. Use at your own risk.
