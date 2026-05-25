@@ -1,7 +1,7 @@
 # 🐳 TITAN — Whale Mirror Engine
 
 > Automated paper-trading bot for [Polymarket](https://polymarket.com) prediction markets.  
-> Monitors elite "whale" wallets and mirrors their trades in real time.
+> Monitors selected wallets and mirrors their trades in real time.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey?logo=windows) ![Mode](https://img.shields.io/badge/Mode-Paper%20Trading-green)
 

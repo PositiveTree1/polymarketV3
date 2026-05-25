@@ -394,7 +394,6 @@ def run_ui(api: TitanBackend) -> None:
     # ═══════════════════════════════════════════════════════════════════════════════
 
     tab_live = tk.Frame(nb, bg="#080810")
-    nb.add(tab_live, text="  🎯 SIGNALS  ")
     
     sig_cols = ("Sc","Market (Full Title)","Side","WEntry$","Now$","Drift%","Age","Flow$","Wallets","Mode")
     sig_tree = ttk.Treeview(tab_live, columns=sig_cols, show="headings", height=10)
@@ -462,7 +461,6 @@ def run_ui(api: TitanBackend) -> None:
     #  TAB 2: SNIPER ALERTS
     # ═══════════════════════════════════════════════════════════════════════════════
     tab_alerts = tk.Frame(nb, bg="#080810")
-    nb.add(tab_alerts, text="  🚨 ALERTS  ")
     alert_txt = scrolledtext.ScrolledText(tab_alerts, bg="#060610",
         fg="#00ff88", font=mono_lg, selectbackground="#1a2a4a", wrap=tk.WORD)
     alert_txt.pack(fill="both", expand=True, padx=4, pady=4)
@@ -472,7 +470,6 @@ def run_ui(api: TitanBackend) -> None:
     #  TAB 3: OPEN POSITIONS
     # ═══════════════════════════════════════════════════════════════════════════════
     tab_positions = tk.Frame(nb, bg="#080810")
-    nb.add(tab_positions, text="  📋 POSITIONS  ")
     
     pos_hdr = tk.Frame(tab_positions, bg="#001820", pady=4)
     pos_hdr.pack(fill="x", padx=4, pady=(4,0))
@@ -1253,7 +1250,6 @@ def run_ui(api: TitanBackend) -> None:
     # ═══════════════════════════════════════════════════════════════════════════════
 
     tab_pnl = tk.Frame(nb, bg="#080810")
-    nb.add(tab_pnl, text="  📈 P&L  ")
     
     stats_frame = tk.Frame(tab_pnl, bg="#0d0d1a", pady=6)
     stats_frame.pack(fill="x", padx=4, pady=(4,0))
@@ -1386,7 +1382,6 @@ def run_ui(api: TitanBackend) -> None:
     # ═══════════════════════════════════════════════════════════════════════════════
 
     tab_wallets = tk.Frame(nb, bg="#080810")
-    nb.add(tab_wallets, text="  🐳 WALLETS  ")
     
     wh_header = tk.Frame(tab_wallets, bg="#0d0d1a", pady=4)
     wh_header.pack(fill="x", padx=4, pady=(4,0))
@@ -1421,7 +1416,6 @@ def run_ui(api: TitanBackend) -> None:
     #  TAB 6: ANALYSIS
     # ═══════════════════════════════════════════════════════════════════════════════
     tab_analysis = tk.Frame(nb, bg="#080810")
-    nb.add(tab_analysis, text="  📊 ANALYSIS  ")
     analysis_txt = scrolledtext.ScrolledText(tab_analysis, bg="#060610",
         fg="#aaaacc", font=mono, selectbackground="#1a2a4a", wrap=tk.WORD)
     analysis_txt.pack(fill="both", expand=True, padx=4, pady=4)
@@ -1431,7 +1425,6 @@ def run_ui(api: TitanBackend) -> None:
     #  TAB 7: DIAGNOSTICS
     # ═══════════════════════════════════════════════════════════════════════════════
     tab_diag = tk.Frame(nb, bg="#080810")
-    nb.add(tab_diag, text="  🔍 DIAG  ")
     diag_txt = scrolledtext.ScrolledText(tab_diag, bg="#060610",
         fg="#889988", font=mono_sm, selectbackground="#1a2a4a", wrap=tk.WORD)
     diag_txt.pack(fill="both", expand=True, padx=4, pady=4)
@@ -1533,7 +1526,6 @@ def run_ui(api: TitanBackend) -> None:
     #  TAB 8: SYSTEM LOG
     # ═══════════════════════════════════════════════════════════════════════════════
     tab_log = tk.Frame(nb, bg="#080810")
-    nb.add(tab_log, text="  📜 LOG  ")
     
     log_tool_bar = tk.Frame(tab_log, bg="#0d0d1a", pady=4)
     log_tool_bar.pack(fill="x")
@@ -1627,7 +1619,6 @@ def run_ui(api: TitanBackend) -> None:
     
 
     tab_config = tk.Frame(nb, bg="#080810")
-    nb.add(tab_config, text="  ⚙ CONFIG  ")
     
     cfg_toolbar = tk.Frame(tab_config, bg="#0d1a0d", pady=6)
     cfg_toolbar.pack(fill="x")
@@ -1748,7 +1739,6 @@ def run_ui(api: TitanBackend) -> None:
     #  TAB 10: WALLET SELECTOR
     # ═══════════════════════════════════════════════════════════════════════════════
     tab_selector = tk.Frame(nb, bg="#080810")
-    nb.add(tab_selector, text="  🎯 SELECTOR  ")
 
     _sel_status_var = tk.StringVar(value="")
 
@@ -1901,6 +1891,194 @@ def run_ui(api: TitanBackend) -> None:
 
     _sel_load()
 
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    #  TAB 11: SIGNAL BUILDERS
+    # ═══════════════════════════════════════════════════════════════════════════════
+    tab_sb = tk.Frame(nb, bg="#080810")
+
+    _sb_status_var = tk.StringVar(value="")
+
+    # Per-builder param metadata: (field_key, label, type)
+    # type: "float", "int", "bool", "float_none" (None allowed)
+    _SB_PARAM_META: dict[str, list[tuple[str, str, str]]] = {
+        "consensus_basket": [
+            ("min_elite_confluence",    "Min elite confluence",          "int"),
+            ("max_signal_age_h",        "Max signal age (h)",            "float"),
+            ("price_min",               "Price min",                     "float"),
+            ("price_max",               "Price max",                     "float"),
+            ("min_score",               "Min score",                     "float"),
+            ("max_positions",           "Max positions",                 "int"),
+            ("max_bet_abs",             "Max bet ($)",                   "float"),
+            ("stop_loss_pct",           "Stop loss % (blank = none)",    "float_none"),
+            ("opposition_ratio_block",  "Opposition ratio block",        "float"),
+            ("conviction_portfolio_pct","Conviction portfolio %",        "float"),
+        ],
+        "recent_form": [
+            ("max_tph",                 "Max trades/hour (HFT filter)",  "float"),
+            ("min_pnl_30d",             "Min PnL 30d ($)",               "float"),
+            ("min_pnl_7d",              "Min PnL 7d ($)",                "float"),
+            ("max_signal_age_h",        "Max signal age (h)",            "float"),
+            ("min_score",               "Min score",                     "float"),
+            ("price_min",               "Price min",                     "float"),
+            ("price_max",               "Price max",                     "float"),
+            ("max_positions",           "Max positions",                 "int"),
+            ("stop_loss_pct",           "Stop loss % (blank = none)",    "float_none"),
+        ],
+        "drift_discount": [
+            ("min_discount_pct",               "Min discount %",                "float"),
+            ("max_discount_pct",               "Max discount %",                "float"),
+            ("max_signal_age_h",               "Max signal age (h)",            "float"),
+            ("price_min",                      "Price min",                     "float"),
+            ("price_max",                      "Price max",                     "float"),
+            ("max_positions",                  "Max positions",                 "int"),
+            ("require_still_holding_check",    "Require still-holding check",   "bool"),
+            ("stop_loss_pct",                  "Stop loss % (blank = none)",    "float_none"),
+        ],
+    }
+
+    _SB_IDS = ["consensus_basket", "recent_form", "drift_discount"]
+    _SB_LABELS = {"consensus_basket": "Consensus Basket", "recent_form": "Recent Form", "drift_discount": "Drift Discount"}
+
+    _sb_builder_var = tk.StringVar(value="consensus_basket")
+    # Nested: _sb_fields[builder_id][field_key] = StringVar
+    _sb_fields: dict[str, dict[str, tk.StringVar]] = {bid: {} for bid in _SB_IDS}
+    _sb_enabled_vars: dict[str, tk.BooleanVar] = {bid: tk.BooleanVar(value=True) for bid in _SB_IDS}
+
+    def _sb_load():
+        try:
+            import titan_config as _tc, json as _j
+            with open(_tc.get_config_file(), encoding="utf-8") as _f:
+                _raw = _j.load(_f)
+            sb = _raw.get("signal_builders", {})
+            active_builders = sb.get("active_builders", _SB_IDS)
+            builders_cfg = sb.get("builders", {})
+            for bid in _SB_IDS:
+                _sb_enabled_vars[bid].set(bid in active_builders)
+                params = builders_cfg.get(bid, {})
+                for field_key, _, _ in _SB_PARAM_META.get(bid, []):
+                    var = _sb_fields[bid].get(field_key)
+                    if var is None:
+                        continue
+                    val = params.get(field_key, "")
+                    var.set("" if val is None else str(val))
+            _sb_status_var.set("  Loaded")
+        except Exception as e:
+            _sb_status_var.set(f"  ❌ Load failed: {e}")
+
+    def _sb_save():
+        try:
+            import titan_config as _tc, json as _j
+            cfg_path = _tc.get_config_file()
+            with open(cfg_path, encoding="utf-8") as _f:
+                _raw = _j.load(_f)
+            if "signal_builders" not in _raw:
+                _raw["signal_builders"] = {"_group": "Signal Builders", "builders": {}}
+            sb = _raw["signal_builders"]
+            sb["active_builders"] = [bid for bid in _SB_IDS if _sb_enabled_vars[bid].get()]
+            if "builders" not in sb:
+                sb["builders"] = {}
+            for bid in _SB_IDS:
+                if bid not in sb["builders"]:
+                    sb["builders"][bid] = {}
+                target = sb["builders"][bid]
+                target["enabled"] = _sb_enabled_vars[bid].get()
+                for field_key, _, ftype in _SB_PARAM_META.get(bid, []):
+                    var = _sb_fields[bid].get(field_key)
+                    if var is None:
+                        continue
+                    raw_val = var.get().strip()
+                    if ftype == "float_none":
+                        target[field_key] = float(raw_val) if raw_val else None
+                    elif ftype == "int":
+                        target[field_key] = int(raw_val) if raw_val else 0
+                    elif ftype == "bool":
+                        target[field_key] = raw_val.lower() in ("true", "1", "yes")
+                    else:
+                        try:
+                            target[field_key] = float(raw_val) if raw_val else 0.0
+                        except ValueError:
+                            target[field_key] = raw_val
+            with open(cfg_path, "w", encoding="utf-8") as _f:
+                _j.dump(_raw, _f, indent=4)
+            _tc.reload()
+            _sb_status_var.set("  ✅ Saved & reloaded — takes effect next cycle")
+            log("🔨 Signal builder config saved and reloaded", "INFO")
+        except Exception as e:
+            _sb_status_var.set(f"  ❌ Save failed: {e}")
+
+    def _sb_show_builder(bid: str):
+        for frame in _sb_builder_frames.values():
+            frame.pack_forget()
+        _sb_builder_frames[bid].pack(fill="both", expand=True, padx=8, pady=4)
+
+    # ── toolbar ───────────────────────────────────────────────────────────────
+    sb_toolbar = tk.Frame(tab_sb, bg="#0d0d1a", pady=6)
+    sb_toolbar.pack(fill="x")
+
+    tk.Label(sb_toolbar, text="Builder:", fg="#778899", bg="#0d0d1a", font=mono).pack(side="left", padx=(12, 4))
+
+    sb_dropdown = tk.OptionMenu(sb_toolbar, _sb_builder_var,
+                                *[_SB_LABELS[b] for b in _SB_IDS],
+                                command=lambda v: _sb_show_builder(
+                                    next(b for b in _SB_IDS if _SB_LABELS[b] == v)))
+    sb_dropdown.config(bg="#1a1a2a", fg="#00ff88", font=mono, activebackground="#0d0d1a", highlightthickness=0)
+    sb_dropdown.pack(side="left", padx=4)
+
+    tk.Button(sb_toolbar, text="💾 SAVE & APPLY", bg="#002a00", fg="#00ff88",
+              font=bold_hd, padx=14, command=_sb_save).pack(side="left", padx=10)
+    tk.Button(sb_toolbar, text="↺ Reload", bg="#1a1a2a", fg="#778899",
+              font=mono, padx=8, command=_sb_load).pack(side="left", padx=4)
+    tk.Label(sb_toolbar, textvariable=_sb_status_var, fg="#556677", bg="#0d0d1a", font=mono).pack(side="left", padx=10)
+
+    # ── active builders checkboxes ────────────────────────────────────────────
+    sb_active_frame = tk.Frame(tab_sb, bg="#0d0d1a", pady=4)
+    sb_active_frame.pack(fill="x", padx=12)
+    tk.Label(sb_active_frame, text="Active builders:", fg="#778899", bg="#0d0d1a", font=mono).pack(side="left", padx=(0, 8))
+    for bid in _SB_IDS:
+        tk.Checkbutton(sb_active_frame, text=_SB_LABELS[bid],
+                       variable=_sb_enabled_vars[bid],
+                       fg="#00ff88", bg="#0d0d1a", selectcolor="#0d0d1a",
+                       activebackground="#0d0d1a", font=mono).pack(side="left", padx=8)
+
+    # ── per-builder param frames ───────────────────────────────────────────────
+    sb_body = tk.Frame(tab_sb, bg="#080810")
+    sb_body.pack(fill="both", expand=True)
+
+    _sb_builder_frames: dict[str, tk.Frame] = {}
+    for bid in _SB_IDS:
+        frm = tk.Frame(sb_body, bg="#080810")
+        _sb_builder_frames[bid] = frm
+        tk.Label(frm, text=f"── {_SB_LABELS[bid]} parameters ──",
+                 fg="#00ff88", bg="#080810", font=bold_hd, pady=8, padx=16).grid(
+            row=0, column=0, columnspan=2, sticky="w")
+        row_idx = 1
+        for field_key, label, _ in _SB_PARAM_META.get(bid, []):
+            var = tk.StringVar()
+            _sb_fields[bid][field_key] = var
+            tk.Label(frm, text=label, fg="#aaaacc", bg="#080810",
+                     font=mono, anchor="w", width=36).grid(
+                row=row_idx, column=0, sticky="w", padx=(24, 8), pady=2)
+            tk.Entry(frm, textvariable=var, bg="#0d0d1a", fg="#ffcc44",
+                     font=mono, width=20, insertbackground="#00ff88").grid(
+                row=row_idx, column=1, sticky="w", pady=2)
+            row_idx += 1
+
+    _sb_show_builder("consensus_basket")
+    _sb_load()
+
+    # ── Tab order ─────────────────────────────────────────────────────────────
+    nb.add(tab_selector,  text="  🎯 SELECTOR  ")
+    nb.add(tab_wallets,   text="  🐳 WALLETS  ")
+    nb.add(tab_sb,        text="  🔨 BUILDERS  ")
+    nb.add(tab_live,      text="  📡 SIGNALS  ")
+    nb.add(tab_alerts,    text="  🚨 ALERTS  ")
+    nb.add(tab_positions, text="  📋 POSITIONS  ")
+    nb.add(tab_pnl,       text="  📈 P&L  ")
+    nb.add(tab_analysis,  text="  📊 ANALYSIS  ")
+    nb.add(tab_diag,      text="  🔍 DIAG  ")
+    nb.add(tab_log,       text="  📜 LOG  ")
+    nb.add(tab_config,    text="  ⚙ CONFIG  ")
 
     # ═══════════════════════════════════════════════════════════════════════════════
     #  RENDERERS

@@ -34,7 +34,7 @@ from titan_wallet  import (fetch_wallet, get_elite_wallets, discover_new_wallets
                            scan_top_market_holders, get_whale_performance_summary,
                            _refresh_recent_form_scores)
 from titan_market  import get_market, fetch_trades, fetch_hft_spike_trades
-from titan_signals import build_signals, check_whale_exits, _adaptive_bet_caps
+from titan_signals import build_signals, check_wallet_exist, _adaptive_bet_caps
 from titan_trader  import auto_trade
 
 _HFT_FAST_CYCLE = 3  # seconds between HFT polls
@@ -148,7 +148,7 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
     }
     whale_exits = {}
     if cid_to_wallet_sets:
-        whale_exits = check_whale_exits(cid_to_wallet_sets, entry_times)
+        whale_exits = check_wallet_exist(cid_to_wallet_sets, entry_times)
     elif S.env().open_positions:
         rebuilt = {}
         for key, pos in S.env().open_positions.items():
@@ -157,7 +157,7 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
             if lwallets:
                 rebuilt[cid] = lwallets
         if rebuilt:
-            whale_exits = check_whale_exits(rebuilt, entry_times)
+            whale_exits = check_wallet_exist(rebuilt, entry_times)
 
     signals, rejects = build_signals(trades, wallets, whale_exits)
 

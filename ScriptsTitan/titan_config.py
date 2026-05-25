@@ -82,6 +82,18 @@ def get_active_selector():
     return _active_selector
 
 
+# Signal builder config
+signal_builders: dict = {}
+
+# Active builder instances — rebuilt on each reload()
+_active_builders: list = []
+
+
+def get_active_builders() -> list:
+    """Return the list of active SignalBuilderBase instances (built from config)."""
+    return _active_builders
+
+
 def _load_json():
     if not os.path.exists(_CONFIG_FILE):
         return {}
@@ -110,6 +122,10 @@ def _extract(cfg):
         # wallet selector block — store as nested dict directly
         if group_key == "wallet_selector":
             flat["wallet_selector"] = {k: v for k, v in group_val.items() if not k.startswith("_")}
+            continue
+        # signal builders block — store as nested dict directly
+        if group_key == "signal_builders":
+            flat["signal_builders"] = {k: v for k, v in group_val.items() if not k.startswith("_")}
             continue
         for key, entry in group_val.items():
             if key.startswith("_"):
@@ -182,6 +198,15 @@ def reload():
         g["_active_selector"] = _build_selector(_sel_id, _sel_params)
     except Exception:
         g["_active_selector"] = None
+
+    # Signal builders — build active instances from config
+    sb_cfg = flat.get("signal_builders", {})
+    g["signal_builders"] = sb_cfg
+    try:
+        from titan_signal_builder import build_builders as _build_builders
+        g["_active_builders"] = _build_builders(sb_cfg)
+    except Exception:
+        g["_active_builders"] = []
 
     for key, val in flat.items():
         if key not in ("vip_wallets", "priority_wallets", "seed_watchlist") and not key.startswith("strategy_"):

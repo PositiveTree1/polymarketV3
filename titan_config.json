@@ -1,442 +1,714 @@
 {
-    "debug": {
-        "VERBOSE_HTTP": {
-            "value": false,
-            "_description": "When true, logs every HTTP request+response received from Polymarket APIs (url, params, status, body excerpt). Use only for debugging \u00e2\u20ac\u201d very noisy."
-        }
+  "debug": {
+    "VERBOSE_HTTP": {
+      "value": false,
+      "_description": "When true, logs every HTTP request+response received from Polymarket APIs (url, params, status, body excerpt). Use only for debugging \u00e2\u20ac\u201d very noisy."
+    }
+  },
+  "_readme": "TITAN CONFIG v10 - MULTI-STRATEGY EDITION. Three active strategies: recent_form, drift_discount, consensus_basket. Open book disabled until rate limits confirmed safe.",
+  "_ANALYSIS": {
+    "root_causes_of_losses": [
+      "1. BUYING NEAR-CERTAINTIES (entry >0.85): tiny upside (15c max), catastrophic downside (-85%). Clavicular pregnancy 0.94 entry -> -97%. WTI crude 0.70 -> -98%.",
+      "2. NO STOP LOSSES: whale exit philosophy fails when whales don't exit before resolution. US-Iran deal whale never sold = -96%.",
+      "3. STALE SIGNALS: 30min age limit allows copying prices already fully absorbed.",
+      "4. HFT SPIKE COPYING: HFT bots have hedged positions we can't see. Their 'spike' is one leg of an arb.",
+      "5. FLAWED EV: fair_prob = whale_entry + 0.05 inflates EV for all trades, bypassing the gate.",
+      "6. TOO MANY POSITIONS: 5 positions at $7 bankroll = $1.40 average, too small to matter when right, still hurts when wrong."
+    ],
+    "new_strategy": "MULTI-STRATEGY: recent_form (copy recent winners), drift_discount (discounted entry on dipped positions), consensus_basket (single elite, small bets). All gated to 20-72c price zone."
+  },
+  "bankroll_and_sizing": {
+    "_group": "Bankroll & Bet Sizing",
+    "BANKROLL_START": {
+      "value": 20.0,
+      "_description": "Starting paper bankroll."
     },
-    "_readme": "TITAN CONFIG v10 - MULTI-STRATEGY EDITION. Three active strategies: recent_form, drift_discount, consensus_basket. Open book disabled until rate limits confirmed safe.",
-    "_ANALYSIS": {
-        "root_causes_of_losses": [
-            "1. BUYING NEAR-CERTAINTIES (entry >0.85): tiny upside (15c max), catastrophic downside (-85%). Clavicular pregnancy 0.94 entry -> -97%. WTI crude 0.70 -> -98%.",
-            "2. NO STOP LOSSES: whale exit philosophy fails when whales don't exit before resolution. US-Iran deal whale never sold = -96%.",
-            "3. STALE SIGNALS: 30min age limit allows copying prices already fully absorbed.",
-            "4. HFT SPIKE COPYING: HFT bots have hedged positions we can't see. Their 'spike' is one leg of an arb.",
-            "5. FLAWED EV: fair_prob = whale_entry + 0.05 inflates EV for all trades, bypassing the gate.",
-            "6. TOO MANY POSITIONS: 5 positions at $7 bankroll = $1.40 average, too small to matter when right, still hurts when wrong."
+    "MIN_BET": {
+      "value": 1.0,
+      "_description": "Minimum bet."
+    },
+    "MAX_BET_ABS": {
+      "value": 4.0,
+      "_description": "Hard cap per trade. At $7 bankroll, max is 4% of remaining."
+    },
+    "MAX_BET_PCT": {
+      "value": 0.18,
+      "_description": "18% of bankroll max per bet. Protects from oversizing."
+    },
+    "KELLY_FRACTION": {
+      "value": 0.2,
+      "_description": "Conservative Kelly - 1/5 Kelly to account for model uncertainty."
+    }
+  },
+  "fees": {
+    "_group": "Fees",
+    "TAKER_FEE_RATE": {
+      "value": 0.0,
+      "_description": "Polymarket taker fee (currently 0)."
+    }
+  },
+  "trade_sourcing": {
+    "_group": "Trade Sourcing",
+    "MIN_TRADE_CASH": {
+      "value": 200,
+      "_description": "Raised to $200 \u00e2\u20ac\u201d filter out noise trades. Whales bet meaningfully."
+    },
+    "MAX_TRADES_FETCH": {
+      "value": 300,
+      "_description": "Reduced from 500. We only need recent high-value trades."
+    },
+    "HOT_HOURS": {
+      "value": 1,
+      "_description": "Only truly hot trades (past 1 hour)."
+    },
+    "WARM_HOURS": {
+      "value": 1,
+      "_description": "Same as HOT \u00e2\u20ac\u201d we only want fresh signals. Stale = 500-trade wall hit constantly."
+    },
+    "CYCLE_SECONDS": {
+      "value": 15,
+      "_description": "15s cycles. Fast enough to catch signals, not so fast we spam API."
+    }
+  },
+  "hft_polling": {
+    "_group": "HFT Polling \u00e2\u20ac\u201d DISABLED IN STRATEGY",
+    "HFT_POLL_LIMIT": {
+      "value": 50,
+      "_description": "Reduced \u00e2\u20ac\u201d we don't use HFT spikes anymore."
+    },
+    "HFT_MIN_TRADES_PER_HOUR": {
+      "value": 50,
+      "_description": "Unchanged."
+    },
+    "HFT_MIRROR_DELAY_MAX_SECONDS": {
+      "value": 30,
+      "_description": "Tighter \u00e2\u20ac\u201d if HFT signal allowed, must be very fresh."
+    },
+    "HFT_MIN_CASH_PER_TRADE": {
+      "value": 10,
+      "_description": "Unchanged."
+    },
+    "HFT_SPIKE_MIN_ABS_CASH": {
+      "value": 1000,
+      "_description": "Raised to $1000. Only truly massive spikes considered."
+    },
+    "HFT_SPIKE_MULTIPLIER_LOW": {
+      "value": 50,
+      "_description": "Raised. Require much clearer spike before acting."
+    },
+    "HFT_SPIKE_MULTIPLIER_HIGH": {
+      "value": 60,
+      "_description": "Raised."
+    },
+    "HFT_MAX_DRIFT": {
+      "value": 0.03,
+      "_description": "Very tight for HFT."
+    },
+    "HFT_MIN_DRIFT": {
+      "value": -0.05,
+      "_description": "Tight."
+    },
+    "HFT_MAX_ENTRY_SLIPPAGE": {
+      "value": 0.02,
+      "_description": "Very tight."
+    }
+  },
+  "elite_polling": {
+    "_group": "Elite Polling",
+    "ELITE_POLL_LIMIT": {
+      "value": 100,
+      "_description": "Keep."
+    },
+    "ELITE_POLL_MIN_CASH": {
+      "value": 50,
+      "_description": "Raised to $50 \u00e2\u20ac\u201d only meaningful trades."
+    },
+    "ELITE_TRADE_MIN_FRACTION": {
+      "value": 0.03,
+      "_description": "3% of their avg as minimum fraction."
+    }
+  },
+  "signal_quality": {
+    "_group": "Signal Scoring",
+    "MAX_SIGNAL_AGE_H": {
+      "value": 0.25,
+      "_description": "KEY CHANGE: 15 minutes MAX. If signal is older, price is already absorbed."
+    },
+    "MIN_SCORE": {
+      "value": 55,
+      "_description": "Raised slightly. We want higher quality signals."
+    },
+    "STRONG_SCORE": {
+      "value": 62,
+      "_description": "Raised."
+    },
+    "ALERT_SCORE": {
+      "value": 70,
+      "_description": "Raised."
+    },
+    "MIN_CONFLUENCE": {
+      "value": 2,
+      "_description": "KEY CHANGE: Require 2+ elite whales. Single-whale signals have lost us most money."
+    }
+  },
+  "drift_gates": {
+    "_group": "Price Drift Gates",
+    "MAX_DRIFT": {
+      "value": 0.05,
+      "_description": "5% drift max \u00e2\u20ac\u201d if price already moved 5% from whale entry, edge is gone."
+    },
+    "MIN_DRIFT": {
+      "value": -0.08,
+      "_description": "Allow small adverse drift."
+    },
+    "MAX_ENTRY_SLIPPAGE": {
+      "value": 0.03,
+      "_description": "3% slippage cap."
+    },
+    "HFT_MAX_DRIFT": {
+      "value": 0.02,
+      "_description": "Very tight for HFT."
+    },
+    "HFT_MIN_DRIFT": {
+      "value": -0.05,
+      "_description": "Tight."
+    },
+    "HFT_MAX_ENTRY_SLIPPAGE": {
+      "value": 0.02,
+      "_description": "Tight."
+    },
+    "STALE_LOSER_AGE_H": {
+      "value": 0.5,
+      "_description": "Exit stale losers after 30min."
+    },
+    "STALE_LOSER_DRIFT": {
+      "value": -0.08,
+      "_description": "Tightened."
+    }
+  },
+  "price_zone_gates": {
+    "_group": "Price Zone Gates \u00e2\u20ac\u201d Core of strategy",
+    "MIN_ENTRY_PRICE": {
+      "value": 0.2,
+      "_description": "Never enter below 20c. Too speculative, lottery-ticket territory."
+    },
+    "MAX_ENTRY_PRICE": {
+      "value": 0.72,
+      "_description": "Never enter above 72c. Above this = near-certainty trap."
+    },
+    "IDEAL_PRICE_MIN": {
+      "value": 0.25,
+      "_description": "Sweet spot lower bound."
+    },
+    "IDEAL_PRICE_MAX": {
+      "value": 0.65,
+      "_description": "Sweet spot upper bound. Signals in this range get bonus score."
+    }
+  },
+  "market_quality": {
+    "_group": "Market Quality",
+    "MIN_LIQUIDITY": {
+      "value": 15000,
+      "_description": "Raised to $15k. Ensures meaningful markets."
+    },
+    "MIN_VOLUME": {
+      "value": 30000,
+      "_description": "Raised to $30k. Low-volume markets are traps."
+    },
+    "MIN_HOURS_LEFT": {
+      "value": 4.0,
+      "_description": "Raised to 4h. Need time for position to play out."
+    }
+  },
+  "wallet_quality": {
+    "_group": "Wallet Quality",
+    "MIN_WIN_RATE_WATCH": {
+      "value": 0.53,
+      "_description": "Slightly raised."
+    },
+    "MIN_WIN_RATE_VER": {
+      "value": 0.56,
+      "_description": "Slightly raised."
+    },
+    "MIN_RESOLVED_BETS": {
+      "value": 10,
+      "_description": "Raised to 10 \u00e2\u20ac\u201d need track record."
+    },
+    "MIN_PNL": {
+      "value": 0,
+      "_description": "Unchanged."
+    },
+    "WILSON_MIN_WATCH": {
+      "value": 0.45,
+      "_description": "Unchanged."
+    },
+    "WILSON_MIN_VER": {
+      "value": 0.49,
+      "_description": "Unchanged."
+    },
+    "MIN_AVG_PROFIT_PER_TRADE": {
+      "value": 2.0,
+      "_description": "Raised \u00e2\u20ac\u201d want whales who actually profit per trade."
+    },
+    "MIN_AVG_BET_SIZE": {
+      "value": 10.0,
+      "_description": "Slightly raised."
+    }
+  },
+  "elite_thresholds": {
+    "_group": "Elite Thresholds",
+    "ELITE_MIN_PNL": {
+      "value": 40000,
+      "_description": "Keep at $40k. Ensures proven track record."
+    },
+    "ELITE_MIN_PORT": {
+      "value": 80000,
+      "_description": "Slightly relaxed from 90k to catch some good wallets."
+    },
+    "ELITE_MIN_SCORE": {
+      "value": 0.72,
+      "_description": "Slightly raised."
+    },
+    "ELITE_MIN_RESOLVED": {
+      "value": 20,
+      "_description": "Unchanged."
+    }
+  },
+  "conviction": {
+    "_group": "Conviction",
+    "LARGE_TRADE": {
+      "value": 1000,
+      "_description": "Unchanged."
+    },
+    "MASSIVE_TRADE": {
+      "value": 5000,
+      "_description": "Unchanged."
+    }
+  },
+  "position_management": {
+    "_group": "Position Management",
+    "MAX_OPEN_POSITIONS": {
+      "value": 5,
+      "_description": "Raised to 5 to accommodate multiple strategies running simultaneously."
+    },
+    "MAX_POSITIONS_PER_EVENT": {
+      "value": 1,
+      "_description": "Unchanged."
+    },
+    "MAX_POSITIONS_PER_WHALE": {
+      "value": 2,
+      "_description": "Raised to 2 \u00e2\u20ac\u201d allows same whale to appear in recent_form and consensus_basket."
+    },
+    "MAX_WATCHLIST_SIZE": {
+      "value": 400,
+      "_description": "Unchanged."
+    },
+    "PROFIT_TARGET_PCT": {
+      "value": 0.4,
+      "_description": "Take profit at +40% if whale is still in. Lock in gains."
+    },
+    "WHALE_EXIT_SELL": {
+      "value": true,
+      "_description": "Still follow whale exits."
+    },
+    "STOP_LOSS_ENABLED": {
+      "value": true,
+      "_description": "STOP LOSSES ARE NOW ENABLED. This is not negotiable."
+    },
+    "STOP_LOSS_PCT": {
+      "value": -0.3,
+      "_description": "Exit at -30% loss. Prevents the -97%, -99% catastrophes. Note: recent_form and drift_discount use no stop loss per strategy config."
+    }
+  },
+  "timing": {
+    "_group": "Timing",
+    "MIN_HOLD_MINUTES": {
+      "value": 5,
+      "_description": "Slightly raised \u00e2\u20ac\u201d avoid exiting immediately on noise."
+    },
+    "EXIT_COOLDOWN_SECONDS": {
+      "value": 600,
+      "_description": "10 min cooldown after exit before re-entry on same market."
+    }
+  },
+  "sizing": {
+    "_group": "Sizing",
+    "USE_PROPORTIONAL_SIZING": {
+      "value": false,
+      "_description": "Disabled \u00e2\u20ac\u201d proportional to whale portfolio is wrong for small bankrolls."
+    },
+    "PROPORTIONAL_WEIGHT": {
+      "value": 0.0,
+      "_description": "Zeroed."
+    }
+  },
+  "discovery": {
+    "_group": "Whale Discovery",
+    "DISCOVERY_INTERVAL_CYCLES": {
+      "value": 20,
+      "_description": "Every 20 cycles."
+    }
+  },
+  "cache": {
+    "_group": "Cache",
+    "WALLET_TTL": {
+      "value": 600,
+      "_description": "Unchanged."
+    },
+    "MARKET_TTL": {
+      "value": 30,
+      "_description": "Unchanged."
+    },
+    "ACTIVITY_LIMIT": {
+      "value": 500,
+      "_description": "Unchanged."
+    }
+  },
+  "strategy": {
+    "_group": "Strategy Mode",
+    "STRATEGY_MODE": "multi_strategy",
+    "TRADEABLE_TIERS_LIST": [
+      "CONVICTION",
+      "ALERT"
+    ],
+    "_NOTE_TIERS": "HFT tier REMOVED. We no longer trade HFT spikes \u00e2\u20ac\u201d too risky, too fast, hedged positions invisible to us.",
+    "ALLOWED_MARKET_TYPES": [
+      "POLITICS",
+      "EVENT"
+    ],
+    "_NOTE_MARKETS": "CRYPTO removed \u00e2\u20ac\u201d crypto prediction markets are dominated by bots with info advantages. POLITICS and EVENT are more human-driven.",
+    "MIN_ELITE_CONFLUENCE": 2,
+    "_NOTE_CONFLUENCE": "KEY CHANGE: Require 2+ elite whales minimum for consensus_basket. recent_form and drift_discount have their own thresholds.",
+    "BLOCK_SPORTS": true,
+    "MIN_SPORTS_CONFLUENCE": 4,
+    "SPORTS_STOP_LOSS_PCT": -0.15,
+    "SPORTS_MAX_BET_PCT": 0.03,
+    "SPORTS_BOT_MIN_TPH": 100,
+    "PROFIT_TARGET_ENABLED": true,
+    "ACTIVE_STRATEGIES": [
+      "recent_form",
+      "drift_discount",
+      "consensus_basket"
+    ],
+    "_NOTE_ACTIVE_STRATEGIES": "open_book is disabled until rate limit headroom is confirmed after a few sessions with the other three strategies."
+  },
+  "strategy_recent_form": {
+    "_group": "Strategy: Recent Form Copy",
+    "_NOTE": "Copy trades from wallets that are profitable in the last 30 days. HFT bots excluded (max 20 TPH). Lower score threshold and longer age window since recent form IS the filter.",
+    "enabled": true,
+    "max_tph": 20,
+    "min_pnl_30d": 0,
+    "min_pnl_7d": -50,
+    "max_signal_age_h": 0.75,
+    "min_score": 42,
+    "price_min": 0.18,
+    "price_max": 0.78,
+    "max_positions": 4,
+    "bet_multiplier_base": 1.0,
+    "stop_loss_pct": null,
+    "_NOTE_STOP_LOSS": "No stop loss \u00e2\u20ac\u201d price ceiling at 0.78 is the protection. Can't lose more than 78% when you never enter above 0.78."
+  },
+  "strategy_drift_discount": {
+    "_group": "Strategy: Drift Discount",
+    "_NOTE": "Enter when a verified whale bought earlier and price has dipped 4-12% below their entry. We get the same bet at a discount. Whale still holding check via fetch_wallet_sells.",
+    "enabled": true,
+    "min_discount_pct": 0.04,
+    "max_discount_pct": 0.12,
+    "max_signal_age_h": 6.0,
+    "price_min": 0.2,
+    "price_max": 0.72,
+    "max_positions": 3,
+    "require_still_holding_check": true,
+    "stop_loss_pct": null,
+    "_NOTE_STOP_LOSS": "No stop loss \u00e2\u20ac\u201d price ceiling at 0.72 plus entry discount is the protection."
+  },
+  "strategy_open_book": {
+    "_group": "Strategy: Open Book Consensus (DISABLED \u00e2\u20ac\u201d Phase 2)",
+    "_NOTE": "3+ elites currently holding the same outcome. Queries wallets_per_cycle wallets per 30-minute scan. Enable after confirming rate limit headroom.",
+    "enabled": false,
+    "min_consensus": 3,
+    "wallets_per_cycle": 2,
+    "price_min": 0.25,
+    "price_max": 0.7,
+    "min_hours_left": 6.0,
+    "max_positions": 2,
+    "stop_loss_pct": null
+  },
+  "strategy_consensus_basket": {
+    "_group": "Strategy: Consensus Basket (volume play)",
+    "_NOTE": "Single elite allowed, small bets, more positions. Statistically defensible: at >50% accuracy with many small bets variance smooths out. Soft stop at -35%.",
+    "enabled": true,
+    "min_elite_confluence": 1,
+    "max_signal_age_h": 0.5,
+    "price_min": 0.2,
+    "price_max": 0.72,
+    "min_score": 50,
+    "max_positions": 5,
+    "max_bet_abs": 1.2,
+    "stop_loss_pct": -0.35,
+    "conviction_portfolio_pct": 0.005,
+    "opposition_ratio_block": 0.6
+  },
+  "vip_wallets": {
+    "_group": "VIP Wallets",
+    "_description": "Polled every single cycle.",
+    "wallets": [
+      {
+        "address": "0x6d9fc316c3b8377060a44b852ba664adbfd59790",
+        "note": "MEPP $299k alpha trader"
+      },
+      {
+        "address": "0x63ce342161250d705dc0b16df89036c8e5f9ba9a",
+        "note": "0x8dxd $2.21M"
+      },
+      {
+        "address": "0x1cc16713196d456f86fa9c7387dd326a7f73b8df",
+        "note": "Wickier"
+      },
+      {
+        "address": "0x614dc8d3542c12103d2c6a3553fd761e391d1546",
+        "note": "mr.ozi alpha trader"
+      },
+      {
+        "address": "0x7f9e2d1df78614564a70becc7fa14aa9a6623a0e",
+        "note": "nojnn alpha trader"
+      },
+      {
+        "address": "0xdf17f4a8dd01a4cfa6fc3da323a2baee5f8697d1",
+        "note": "Clear-Corridor alpha trader"
+      }
+    ]
+  },
+  "priority_wallets": {
+    "_group": "Priority Wallets",
+    "_description": "Extra wallets polled every cycle.",
+    "wallets": []
+  },
+  "seed_watchlist": {
+    "_group": "Seed Watchlist",
+    "_description": "Wallets added to watchlist on first boot.",
+    "wallets": [
+      "0x5a218c7ad04135830a45c41aaed7294df7809318",
+      "0xead152b855effa6b5b5837f53b24c0756830c76a",
+      "0xe8dd7741ccb12350957ec71e9ee332e0d1e6ec86",
+      "0x162f6fff88a52864e8e831d5ee0c30ee0d9c71ea",
+      "0xbacd00c9080a82de9b0edca958adb3a1abd12b3c",
+      "0xdf17f4a8dd01a4cf3049b34e0bf91cbbac2a09e9",
+      "0xe83cc0c82d009a1c34188563c83c206b320e57dd",
+      "0x63ce342161250d705dc0b16df89036c8e5f9ba9a",
+      "0x6d9fc316c3b8377060a44b852ba664adbfd59790",
+      "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294",
+      "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee",
+      "0x000d257d2b2dc3437890e2e7e99cee4abf5d26b4",
+      "0x1cc16713196d456f86fa9c7387dd326a7f73b8df",
+      "0x614dc8d3542c12103d2c6a3553fd761e391d1546",
+      "0x7f9e2d1df78614564a70becc7fa14aa9a6623a0e",
+      "0xdf17f4a8dd01a4cfa6fc3da323a2baee5f8697d1"
+    ]
+  },
+  "strategy_scoring": {
+    "_group": "Scoring Constants \u00e2\u20ac\u201d score_signal()",
+    "wallet_max_pts": 30,
+    "confluence_pts": [
+      0,
+      6,
+      10,
+      14,
+      18
+    ],
+    "large_trade_conf_bonus": 4,
+    "elite_only_conf_floor": 8,
+    "recency_hot_thresholds": [
+      [
+        0.25,
+        20
+      ],
+      [
+        0.5,
+        17
+      ],
+      [
+        1,
+        14
+      ],
+      [
+        2,
+        9
+      ],
+      [
+        3,
+        6
+      ],
+      [
+        4,
+        4
+      ],
+      [
+        null,
+        2
+      ]
+    ],
+    "recency_warm_thresholds": [
+      [
+        4,
+        6
+      ],
+      [
+        6,
+        4
+      ],
+      [
+        8,
+        2
+      ],
+      [
+        null,
+        1
+      ]
+    ],
+    "hft_recency_bonus": 5,
+    "hft_recency_cap": 20,
+    "opp_neg_drift_base": 8,
+    "opp_neg_drift_scale": 25,
+    "opp_neg_drift_max": 15,
+    "opp_pos_drift_thresholds": [
+      [
+        0.04,
+        15
+      ],
+      [
+        0.08,
+        12
+      ],
+      [
+        0.12,
+        8
+      ],
+      [
+        0.15,
+        4
+      ],
+      [
+        null,
+        0
+      ]
+    ],
+    "liq_quality_max": 5.0,
+    "liq_quality_scale": 8000,
+    "vol_quality_max": 3.0,
+    "vol_quality_scale": 40000,
+    "time_quality_pts": [
+      2,
+      1,
+      0
+    ],
+    "time_quality_thresholds": [
+      72,
+      24
+    ],
+    "conviction_bonus_massive": 5,
+    "conviction_bonus_large": 2,
+    "large_trade_bonus": 3,
+    "price_zone_ideal_bonus": 5,
+    "price_zone_acceptable_bonus": 2,
+    "price_zone_outside_penalty": -10,
+    "multi_whale_pts": [
+      0,
+      0,
+      5,
+      8
+    ],
+    "exit_penalty_per_whale": -8,
+    "weekly_pnl_penalty_min": -10,
+    "score_discount_wscore_ref": 0.85,
+    "score_discount_factor": 0.15
+  },
+  "strategy_kelly": {
+    "_group": "Kelly Sizing Constants \u00e2\u20ac\u201d kelly_bet()",
+    "score_mult_base": 0.5,
+    "score_mult_scale": 0.5,
+    "conf_mult_step": 0.25,
+    "conf_mult_cap": 1.75,
+    "tier_multipliers": {
+      "CONVICTION": 1.6,
+      "ALERT": 1.2,
+      "STRONG": 1.0,
+      "MEDIUM": 0.7,
+      "ELITE_ONLY": 0.9,
+      "HFT": 0.5
+    },
+    "score_floor_base_ref": 55,
+    "score_floor_scale": 45,
+    "score_floor_mult": 1.5,
+    "large_trade_max_abs_boost": 1.5,
+    "large_trade_bankroll_cap": 0.22,
+    "adaptive_caps": [
+      [
+        8,
+        1.5,
+        0.15
+      ],
+      [
+        15,
+        2.5,
+        0.18
+      ],
+      [
+        30,
+        4.0,
+        0.18
+      ]
+    ]
+  },
+  "position_management_ext": {
+    "_group": "Position Management Extensions",
+    "whale_exit_min_sell_fraction": 0.3
+  },
+  "wallet_selector": {
+    "_group": "Wallet Selector",
+    "active_selector": "performance",
+    "selectors": {
+      "performance": {
+        "min_trade_cash_discovery": 5000.0,
+        "leaderboard_periods": [
+          "ALL",
+          "MONTH",
+          "WEEK"
         ],
-        "new_strategy": "MULTI-STRATEGY: recent_form (copy recent winners), drift_discount (discounted entry on dipped positions), consensus_basket (single elite, small bets). All gated to 20-72c price zone."
-    },
-    "bankroll_and_sizing": {
-        "_group": "Bankroll & Bet Sizing",
-        "BANKROLL_START": {
-            "value": 20.0,
-            "_description": "Starting paper bankroll."
-        },
-        "MIN_BET": {
-            "value": 1.0,
-            "_description": "Minimum bet."
-        },
-        "MAX_BET_ABS": {
-            "value": 4.0,
-            "_description": "Hard cap per trade. At $7 bankroll, max is 4% of remaining."
-        },
-        "MAX_BET_PCT": {
-            "value": 0.18,
-            "_description": "18% of bankroll max per bet. Protects from oversizing."
-        },
-        "KELLY_FRACTION": {
-            "value": 0.2,
-            "_description": "Conservative Kelly - 1/5 Kelly to account for model uncertainty."
-        }
-    },
-    "fees": {
-        "_group": "Fees",
-        "TAKER_FEE_RATE": {
-            "value": 0.0,
-            "_description": "Polymarket taker fee (currently 0)."
-        }
-    },
-    "trade_sourcing": {
-        "_group": "Trade Sourcing",
-        "MIN_TRADE_CASH": {
-            "value": 200,
-            "_description": "Raised to $200 \u00e2\u20ac\u201d filter out noise trades. Whales bet meaningfully."
-        },
-        "MAX_TRADES_FETCH": {
-            "value": 300,
-            "_description": "Reduced from 500. We only need recent high-value trades."
-        },
-        "HOT_HOURS": {
-            "value": 1,
-            "_description": "Only truly hot trades (past 1 hour)."
-        },
-        "WARM_HOURS": {
-            "value": 1,
-            "_description": "Same as HOT \u00e2\u20ac\u201d we only want fresh signals. Stale = 500-trade wall hit constantly."
-        },
-        "CYCLE_SECONDS": {
-            "value": 15,
-            "_description": "15s cycles. Fast enough to catch signals, not so fast we spam API."
-        }
-    },
-    "hft_polling": {
-        "_group": "HFT Polling \u00e2\u20ac\u201d DISABLED IN STRATEGY",
-        "HFT_POLL_LIMIT": {
-            "value": 50,
-            "_description": "Reduced \u00e2\u20ac\u201d we don't use HFT spikes anymore."
-        },
-        "HFT_MIN_TRADES_PER_HOUR": {
-            "value": 50,
-            "_description": "Unchanged."
-        },
-        "HFT_MIRROR_DELAY_MAX_SECONDS": {
-            "value": 30,
-            "_description": "Tighter \u00e2\u20ac\u201d if HFT signal allowed, must be very fresh."
-        },
-        "HFT_MIN_CASH_PER_TRADE": {
-            "value": 10,
-            "_description": "Unchanged."
-        },
-        "HFT_SPIKE_MIN_ABS_CASH": {
-            "value": 1000,
-            "_description": "Raised to $1000. Only truly massive spikes considered."
-        },
-        "HFT_SPIKE_MULTIPLIER_LOW": {
-            "value": 50,
-            "_description": "Raised. Require much clearer spike before acting."
-        },
-        "HFT_SPIKE_MULTIPLIER_HIGH": {
-            "value": 60,
-            "_description": "Raised."
-        },
-        "HFT_MAX_DRIFT": {
-            "value": 0.03,
-            "_description": "Very tight for HFT."
-        },
-        "HFT_MIN_DRIFT": {
-            "value": -0.05,
-            "_description": "Tight."
-        },
-        "HFT_MAX_ENTRY_SLIPPAGE": {
-            "value": 0.02,
-            "_description": "Very tight."
-        }
-    },
-    "elite_polling": {
-        "_group": "Elite Polling",
-        "ELITE_POLL_LIMIT": {
-            "value": 100,
-            "_description": "Keep."
-        },
-        "ELITE_POLL_MIN_CASH": {
-            "value": 50,
-            "_description": "Raised to $50 \u00e2\u20ac\u201d only meaningful trades."
-        },
-        "ELITE_TRADE_MIN_FRACTION": {
-            "value": 0.03,
-            "_description": "3% of their avg as minimum fraction."
-        }
-    },
-    "signal_quality": {
-        "_group": "Signal Scoring",
-        "MAX_SIGNAL_AGE_H": {
-            "value": 0.25,
-            "_description": "KEY CHANGE: 15 minutes MAX. If signal is older, price is already absorbed."
-        },
-        "MIN_SCORE": {
-            "value": 55,
-            "_description": "Raised slightly. We want higher quality signals."
-        },
-        "STRONG_SCORE": {
-            "value": 62,
-            "_description": "Raised."
-        },
-        "ALERT_SCORE": {
-            "value": 70,
-            "_description": "Raised."
-        },
-        "MIN_CONFLUENCE": {
-            "value": 2,
-            "_description": "KEY CHANGE: Require 2+ elite whales. Single-whale signals have lost us most money."
-        }
-    },
-    "drift_gates": {
-        "_group": "Price Drift Gates",
-        "MAX_DRIFT": {
-            "value": 0.05,
-            "_description": "5% drift max \u00e2\u20ac\u201d if price already moved 5% from whale entry, edge is gone."
-        },
-        "MIN_DRIFT": {
-            "value": -0.08,
-            "_description": "Allow small adverse drift."
-        },
-        "MAX_ENTRY_SLIPPAGE": {
-            "value": 0.03,
-            "_description": "3% slippage cap."
-        },
-        "HFT_MAX_DRIFT": {
-            "value": 0.02,
-            "_description": "Very tight for HFT."
-        },
-        "HFT_MIN_DRIFT": {
-            "value": -0.05,
-            "_description": "Tight."
-        },
-        "HFT_MAX_ENTRY_SLIPPAGE": {
-            "value": 0.02,
-            "_description": "Tight."
-        },
-        "STALE_LOSER_AGE_H": {
-            "value": 0.5,
-            "_description": "Exit stale losers after 30min."
-        },
-        "STALE_LOSER_DRIFT": {
-            "value": -0.08,
-            "_description": "Tightened."
-        }
-    },
-    "price_zone_gates": {
-        "_group": "Price Zone Gates \u00e2\u20ac\u201d Core of strategy",
-        "MIN_ENTRY_PRICE": {
-            "value": 0.2,
-            "_description": "Never enter below 20c. Too speculative, lottery-ticket territory."
-        },
-        "MAX_ENTRY_PRICE": {
-            "value": 0.72,
-            "_description": "Never enter above 72c. Above this = near-certainty trap."
-        },
-        "IDEAL_PRICE_MIN": {
-            "value": 0.25,
-            "_description": "Sweet spot lower bound."
-        },
-        "IDEAL_PRICE_MAX": {
-            "value": 0.65,
-            "_description": "Sweet spot upper bound. Signals in this range get bonus score."
-        }
-    },
-    "market_quality": {
-        "_group": "Market Quality",
-        "MIN_LIQUIDITY": {
-            "value": 15000,
-            "_description": "Raised to $15k. Ensures meaningful markets."
-        },
-        "MIN_VOLUME": {
-            "value": 30000,
-            "_description": "Raised to $30k. Low-volume markets are traps."
-        },
-        "MIN_HOURS_LEFT": {
-            "value": 4.0,
-            "_description": "Raised to 4h. Need time for position to play out."
-        }
-    },
-    "wallet_quality": {
-        "_group": "Wallet Quality",
-        "MIN_WIN_RATE_WATCH": {
-            "value": 0.53,
-            "_description": "Slightly raised."
-        },
-        "MIN_WIN_RATE_VER": {
-            "value": 0.56,
-            "_description": "Slightly raised."
-        },
-        "MIN_RESOLVED_BETS": {
-            "value": 10,
-            "_description": "Raised to 10 \u00e2\u20ac\u201d need track record."
-        },
-        "MIN_PNL": {
-            "value": 0,
-            "_description": "Unchanged."
-        },
-        "WILSON_MIN_WATCH": {
-            "value": 0.45,
-            "_description": "Unchanged."
-        },
-        "WILSON_MIN_VER": {
-            "value": 0.49,
-            "_description": "Unchanged."
-        },
-        "MIN_AVG_PROFIT_PER_TRADE": {
-            "value": 2.0,
-            "_description": "Raised \u00e2\u20ac\u201d want whales who actually profit per trade."
-        },
-        "MIN_AVG_BET_SIZE": {
-            "value": 10.0,
-            "_description": "Slightly raised."
-        }
-    },
-    "elite_thresholds": {
-        "_group": "Elite Thresholds",
-        "ELITE_MIN_PNL": {
-            "value": 40000,
-            "_description": "Keep at $40k. Ensures proven track record."
-        },
-        "ELITE_MIN_PORT": {
-            "value": 80000,
-            "_description": "Slightly relaxed from 90k to catch some good wallets."
-        },
-        "ELITE_MIN_SCORE": {
-            "value": 0.72,
-            "_description": "Slightly raised."
-        },
-        "ELITE_MIN_RESOLVED": {
-            "value": 20,
-            "_description": "Unchanged."
-        }
-    },
-    "conviction": {
-        "_group": "Conviction",
-        "LARGE_TRADE": {
-            "value": 1000,
-            "_description": "Unchanged."
-        },
-        "MASSIVE_TRADE": {
-            "value": 5000,
-            "_description": "Unchanged."
-        }
-    },
-    "position_management": {
-        "_group": "Position Management",
-        "MAX_OPEN_POSITIONS": {
-            "value": 5,
-            "_description": "Raised to 5 to accommodate multiple strategies running simultaneously."
-        },
-        "MAX_POSITIONS_PER_EVENT": {
-            "value": 1,
-            "_description": "Unchanged."
-        },
-        "MAX_POSITIONS_PER_WHALE": {
-            "value": 2,
-            "_description": "Raised to 2 \u00e2\u20ac\u201d allows same whale to appear in recent_form and consensus_basket."
-        },
-        "MAX_WATCHLIST_SIZE": {
-            "value": 400,
-            "_description": "Unchanged."
-        },
-        "PROFIT_TARGET_PCT": {
-            "value": 0.4,
-            "_description": "Take profit at +40% if whale is still in. Lock in gains."
-        },
-        "WHALE_EXIT_SELL": {
-            "value": true,
-            "_description": "Still follow whale exits."
-        },
-        "STOP_LOSS_ENABLED": {
-            "value": true,
-            "_description": "STOP LOSSES ARE NOW ENABLED. This is not negotiable."
-        },
-        "STOP_LOSS_PCT": {
-            "value": -0.3,
-            "_description": "Exit at -30% loss. Prevents the -97%, -99% catastrophes. Note: recent_form and drift_discount use no stop loss per strategy config."
-        }
-    },
-    "timing": {
-        "_group": "Timing",
-        "MIN_HOLD_MINUTES": {
-            "value": 5,
-            "_description": "Slightly raised \u00e2\u20ac\u201d avoid exiting immediately on noise."
-        },
-        "EXIT_COOLDOWN_SECONDS": {
-            "value": 600,
-            "_description": "10 min cooldown after exit before re-entry on same market."
-        }
-    },
-    "sizing": {
-        "_group": "Sizing",
-        "USE_PROPORTIONAL_SIZING": {
-            "value": false,
-            "_description": "Disabled \u00e2\u20ac\u201d proportional to whale portfolio is wrong for small bankrolls."
-        },
-        "PROPORTIONAL_WEIGHT": {
-            "value": 0.0,
-            "_description": "Zeroed."
-        }
-    },
-    "discovery": {
-        "_group": "Whale Discovery",
-        "DISCOVERY_INTERVAL_CYCLES": {
-            "value": 20,
-            "_description": "Every 20 cycles."
-        }
-    },
-    "cache": {
-        "_group": "Cache",
-        "WALLET_TTL": {
-            "value": 600,
-            "_description": "Unchanged."
-        },
-        "MARKET_TTL": {
-            "value": 30,
-            "_description": "Unchanged."
-        },
-        "ACTIVITY_LIMIT": {
-            "value": 500,
-            "_description": "Unchanged."
-        }
-    },
-    "strategy": {
-        "_group": "Strategy Mode",
-        "STRATEGY_MODE": "multi_strategy",
-        "TRADEABLE_TIERS_LIST": [
-            "CONVICTION",
-            "ALERT"
-        ],
-        "_NOTE_TIERS": "HFT tier REMOVED. We no longer trade HFT spikes \u00e2\u20ac\u201d too risky, too fast, hedged positions invisible to us.",
-        "ALLOWED_MARKET_TYPES": [
-            "POLITICS",
-            "EVENT"
-        ],
-        "_NOTE_MARKETS": "CRYPTO removed \u00e2\u20ac\u201d crypto prediction markets are dominated by bots with info advantages. POLITICS and EVENT are more human-driven.",
-        "MIN_ELITE_CONFLUENCE": 2,
-        "_NOTE_CONFLUENCE": "KEY CHANGE: Require 2+ elite whales minimum for consensus_basket. recent_form and drift_discount have their own thresholds.",
-        "BLOCK_SPORTS": true,
-        "MIN_SPORTS_CONFLUENCE": 4,
-        "SPORTS_STOP_LOSS_PCT": -0.15,
-        "SPORTS_MAX_BET_PCT": 0.03,
-        "SPORTS_BOT_MIN_TPH": 100,
-        "PROFIT_TARGET_ENABLED": true,
-        "ACTIVE_STRATEGIES": [
-            "recent_form",
-            "drift_discount",
-            "consensus_basket"
-        ],
-        "_NOTE_ACTIVE_STRATEGIES": "open_book is disabled until rate limit headroom is confirmed after a few sessions with the other three strategies."
-    },
-    "strategy_recent_form": {
-        "_group": "Strategy: Recent Form Copy",
-        "_NOTE": "Copy trades from wallets that are profitable in the last 30 days. HFT bots excluded (max 20 TPH). Lower score threshold and longer age window since recent form IS the filter.",
-        "enabled": true,
-        "max_tph": 20,
-        "min_pnl_30d": 0,
-        "min_pnl_7d": -50,
-        "max_signal_age_h": 0.75,
-        "min_score": 42,
-        "price_min": 0.18,
-        "price_max": 0.78,
-        "max_positions": 4,
-        "bet_multiplier_base": 1.0,
-        "stop_loss_pct": null,
-        "_NOTE_STOP_LOSS": "No stop loss \u00e2\u20ac\u201d price ceiling at 0.78 is the protection. Can't lose more than 78% when you never enter above 0.78."
-    },
-    "strategy_drift_discount": {
-        "_group": "Strategy: Drift Discount",
-        "_NOTE": "Enter when a verified whale bought earlier and price has dipped 4-12% below their entry. We get the same bet at a discount. Whale still holding check via fetch_wallet_sells.",
-        "enabled": true,
-        "min_discount_pct": 0.04,
-        "max_discount_pct": 0.12,
-        "max_signal_age_h": 6.0,
-        "price_min": 0.2,
-        "price_max": 0.72,
-        "max_positions": 3,
-        "require_still_holding_check": true,
-        "stop_loss_pct": null,
-        "_NOTE_STOP_LOSS": "No stop loss \u00e2\u20ac\u201d price ceiling at 0.72 plus entry discount is the protection."
-    },
-    "strategy_open_book": {
-        "_group": "Strategy: Open Book Consensus (DISABLED \u00e2\u20ac\u201d Phase 2)",
-        "_NOTE": "3+ elites currently holding the same outcome. Queries wallets_per_cycle wallets per 30-minute scan. Enable after confirming rate limit headroom.",
-        "enabled": false,
-        "min_consensus": 3,
-        "wallets_per_cycle": 2,
-        "price_min": 0.25,
-        "price_max": 0.7,
-        "min_hours_left": 6.0,
-        "max_positions": 2,
-        "stop_loss_pct": null
-    },
-    "strategy_consensus_basket": {
-        "_group": "Strategy: Consensus Basket (volume play)",
-        "_NOTE": "Single elite allowed, small bets, more positions. Statistically defensible: at >50% accuracy with many small bets variance smooths out. Soft stop at -35%.",
+        "min_win_rate_watch": 0.53,
+        "wilson_min_watch": 0.45,
+        "min_resolved_bets": 10,
+        "min_pnl": 0.0,
+        "min_win_rate_ver": 0.56,
+        "wilson_min_ver": 0.49,
+        "min_avg_profit": 2.0,
+        "min_avg_bet": 10.0,
+        "min_portfolio_or_pnl": 500.0,
+        "elite_min_pnl": 40000.0,
+        "elite_min_portfolio": 80000.0,
+        "elite_min_score": 0.72,
+        "elite_min_resolved": 20,
+        "elite_alpha_per_trade": 1.0,
+        "weight_wilson": 0.3,
+        "weight_pnl_pct": 0.25,
+        "weight_portfolio": 0.15,
+        "weight_trade_count": 0.1,
+        "weight_open_positions": 0.1,
+        "weight_alpha": 0.1,
+        "hft_tph_threshold": 50.0,
+        "sports_bot_tph_threshold": 100.0
+      }
+    }
+  },
+  "signal_builders": {
+    "_group": "Signal Builders",
+    "active_builders": [
+      "consensus_basket",
+      "recent_form",
+      "drift_discount"
+    ],
+    "builders": {
+      "consensus_basket": {
         "enabled": true,
         "min_elite_confluence": 1,
         "max_signal_age_h": 0.5,
@@ -446,258 +718,32 @@
         "max_positions": 5,
         "max_bet_abs": 1.2,
         "stop_loss_pct": -0.35,
-        "conviction_portfolio_pct": 0.005,
-        "opposition_ratio_block": 0.6
-    },
-    "vip_wallets": {
-        "_group": "VIP Wallets",
-        "_description": "Polled every single cycle.",
-        "wallets": [
-            {
-                "address": "0x6d9fc316c3b8377060a44b852ba664adbfd59790",
-                "note": "MEPP $299k alpha trader"
-            },
-            {
-                "address": "0x63ce342161250d705dc0b16df89036c8e5f9ba9a",
-                "note": "0x8dxd $2.21M"
-            },
-            {
-                "address": "0x1cc16713196d456f86fa9c7387dd326a7f73b8df",
-                "note": "Wickier"
-            },
-            {
-                "address": "0x614dc8d3542c12103d2c6a3553fd761e391d1546",
-                "note": "mr.ozi alpha trader"
-            },
-            {
-                "address": "0x7f9e2d1df78614564a70becc7fa14aa9a6623a0e",
-                "note": "nojnn alpha trader"
-            },
-            {
-                "address": "0xdf17f4a8dd01a4cfa6fc3da323a2baee5f8697d1",
-                "note": "Clear-Corridor alpha trader"
-            }
-        ]
-    },
-    "priority_wallets": {
-        "_group": "Priority Wallets",
-        "_description": "Extra wallets polled every cycle.",
-        "wallets": []
-    },
-    "seed_watchlist": {
-        "_group": "Seed Watchlist",
-        "_description": "Wallets added to watchlist on first boot.",
-        "wallets": [
-            "0x5a218c7ad04135830a45c41aaed7294df7809318",
-            "0xead152b855effa6b5b5837f53b24c0756830c76a",
-            "0xe8dd7741ccb12350957ec71e9ee332e0d1e6ec86",
-            "0x162f6fff88a52864e8e831d5ee0c30ee0d9c71ea",
-            "0xbacd00c9080a82de9b0edca958adb3a1abd12b3c",
-            "0xdf17f4a8dd01a4cf3049b34e0bf91cbbac2a09e9",
-            "0xe83cc0c82d009a1c34188563c83c206b320e57dd",
-            "0x63ce342161250d705dc0b16df89036c8e5f9ba9a",
-            "0x6d9fc316c3b8377060a44b852ba664adbfd59790",
-            "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294",
-            "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee",
-            "0x000d257d2b2dc3437890e2e7e99cee4abf5d26b4",
-            "0x1cc16713196d456f86fa9c7387dd326a7f73b8df",
-            "0x614dc8d3542c12103d2c6a3553fd761e391d1546",
-            "0x7f9e2d1df78614564a70becc7fa14aa9a6623a0e",
-            "0xdf17f4a8dd01a4cfa6fc3da323a2baee5f8697d1"
-        ]
-    },
-    "strategy_scoring": {
-        "_group": "Scoring Constants \u00e2\u20ac\u201d score_signal()",
-        "wallet_max_pts": 30,
-        "confluence_pts": [
-            0,
-            6,
-            10,
-            14,
-            18
-        ],
-        "large_trade_conf_bonus": 4,
-        "elite_only_conf_floor": 8,
-        "recency_hot_thresholds": [
-            [
-                0.25,
-                20
-            ],
-            [
-                0.5,
-                17
-            ],
-            [
-                1,
-                14
-            ],
-            [
-                2,
-                9
-            ],
-            [
-                3,
-                6
-            ],
-            [
-                4,
-                4
-            ],
-            [
-                null,
-                2
-            ]
-        ],
-        "recency_warm_thresholds": [
-            [
-                4,
-                6
-            ],
-            [
-                6,
-                4
-            ],
-            [
-                8,
-                2
-            ],
-            [
-                null,
-                1
-            ]
-        ],
-        "hft_recency_bonus": 5,
-        "hft_recency_cap": 20,
-        "opp_neg_drift_base": 8,
-        "opp_neg_drift_scale": 25,
-        "opp_neg_drift_max": 15,
-        "opp_pos_drift_thresholds": [
-            [
-                0.04,
-                15
-            ],
-            [
-                0.08,
-                12
-            ],
-            [
-                0.12,
-                8
-            ],
-            [
-                0.15,
-                4
-            ],
-            [
-                null,
-                0
-            ]
-        ],
-        "liq_quality_max": 5.0,
-        "liq_quality_scale": 8000,
-        "vol_quality_max": 3.0,
-        "vol_quality_scale": 40000,
-        "time_quality_pts": [
-            2,
-            1,
-            0
-        ],
-        "time_quality_thresholds": [
-            72,
-            24
-        ],
-        "conviction_bonus_massive": 5,
-        "conviction_bonus_large": 2,
-        "large_trade_bonus": 3,
-        "price_zone_ideal_bonus": 5,
-        "price_zone_acceptable_bonus": 2,
-        "price_zone_outside_penalty": -10,
-        "multi_whale_pts": [
-            0,
-            0,
-            5,
-            8
-        ],
-        "exit_penalty_per_whale": -8,
-        "weekly_pnl_penalty_min": -10,
-        "score_discount_wscore_ref": 0.85,
-        "score_discount_factor": 0.15
-    },
-    "strategy_kelly": {
-        "_group": "Kelly Sizing Constants \u00e2\u20ac\u201d kelly_bet()",
-        "score_mult_base": 0.5,
-        "score_mult_scale": 0.5,
-        "conf_mult_step": 0.25,
-        "conf_mult_cap": 1.75,
-        "tier_multipliers": {
-            "CONVICTION": 1.6,
-            "ALERT": 1.2,
-            "STRONG": 1.0,
-            "MEDIUM": 0.7,
-            "ELITE_ONLY": 0.9,
-            "HFT": 0.5
-        },
-        "score_floor_base_ref": 55,
-        "score_floor_scale": 45,
-        "score_floor_mult": 1.5,
-        "large_trade_max_abs_boost": 1.5,
-        "large_trade_bankroll_cap": 0.22,
-        "adaptive_caps": [
-            [
-                8,
-                1.5,
-                0.15
-            ],
-            [
-                15,
-                2.5,
-                0.18
-            ],
-            [
-                30,
-                4.0,
-                0.18
-            ]
-        ]
-    },
-    "position_management_ext": {
-        "_group": "Position Management Extensions",
-        "whale_exit_min_sell_fraction": 0.3
-    },
-    "wallet_selector": {
-        "_group": "Wallet Selector",
-        "active_selector": "performance",
-        "selectors": {
-            "performance": {
-                "min_trade_cash_discovery": 5000.0,
-                "leaderboard_periods": [
-                    "ALL",
-                    "MONTH",
-                    "WEEK"
-                ],
-                "min_win_rate_watch": 0.53,
-                "wilson_min_watch": 0.45,
-                "min_resolved_bets": 10,
-                "min_pnl": 0.0,
-                "min_win_rate_ver": 0.56,
-                "wilson_min_ver": 0.49,
-                "min_avg_profit": 2.0,
-                "min_avg_bet": 10.0,
-                "min_portfolio_or_pnl": 500.0,
-                "elite_min_pnl": 40000.0,
-                "elite_min_portfolio": 80000.0,
-                "elite_min_score": 0.72,
-                "elite_min_resolved": 20,
-                "elite_alpha_per_trade": 1.0,
-                "weight_wilson": 0.3,
-                "weight_pnl_pct": 0.25,
-                "weight_portfolio": 0.15,
-                "weight_trade_count": 0.1,
-                "weight_open_positions": 0.1,
-                "weight_alpha": 0.1,
-                "hft_tph_threshold": 50.0,
-                "sports_bot_tph_threshold": 100.0
-            }
-        }
+        "opposition_ratio_block": 0.6,
+        "conviction_portfolio_pct": 0.005
+      },
+      "recent_form": {
+        "enabled": true,
+        "max_tph": 20,
+        "min_pnl_30d": 0,
+        "min_pnl_7d": -50,
+        "max_signal_age_h": 0.75,
+        "min_score": 42,
+        "price_min": 0.18,
+        "price_max": 0.78,
+        "max_positions": 4,
+        "stop_loss_pct": null
+      },
+      "drift_discount": {
+        "enabled": true,
+        "min_discount_pct": 0.04,
+        "max_discount_pct": 0.12,
+        "max_signal_age_h": 6.0,
+        "price_min": 0.2,
+        "price_max": 0.72,
+        "max_positions": 3,
+        "require_still_holding_check": true,
+        "stop_loss_pct": null
+      }
     }
+  }
 }

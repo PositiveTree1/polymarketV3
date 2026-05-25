@@ -355,7 +355,7 @@ def restore_known_hedge_wallets(wallets_iter):
 # ─────────────────────────────────────────────────────────────────────────────
 #  EXIT MONITORING
 # ─────────────────────────────────────────────────────────────────────────────
-def check_whale_exits(cid_to_wallet_sets: dict, entry_times: dict | None = None) -> dict:
+def check_wallet_exist(cid_to_wallet_sets: dict, entry_times: dict | None = None) -> dict:
     """
     Returns {conditionId: [wallet_addresses_that_sold]}.
     Only checks SELL activity for wallets on open positions.
@@ -1457,25 +1457,30 @@ def build_signals(trades: list, wallets: dict, whale_exits: dict) -> tuple[list[
     Dedup: same (cid, outcome) from multiple strategies → keep highest-scored,
     merge strategy tags so the log shows "drift_discount+recent_form".
     """
-    active = getattr(C, "ACTIVE_STRATEGIES", ["consensus_basket"])
-
     all_signals = []
     all_rejects = []
 
-    if "recent_form" in active:
-        sigs, rejs = _build_recent_form_signals(trades, wallets, whale_exits)
-        all_signals.extend(sigs)
-        all_rejects.extend(rejs)
-
-    if "drift_discount" in active:
-        sigs, rejs = _build_drift_discount_signals(trades, wallets, whale_exits)
-        all_signals.extend(sigs)
-        all_rejects.extend(rejs)
-
-    if "consensus_basket" in active:
-        sigs, rejs = _build_consensus_basket_signals(trades, wallets, whale_exits)
-        all_signals.extend(sigs)
-        all_rejects.extend(rejs)
+    builders = C.get_active_builders()
+    if builders:
+        for builder in builders:
+            sigs, rejs = builder.build(trades, wallets, whale_exits)
+            all_signals.extend(sigs)
+            all_rejects.extend(rejs)
+    else:
+        # Fallback: use ACTIVE_STRATEGIES if signal_builders block absent
+        active = getattr(C, "ACTIVE_STRATEGIES", ["consensus_basket"])
+        if "recent_form" in active:
+            sigs, rejs = _build_recent_form_signals(trades, wallets, whale_exits)
+            all_signals.extend(sigs)
+            all_rejects.extend(rejs)
+        if "drift_discount" in active:
+            sigs, rejs = _build_drift_discount_signals(trades, wallets, whale_exits)
+            all_signals.extend(sigs)
+            all_rejects.extend(rejs)
+        if "consensus_basket" in active:
+            sigs, rejs = _build_consensus_basket_signals(trades, wallets, whale_exits)
+            all_signals.extend(sigs)
+            all_rejects.extend(rejs)
 
     # Price zone enforcement at dispatcher level (belt-and-suspenders)
     price_filtered = []
