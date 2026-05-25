@@ -40,6 +40,21 @@ List of Trades / Open Positions  ← live positions with exit logic
 Accounting                       ← P&L, equity curve, win rate, expectancy
 ```
 
+There is also a separate control and integration layer around that trading pipeline:
+
+```
+Tkinter UI Client Process / External MCP Client
+      │
+      ▼
+TitanAPI                         ← typed application facade over engine/state
+      │
+      ├── direct in-process calls (single-process UI mode)
+      └── MCP server transport (split client/server mode)
+              │
+              ▼
+        JSON-RPC tools + SSE notifications
+```
+
 
 ---
 
@@ -71,6 +86,64 @@ Accounting                       ← P&L, equity curve, win rate, expectancy
 | `ScriptsTitan/titan_server.py` | MCP streamable HTTP server (JSON-RPC 2.0 + SSE) |
 | `ScriptsTitan/titan_client.py` | HTTP client for connecting to TitanServer |
 | `titan_config.json` | All tunable parameters (repo root) |
+
+---
+
+## API Layer
+
+`TitanAPI` is the main application boundary above the engine. It is not the raw Polymarket API; it is TITAN's own typed facade for reading runtime state and issuing control actions.
+
+Responsibilities of `ScriptsTitan/titan_api.py`:
+
+- Starts the engine and wires callbacks for logs, cycle completion, heartbeats, and position open/close events
+- Exposes read APIs for positions, signals, wallets, P&L, logs, snapshot text, config, DB-backed history, and portfolio summaries
+- Exposes control APIs such as `force_cycle()`, `pause()`, `resume()`, and `update_config()`
+- Maintains an internal event bus via `subscribe()` / `unsubscribe()` so both the UI and the MCP server can react to engine events
+- Marks MCP-callable methods with the `@mcp_tool(...)` decorator so the server can publish them as tools automatically
+
+Think of the layering as:
+
+`titan_engine` = trading runtime  
+`titan_state` / DB = runtime state + persistence  
+`TitanAPI` = stable programmatic interface over both
+
+This distinction matters because the UI should stay thin. `titan_ui.py` renders and invokes the API; business logic belongs behind `TitanAPI` or lower-level engine modules.
+
+---
+
+## MCP Layer
+
+TITAN can run as an MCP server so external tools or another TITAN process can inspect and control it remotely.
+
+### What MCP means here
+
+- `ScriptsTitan/titan_server.py` exposes `TitanAPI` over HTTP at `/mcp`
+- `POST /mcp` handles JSON-RPC 2.0 request/response calls such as `initialize`, `tools/list`, `tools/call`, `resources/list`, and `resources/read`
+- `GET /mcp` opens an SSE stream for server notifications such as log messages, heartbeats, cycle completion, and position events
+- Sessions are tracked with `MCP-Session-Id`
+- Optional bearer-token auth can protect the server
+
+### MCP tools, resources, and prompts
+
+The server derives its tool list from `TitanAPI` methods decorated with `@mcp_tool`. That means adding a new API method and decorating it is usually enough to publish a new MCP tool.
+
+Built-in MCP resources currently include:
+
+- `titan://config` — live config JSON
+- `titan://snapshot` — compressed runtime snapshot
+- `titan://logs` — recent log tail
+- `titan://wallets` — tracked wallet roster
+
+The server also exposes prompt templates such as `titan_analysis`, `titan_signal_review`, and `titan_whale_brief`.
+
+### Client/server runtime modes
+
+There are two important ways TITAN can be used:
+
+- Single-process UI mode: `run_titan.py --mode ui` starts the engine and the Tkinter UI in the same process, with the UI calling `TitanAPI` directly
+- Split client/server mode: `run_titan.py --mode server` starts the engine plus MCP server in one process, and `run_titan.py --mode client` starts a separate UI process that connects through `TitanClient`
+
+Because `TitanClient` mirrors the `TitanAPI` surface, most UI code can work against either local or remote backends with minimal branching.
 
 ---
 
@@ -212,17 +285,17 @@ Tabs in order as shown in the notebook:
 
 | Tab | Content |
 |---|---|
-| 🎯 SELECTOR | Wallet selector parameter editor. Live-reload selector config; shows selector tier thresholds. |
-| 🐳 WALLETS | Selected wallet roster with score, WR, Wilson LB, PnL, TPH. Filterable by tier. |
-| 🔨 SIGN. CRAFT | Signal builder parameter editor. Active builder checkboxes; per-builder param grids; Apply hot-reloads config. |
-| 📡 SIGNALS | Live treeview of all signals this cycle. Score, drift, wallet count, mode. |
-| 🚨 ALERTS | Formatted detail for tradeable signals (ALERT/STRONG/HFT/CONVICTION). Auto-buy status shown. |
-| 📋 POSITIONS | Open paper positions. Live P&L, hold time, wallet source. Double-click for detail popup. |
-| 📈 P&L | Equity curve graph. Stats grid (total PnL, win rate, expectancy). Trade history table. |
-| 📊 ANALYSIS | Cycle summary: signal counts by tier, elite roster, account stats. |
-| 🔍 DIAG | Rejections (why signals were blocked), cooldowns, failed wallet scores. |
-| 📜 LOG | Full system log. "Copy Snapshot for AI" button copies entire state as text. |
-| ⚙ CONFIG | JSON editor for `titan_config.json`. Save & hot-reload. Guide panel on right. |
+| SELECTOR | Wallet selector parameter editor. Live-reload selector config; shows selector tier thresholds. |
+| WALLETS | Selected wallet roster with score, WR, Wilson LB, PnL, TPH. Filterable by tier. |
+| SIGN. CRAFT | Signal builder parameter editor. Active builder checkboxes; per-builder param grids; Apply hot-reloads config. |
+| SIGNALS | Live treeview of all signals this cycle. Score, drift, wallet count, mode. |
+| ALERTS | Formatted detail for tradeable signals (ALERT/STRONG/HFT/CONVICTION). Auto-buy status shown. |
+| POSITIONS | Open paper positions. Live P&L, hold time, wallet source. Double-click for detail popup. |
+| P&L | Equity curve graph. Stats grid (total PnL, win rate, expectancy). Trade history table. |
+| ANALYSIS | Cycle summary: signal counts by tier, elite roster, account stats. |
+| DIAG | Rejections (why signals were blocked), cooldowns, failed wallet scores. |
+| LOG | Full system log. "Copy Snapshot for AI" button copies entire state as text. |
+| CONFIG | JSON editor for `titan_config.json`. Save & hot-reload. Guide panel on right. |
 
 ---
 
