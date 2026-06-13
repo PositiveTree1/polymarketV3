@@ -120,6 +120,7 @@ class Market:
         return
 
 
+import titan_config as C
 from titan_config import *
 from titan_wallet import WalletProfile, get_compute_and_store_wallet, get_elite_wallets, is_hft_wallet
 
@@ -324,7 +325,7 @@ def _fetch_market_raw(cid: str, asset: str = "", slug: str = "") -> dict | None:
 
     def _gamma_market_by_asset(asset_value: str) -> dict | None:
         dec_asset = _to_decimal_token(asset_value)
-        direct_data = _gamma_get(f"{GAMMA_API}/markets", {
+        direct_data = _gamma_get(f"{C.GAMMA_API}/markets", {
             "clob_token_ids": dec_asset, "limit": 1
         })
         direct_market = _pick(direct_data)
@@ -343,7 +344,7 @@ def _fetch_market_raw(cid: str, asset: str = "", slug: str = "") -> dict | None:
 
     # ── Stage 2: Gamma slug lookup ────────────────────────────────────────────
     if slug:
-        data = _gamma_get(f"{GAMMA_API}/markets", {"slug": slug, "limit": 1})
+        data = _gamma_get(f"{C.GAMMA_API}/markets", {"slug": slug, "limit": 1})
         m = _pick(data)
         if m and _cid_ok(m):
             return m
@@ -356,14 +357,14 @@ def _fetch_market_raw(cid: str, asset: str = "", slug: str = "") -> dict | None:
     if not slug:
         if cid not in _seen_verified_cids:
             return None  # Unknown cid from unverified source — skip Stage 3
-        trades_data = S.safe_get(f"{DATA_API}/trades", {
+        trades_data = S.safe_get(f"{C.DATA_API}/trades", {
             "conditionId": cid, "limit": 1, "side": "BUY",
         })
         if trades_data and isinstance(trades_data, list) and trades_data:
             recovered_slug  = trades_data[0].get("slug", "")
             recovered_asset = trades_data[0].get("asset", "") or asset
             if recovered_slug:
-                data = _gamma_get(f"{GAMMA_API}/markets", {
+                data = _gamma_get(f"{C.GAMMA_API}/markets", {
                     "slug": recovered_slug, "limit": 1
                 })
                 m = _pick(data)
@@ -691,7 +692,7 @@ def fetch_position_price_fast(cid: str, asset: str, outcome: str) -> float | Non
         # Strategy 1: Gamma clob_token_ids - works when conditionId fails
         if asset:
             dec_asset = _to_decimal_token(asset)
-            data = S.safe_get(f"{GAMMA_API}/markets", {
+            data = S.safe_get(f"{C.GAMMA_API}/markets", {
                 "clob_token_ids": dec_asset, "limit": 1
             }, quiet=True)
             if data and isinstance(data, list) and data:
@@ -716,7 +717,7 @@ def fetch_position_price_fast(cid: str, asset: str, outcome: str) -> float | Non
                         return p
 
         # Strategy 2: Data API recent trades — DIRECT MATCH ONLY.
-        data = S.safe_get(f"{DATA_API}/trades", {"conditionId": cid, "limit": 20}, quiet=True)
+        data = S.safe_get(f"{C.DATA_API}/trades", {"conditionId": cid, "limit": 20}, quiet=True)
         if data and isinstance(data, list):
             our_lower = outcome.lower().strip()
             asset_match = None
@@ -804,7 +805,7 @@ def _poll_wallet_trades(wallet: str, limit: int, min_cash: float,
                         source: str, is_elite: bool = False,
                         avg_bet: float = 0, hft: bool = False,
                         is_large_trade_mode: bool = False) -> list[WhaleObservation]:
-    data = S.safe_get(f"{DATA_API}/trades", {
+    data = S.safe_get(f"{C.DATA_API}/trades", {
         "user":         wallet,
         "limit":        limit,
         "side":         "BUY",
@@ -923,7 +924,7 @@ def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) 
         prof = cache.get(wallet)
         avg_bet = prof["avg_bet"] if prof is not None else 0
         trades : list[WhaleObservation]  = _poll_wallet_trades(
-            wallet, 100, max(50.0, float(MIN_TRADE_CASH)),
+            wallet, 100, max(50.0, float(C.MIN_TRADE_CASH)),
             hot_cutoff, warm_cutoff, "watchlist_poll",
             False, avg_bet, False
         )
@@ -940,25 +941,43 @@ def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) 
 #  PUBLIC FEED (secondary — discovery + confluence)
 # ─────────────────────────────────────────────────────────────────────────────
 def _fetch_public_feed(hot_cutoff: float, warm_cutoff: float) -> list[WhaleObservation]:
-    pub_data = S.safe_get(f"{DATA_API}/trades", {
-        "limit":        MAX_TRADES_FETCH,
+    pub_data = S.safe_get(f"{C.DATA_API}/trades", {
+        "limit":        C.MAX_TRADES_FETCH,
         "filterType":   "CASH",
-        "filterAmount": MIN_TRADE_CASH,
+        "filterAmount": C.MIN_TRADE_CASH,
         "side":         "BUY",
     })
     if not pub_data or not isinstance(pub_data, list):
-        S._log("⚠ Public feed returned nothing", "WARN")
+        S._log(
+            f"⚠ Public feed API error — no response from {C.DATA_API}/trades"
+            f" (limit={C.MAX_TRADES_FETCH}, filterAmount={C.MIN_TRADE_CASH},"
+            f" hot_cutoff={hot_cutoff:.0f}, warm_cutoff={warm_cutoff:.0f})",
+            "WARN"
+        )
+        S.env().feed_responded = False
         return []
-    if len(pub_data) >= MAX_TRADES_FETCH:
-        S._log(f"⚠ Public feed hit limit ({MAX_TRADES_FETCH}). Reduce WARM_HOURS.", "WARN")
+    S.env().feed_responded = True
+    if len(pub_data) >= C.MAX_TRADES_FETCH:
+        S._log(f"⚠ Public feed hit limit ({C.MAX_TRADES_FETCH}). Reduce WARM_HOURS.", "WARN")
     results = []
+    oldest_ts = None
     for t in pub_data:
         wallet = (t.get("proxyWallet") or "").lower()
         if not wallet:
             continue
+        ts = float(t.get("timestamp") or 0)
+        if oldest_ts is None or ts < oldest_ts:
+            oldest_ts = ts
         whaletrade: WhaleObservation | None = _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, "public_feed")
         if whaletrade:
             results.append(whaletrade)
+    if not results and pub_data:
+        age_h = (time.time() - oldest_ts) / 3600 if oldest_ts else 0
+        S._log(
+            f"⚠ Public feed: {len(pub_data)} trades returned but all outside WARM_HOURS={C.WARM_HOURS}h "
+            f"(newest trade was {age_h:.1f}h ago — quiet market, no fresh activity)",
+            "WARN"
+        )
     return results
 
 
@@ -968,7 +987,7 @@ def _fetch_public_feed(hot_cutoff: float, warm_cutoff: float) -> list[WhaleObser
 def fetch_wallet_sells(wallet: str, since_ts: float, limit: int = 100) -> list[WhaleSell]:
     sells: list[WhaleSell] = []
 
-    data = S.safe_get(f"{DATA_API}/trades", {
+    data = S.safe_get(f"{C.DATA_API}/trades", {
         "user":  wallet,
         "side":  "SELL",
         "limit": limit,
@@ -989,7 +1008,7 @@ def fetch_wallet_sells(wallet: str, since_ts: float, limit: int = 100) -> list[W
                 ))
 
     if not sells:
-        data2 = S.safe_get(f"{DATA_API}/activity", {
+        data2 = S.safe_get(f"{C.DATA_API}/activity", {
             "user":          wallet,
             "type":          "TRADE",
             "side":          "SELL",
@@ -1021,8 +1040,9 @@ def fetch_wallet_sells(wallet: str, since_ts: float, limit: int = 100) -> list[W
 #  MAIN FETCH ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 def fetch_trades() -> list[WhaleObservation]:
-    hot_cutoff  = time.time() - HOT_HOURS  * 3600
-    warm_cutoff = time.time() - WARM_HOURS * 3600
+    S.env().feed_responded = False
+    hot_cutoff  = time.time() - C.HOT_HOURS  * 3600
+    warm_cutoff = time.time() - C.WARM_HOURS * 3600
 
     priority = _poll_vip_and_elite(hot_cutoff, warm_cutoff)
     polled   = {t.wallet for t in priority}
@@ -1081,7 +1101,7 @@ def fetch_hft_spike_trades() -> list[WhaleObservation]:
         if avg_bet <= 0:
             continue
 
-        raw = S.safe_get(f"{DATA_API}/trades", {
+        raw = S.safe_get(f"{C.DATA_API}/trades", {
             "user":         wallet,
             "limit":        15,
             "side":         "BUY",

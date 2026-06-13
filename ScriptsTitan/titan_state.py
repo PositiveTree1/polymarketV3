@@ -10,6 +10,7 @@ import os
 from collections import deque
 from datetime import datetime
 from typing import TYPE_CHECKING, TypedDict
+import titan_config as C
 from titan_config import *
 
 if TYPE_CHECKING:
@@ -89,6 +90,7 @@ class WalletEnv:
         self.cycle_count:         int                                    = 0
         self.active_signal_cids:  dict[str, set[str]]                   = {}
         self.LAST_SIGNALS:        list["Signal"]                        = []
+        self.feed_responded:      bool                                   = False
         self.LAST_REJECTS:        list[str]                             = []
         self.WHALE_EXIT_HISTORY:  list[str]                             = []
         self.paper_bankroll:      float                                  = BANKROLL_START
@@ -229,7 +231,7 @@ def _log(msg: str, level: str = "INFO") -> None:
 def safe_get(url: str, params: dict | None = None, retries: int = 3, timeout: int = 12, quiet: bool = False) -> list | dict | None:
     for i in range(retries):
         try:
-            r = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
+            r = requests.get(url, params=params, headers=C.HEADERS, timeout=timeout)
             if r.status_code == 429:
                 wait = 2 ** (i + 1)
                 if not quiet:
@@ -272,13 +274,34 @@ def safe_get(url: str, params: dict | None = None, retries: int = 3, timeout: in
                 )
             return None
         except requests.exceptions.Timeout:
+            if not quiet:
+                caller = _build_http_caller_chain(depth=5)
+                param_str = ("?" + "&".join(f"{k}={v}" for k, v in params.items())) if params else ""
+                _log(f"⚠ Timeout (attempt {i+1}/{retries}): {url}{param_str} | caller: {caller}", "DIAG")
             time.sleep(1.5)
-        except requests.exceptions.ConnectionError:
+        except requests.exceptions.ConnectionError as e:
+            if not quiet:
+                caller = _build_http_caller_chain(depth=5)
+                param_str = ("?" + "&".join(f"{k}={v}" for k, v in params.items())) if params else ""
+                _log(f"⚠ ConnectionError (attempt {i+1}/{retries}): {url}{param_str} | {e} | caller: {caller}", "DIAG")
             time.sleep(2)
         except Exception as e:
             if not quiet:
-                _log(f"⚠ Request error: {e}", "DIAG")
+                caller = _build_http_caller_chain(depth=5)
+                if not url.startswith("http"):
+                    _log(
+                        f"⚠ Request error: invalid URL '{url}' — base URL not set "
+                        f"(DATA_API is empty, config not loaded yet?) | caller: {caller} | error: {e}",
+                        "DIAG"
+                    )
+                else:
+                    param_str = ("?" + "&".join(f"{k}={v}" for k, v in (params or {}).items())) if params else ""
+                    _log(f"⚠ Request error (attempt {i+1}/{retries}): {url}{param_str} | {type(e).__name__}: {e} | caller: {caller}", "DIAG")
             time.sleep(0.5)
+    if not quiet:
+        caller = _build_http_caller_chain(depth=5)
+        param_str = ("?" + "&".join(f"{k}={v}" for k, v in (params or {}).items())) if params else ""
+        _log(f"⚠ All {retries} attempts failed: {url}{param_str} | caller: {caller}", "ERR")
     return None
 
 # ── Cash extraction ───────────────────────────────────────────────────────────

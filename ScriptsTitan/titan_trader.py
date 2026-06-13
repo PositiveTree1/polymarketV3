@@ -60,7 +60,7 @@ def _try_fetch_resolution_price(cid: str, asset: str, outcome: str) -> float | N
                 S._log(f"  📡 Asset price confirmed: {asset[:20]} = {p:.4f}", "DIAG")
                 return p
 
-        data = S.safe_get(f"{DATA_API}/trades", {
+        data = S.safe_get(f"{C.DATA_API}/trades", {
             "conditionId": cid,
             "limit": 10,
         })
@@ -77,15 +77,6 @@ def _try_fetch_resolution_price(cid: str, asset: str, outcome: str) -> float | N
                 if (is_our_token or is_our_label) and (price >= 0.97 or price <= 0.03):
                     return price
 
-        if asset:
-            pos_data = S.safe_get(f"{DATA_API}/positions", {
-                "asset": asset, "limit": 1,
-            })
-            if pos_data and isinstance(pos_data, list) and pos_data:
-                p = pos_data[0]
-                cur_p = float(p.get("curPrice", 0) or 0)
-                if cur_p >= 0.97 or cur_p <= 0.03:
-                    return cur_p
 
     except Exception as e:
         S._log(f"  ⚠ Resolution price fetch failed: {e}", "DIAG")
@@ -102,9 +93,7 @@ def _get_current_price(pos: Position) -> tuple:
     outcome = pos.outcome
     asset   = pos.asset
     title   = pos.title
-    stale_price = pos.cur_price 
-    
-    #or pos.entry_price or 0.5
+    stale_price = pos.cur_price or pos.entry_price or 0.5
 
     fast_price = fetch_position_price_fast(cid, asset, outcome)
     if fast_price is not None:
@@ -537,8 +526,8 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
                             )
                         reason = "MARKET_GONE"
 
-        # (f) Near-zero price = resolved against us
-        if not reason and cur <= 0.03 and hold_minutes > 10:
+        # (f) Near-zero price = resolved against us — only when price is fresh
+        if not reason and cur <= 0.03 and hold_minutes > 10 and pos.market_fail_count == 0:
             reason = f"RESOLVED_LOSS cur={cur:.3f}"
 
         # (g) CATASTROPHIC LOSS GUARD — always fires regardless of strategy

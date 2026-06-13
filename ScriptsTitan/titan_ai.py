@@ -7,7 +7,7 @@ import requests
 import os
 from datetime import datetime
 from typing import Literal
-from titan_client import TitanClient
+from titan_client import TitanClient, _log
 from titan_protocol import TitanBackend
 
 # ── backends ──────────────────────────────────────────────────────────────────
@@ -428,8 +428,8 @@ class TitanAIClient:
         def _run():
             try:
                 _save_ai_request_snapshot(snapshot_messages)
-            except Exception:
-                pass
+            except Exception as e:
+                _log(f"AI snapshot save failed: {e}", "ERR")
 
             def _done(full: str):
                 with self._lock:

@@ -26,6 +26,32 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from titan_api import TitanAPI
 
+# ── logging ───────────────────────────────────────────────────────────────────
+_LOG_DIR  = Path(__file__).parent.parent / "Logs"
+_LOG_DIR.mkdir(exist_ok=True)
+_LOG_FILE = _LOG_DIR / "titan_server.log"
+
+def _log(msg: str, level: str = "INFO") -> None:
+    from datetime import datetime
+    import titan_state as _S
+    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level:5}] {msg}"
+    try:
+        with open(_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+    _S._log(msg, level)
+
+def _print(msg: str) -> None:
+    from datetime import datetime
+    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    print(line)
+    try:
+        with open(_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
 # ── constants ─────────────────────────────────────────────────────────────────
 
 _PROTO_VERSION = "2025-11-25"
@@ -489,14 +515,19 @@ def _wire_events(api: TitanAPI) -> None:
         })
 
     def _on_cycle(payload: dict) -> None:
+        import dataclasses
+        def _ser(obj):
+            return dataclasses.asdict(obj) if dataclasses.is_dataclass(obj) and not isinstance(obj, type) else obj
+        trades_serial  = [_ser(t) for t in payload.get("trades", [])]
+        signals_serial = [_ser(s) for s in payload.get("signals", [])]
         _sessions.broadcast({
             "jsonrpc": "2.0",
             "method": "titan/cycle_complete",
             "params": {
-                "signals": payload.get("signals", []),
+                "signals": signals_serial,
                 "wallets": payload.get("wallets", []),
                 "rejects": payload.get("rejects", []),
-                "trades": payload.get("trades", []),
+                "trades": trades_serial,
                 "cycle": None,
                 "elapsed_ms": None,
             },
@@ -520,7 +551,7 @@ def _wire_events(api: TitanAPI) -> None:
 
 def run_server(api: TitanAPI, host: str = "127.0.0.1", port: int = 8765, token: str | None = None) -> None:
     tool_count = len(_build_tool_list(api))
-    print(f"[titan_server] MCP {_PROTO_VERSION}  {host}:{port}  tools={tool_count}  auth={'yes' if token else 'no'}")
+    _print(f"MCP {_PROTO_VERSION}  {host}:{port}  tools={tool_count}  auth={'yes' if token else 'no'}")
 
     _wire_events(api)
 

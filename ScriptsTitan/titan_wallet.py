@@ -33,7 +33,9 @@ import time
 import math
 from typing import TypedDict
 import titan_state as S
+import titan_config as C
 from titan_config import *
+import titan_db as DB
 
 
 class WhalePerformanceRecord(TypedDict):
@@ -290,7 +292,7 @@ def get_wallet_open_positions(wallet: str) -> list[WalletOpenPosition]:
     Used by Open Book consensus scanner.
     Results are NOT cached (need live data for consensus accuracy).
     """
-    data = S.safe_get(f"{DATA_API}/positions", {
+    data = S.safe_get(f"{C.DATA_API}/positions", {
         "user":          wallet,
         "limit":         100,
         "sortBy":        "CURRENT",
@@ -342,7 +344,7 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
 
     v10: Also computes recent_pnl_30d and recent_pnl_7d for Recent Form strategy.
     """
-    redeems = S.safe_get(f"{DATA_API}/activity", {
+    redeems = S.safe_get(f"{C.DATA_API}/activity", {
         "user": wallet, "type": "REDEEM",
         "limit": ACTIVITY_LIMIT, "sortBy": "TIMESTAMP", "sortDirection": "DESC",
     }) or []
@@ -359,7 +361,7 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
         if asset: won_assets.add(asset)
         total_redeem_value += float(r.get("usdcSize") or r.get("size") or 0)
 
-    trades_raw = S.safe_get(f"{DATA_API}/activity", {
+    trades_raw = S.safe_get(f"{C.DATA_API}/activity", {
         "user": wallet, "type": "TRADE", "side": "BUY",
         "limit": ACTIVITY_LIMIT, "sortBy": "TIMESTAMP", "sortDirection": "DESC",
     }) or []
@@ -410,7 +412,7 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
             if key and key not in trade_by_key:
                 trade_by_key[key] = {"cash": cash, "cid": cid, "asset": asset}
 
-    positions_raw = S.safe_get(f"{DATA_API}/positions", {
+    positions_raw = S.safe_get(f"{C.DATA_API}/positions", {
         "user": wallet, "limit": 500,
         "sortBy": "CURRENT", "sortDirection": "ASC",
     }) or []
@@ -497,7 +499,7 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
     wallet = wallet.lower()
     now_t  = time.time()
     cached = S.env().wallet_cache.get(wallet)
-    if cached and (now_t - cached["ts"]) < WALLET_TTL:
+    if cached and (now_t - cached.get("ts", 0)) < WALLET_TTL:
         return cached
 
     existing_name = (cached or {}).get("name") or ""
@@ -512,7 +514,7 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
     existing_is_real = existing_name and not existing_name.endswith("…") and not _is_auto_name(existing_name)
     keep_name = existing_name if existing_is_real else ""
 
-    pos_data = S.safe_get(f"{DATA_API}/positions", {
+    pos_data = S.safe_get(f"{C.DATA_API}/positions", {
         "user": wallet, "limit": 500,
         "sortBy": "CASHPNL", "sortDirection": "DESC",
     })
@@ -647,7 +649,21 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
         ),
     }
 
+    was_elite = (cached or {}).get("elite", False)
+    if was_elite and not elite:
+        reasons_str = ", ".join(fail_reasons) if fail_reasons else "unknown"
+        S._log(
+            f"⬇ ELITE→DOWNGRADE {final_name} ({wallet[:12]}…) | {reasons_str} | "
+            f"PnL=${pnl:+,.0f} Port=${cur:,.0f} Score={score:.2f} WR={wr*100:.0f}% Res={n_res}",
+            "WARN"
+        )
+
+    _TRACKED = ("elite", "verified", "watchable", "score", "win_rate", "wilson_lb",
+                "total_pnl", "name", "hft", "sports_bot", "recent_pnl_30d", "recent_pnl_7d")
+    _changed = cached is None or any(result.get(k) != cached.get(k) for k in _TRACKED)
     S.env().wallet_cache[wallet] = result
+    if _changed:
+        DB.upsert_wallet_profile(wallet, result)
     return result
 
 
@@ -681,8 +697,8 @@ def _refresh_recent_form_scores() -> None:
             S.env().wallet_cache[wallet] = profile
             refreshed += 1
             time.sleep(0.12)
-        except Exception:
-            pass
+        except Exception as e:
+            S._log(f"Recent form refresh failed for {wallet}: {e}", "ERR")
     if refreshed:
         S._log(f"♻ Recent form refreshed for {refreshed} wallets", "DATA")
 
@@ -734,7 +750,7 @@ def discover_new_wallets() -> None:
 def scan_top_market_holders() -> None:
     S._log("🔍 Scanning top market holders…", "DATA")
     try:
-        data = S.safe_get(f"{GAMMA_API}/markets", {"limit": 100, "active": "true"})
+        data = S.safe_get(f"{C.GAMMA_API}/markets", {"limit": 100, "active": "true"})
         if not data or not isinstance(data, list):
             return
         markets    = sorted(data, key=lambda x: float(x.get("volume") or 0), reverse=True)[:20]
@@ -743,7 +759,7 @@ def scan_top_market_holders() -> None:
             cid = m.get("conditionId")
             if not cid:
                 continue
-            trades = S.safe_get(f"{DATA_API}/trades", {
+            trades = S.safe_get(f"{C.DATA_API}/trades", {
                 "conditionId": cid, "limit": 50,
                 "filterType": "CASH", "side": "BUY", "filterAmount": 500,
             })

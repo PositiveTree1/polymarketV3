@@ -442,11 +442,12 @@ class TitanAPI:
             pass
 
     def _emit(self, event: str, payload) -> None:
+        import titan_state as _TS
         for cb in list(self._subscribers.get(event, [])):
             try:
                 cb(payload)
-            except Exception:
-                pass
+            except Exception as e:
+                _TS._log(f"Event callback error [{event}]: {e}", "ERR")
 
     def _notify_telegram(self, method: str, *args) -> None:
         if not self._telegram_enabled or self._telegram is None:
@@ -483,9 +484,9 @@ class TitanAPI:
     def _load_persisted_signals_rejects(self) -> None:
         try:
             import titan_db as DB
+            import titan_state as _S
             self._last_signals = DB.load_latest_signals(200)
             self._last_rejects = DB.load_latest_rejects(50)
-            import titan_state as _S
             msg = f"Startup recovery: signals={len(self._last_signals)} | rejects={len(self._last_rejects)}"
             print(msg)
             _S._log(msg, "INFO")
@@ -500,10 +501,29 @@ class TitanAPI:
         import titan_db as DB
         ts = time.time()
         typed_signals: list[Signal] = [s for s in (signals or []) if isinstance(s, Signal)]
+        import titan_state as _S
+
         if typed_signals:
             DB.save_signals(typed_signals, ts)
             load_signal_prices_many(typed_signals)
-        self._last_signals = typed_signals
+            self._last_signals = typed_signals
+        else:
+            # No new signals — expire any preserved signal past its age limit
+            _age_limit = {"consensus_basket": 0.5, "recent_form": 0.75, "drift_discount": 6.0}
+            surviving = []
+            for s in self._last_signals:
+                age_h = (ts - s.newest_ts) / 3600
+                limit = _age_limit.get(s.strategy.split("+")[0], 1.0)
+                if rejects:
+                    _S._log(f"  ❌ Signal removed: {s.outcome} {s.title[:45]} — explicitly rejected", "INFO")
+                elif age_h > limit:
+                    _S._log(f"  ❌ Signal expired: {s.outcome} {s.title[:45]} — age={age_h:.1f}h > {limit}h", "INFO")
+                else:
+                    surviving.append(s)
+            removed = [s.cid for s in self._last_signals if s not in surviving]
+            if removed:
+                DB.mark_signals_not_live(removed)
+            self._last_signals = surviving
         if rejects:
             DB.save_rejects(rejects, ts)
             for r in reversed(rejects):

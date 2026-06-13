@@ -11,8 +11,36 @@ import time
 import urllib.request
 from collections.abc import Mapping
 from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 from titan_trade import TradeRecord
+
+# ── logging ───────────────────────────────────────────────────────────────────
+_LOG_DIR  = Path(__file__).parent.parent / "Logs"
+_LOG_DIR.mkdir(exist_ok=True)
+_LOG_FILE = _LOG_DIR / "titan_client.log"
+
+_debug_enabled: bool = False
+
+def _log(msg: str, level: str = "INFO") -> None:
+    if level == "DEBUG" and not _debug_enabled:
+        return
+    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level:5}] {msg}"
+    try:
+        with open(_LOG_FILE, "ab") as f:
+            f.write((line + "\n").encode("utf-8"))
+    except Exception:
+        pass
+
+def _print(msg: str) -> None:
+    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    print(line)
+    try:
+        with open(_LOG_FILE, "ab") as f:
+            f.write((line + "\n").encode("utf-8"))
+    except Exception:
+        pass
 
 if TYPE_CHECKING:
     from titan_signals import Signal
@@ -37,6 +65,7 @@ class TitanClient:
         self._last_event_id: int = 0
 
         self._ready = threading.Event()
+        _print(f"Connecting to {self._base_url}")
         threading.Thread(target=self._init_async, daemon=True, name="titan-init").start()
 
     # ── internal helpers ──────────────────────────────────────────────────────
@@ -148,8 +177,9 @@ class TitanClient:
     def _init_async(self) -> None:
         try:
             self._initialize()
+            _print(f"MCP handshake OK ({self._base_url})")
         except Exception as e:
-            print(f"[TitanClient] MCP handshake failed ({self._base_url}): {e}")
+            _log(f"MCP handshake failed ({self._base_url}): {e}", "ERR")
         finally:
             self._ready.set()
 
@@ -176,8 +206,8 @@ class TitanClient:
                 method="POST",
             )
             urllib.request.urlopen(req, timeout=5).close()
-        except Exception:
-            pass
+        except Exception as e:
+            _log(f"notifications/initialized failed: {e}", "WARN")
 
     # ── SSE subscription thread ───────────────────────────────────────────────
 
@@ -190,8 +220,8 @@ class TitanClient:
         while self._sse_running:
             try:
                 self._sse_connect()
-            except Exception:
-                pass
+            except Exception as e:
+                _log(f"SSE connection error: {e}", "WARN")
             if self._sse_running:
                 time.sleep(3)
 
@@ -212,6 +242,7 @@ class TitanClient:
             resp = conn.getresponse()
             if resp.status != 200:
                 raise RuntimeError(f"SSE HTTP {resp.status}")
+            _log(f"SSE stream connected ({self._base_url})")
             buf = ""
             while self._sse_running:
                 raw = resp.fp.readline()
@@ -235,14 +266,21 @@ class TitanClient:
         finally:
             conn.close()
 
+    _LOGGABLE_EVENTS  = {"titan/position_open", "titan/position_close", "titan/cycle_complete"}
+    _DEBUG_EVENTS     = {"titan/heartbeat"}
+
     def _dispatch_notification(self, msg: dict) -> None:
         method = msg.get("method", "")
         params = msg.get("params") or {}
+        if method in self._LOGGABLE_EVENTS:
+            _log(f"← {method} {params}")
+        elif method in self._DEBUG_EVENTS:
+            _log(f"← {method} {params}", "DEBUG")
         for cb in list(self._subscribers.get(method, [])):
             try:
                 cb(params)
-            except Exception:
-                pass
+            except Exception as e:
+                _log(f"Notification callback error [{method}]: {e}", "ERR")
 
     # ── TitanAPI duck-typed interface ─────────────────────────────────────────
 
@@ -335,15 +373,19 @@ class TitanClient:
         return self._call_tool("get_recent_errors", {"limit": limit})  # type: ignore[return-value]
 
     def force_cycle(self) -> None:
+        _log("force_cycle requested")
         self._call_tool("force_cycle")
 
     def pause(self) -> None:
+        _log("pause requested")
         self._call_tool("pause")
 
     def resume(self) -> None:
+        _log("resume requested")
         self._call_tool("resume")
 
     def update_config(self, patch: dict, dry_run: bool = False) -> dict:
+        _log(f"update_config patch={patch} dry_run={dry_run}")
         return self._call_tool("update_config", {"patch": patch, "dry_run": dry_run})  # type: ignore[return-value]
 
     def subscribe(self, event: str, callback: Callable) -> None:

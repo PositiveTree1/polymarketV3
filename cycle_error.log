@@ -1,9 +1,14 @@
 Traceback (most recent call last):
-  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_engine.py", line 246, in run_loop
+  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_engine.py", line 271, in run_loop
     trades = fetch_trades()
              ^^^^^^^^^^^^^^
-  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_market.py", line 1032, in fetch_trades
-  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_market.py", line 914, in _poll_watchlist
-    for w in S.get_watchlist():
-                 ^^^^^^^^^^^
-AttributeError: 'WalletEnv' object has no attribute 'watchlist'
+  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_market.py", line 1047, in fetch_trades
+    priority = _poll_vip_and_elite(hot_cutoff, warm_cutoff)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_market.py", line 879, in _poll_vip_and_elite
+    get_compute_and_store_wallet(wallet),
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_wallet.py", line 502, in get_compute_and_store_wallet
+    if cached and (now_t - cached.get("ts", 0)) < WALLET_TTL:
+                           ^^^^^^^^^^^^
+KeyError: 'ts'

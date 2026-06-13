@@ -4,7 +4,8 @@ import time
 from typing import TYPE_CHECKING
 
 import titan_db as DB
-from titan_config import DATA_API, MARKET_TTL
+import titan_config as C
+from titan_config import MARKET_TTL
 
 if TYPE_CHECKING:
     from titan_market import Market
@@ -56,7 +57,7 @@ class MarketCache(dict[str, "Market"]):
         import titan_state as S
 
         trades_payload = S.safe_get(
-            f"{DATA_API}/trades",
+            f"{C.DATA_API}/trades",
             {"conditionId": cid, "limit": 3},
             quiet=True,
         )

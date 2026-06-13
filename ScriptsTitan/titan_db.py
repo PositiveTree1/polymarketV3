@@ -27,7 +27,9 @@ def init_db(db_path: str) -> None:
                 id          INTEGER  PRIMARY KEY AUTOINCREMENT,
                 recorded_at DATETIME NOT NULL,
                 ts          DATETIME NOT NULL,
-                data        TEXT     NOT NULL
+                data        TEXT     NOT NULL,
+                live        INTEGER  NOT NULL DEFAULT 0,
+                cid         TEXT     NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals (ts);
 
@@ -126,6 +128,12 @@ def init_db(db_path: str) -> None:
             CREATE INDEX IF NOT EXISTS idx_markets_updated_at ON markets (updated_at);
         """)
         _migrate_ts_columns(cx)
+        # Add removed column to existing DBs that predate it
+        cols = [r[1] for r in cx.execute("PRAGMA table_info(signals)").fetchall()]
+        if "live" not in cols:
+            cx.execute("ALTER TABLE signals ADD COLUMN live INTEGER NOT NULL DEFAULT 0")
+        if "cid" not in cols:
+            cx.execute("ALTER TABLE signals ADD COLUMN cid TEXT NOT NULL DEFAULT ''")
         _migrate_add_columns(cx)
         _migrate_price_history_table(cx)
         scanned_rows, updated_rows = _migrate_strip_signal_embedded_market_data(cx)
@@ -477,6 +485,9 @@ def load_equity_history(limit: int = 4000) -> list[tuple[float, float]]:
 def upsert_wallet_profile(addr: str, profile: "WalletProfile") -> None:
     if not _DB_PATH:
         return
+    import titan_state as _S
+    e = "🔥ELITE" if profile.get("elite") else ("✅VER" if profile.get("verified") else ("👁WATCH" if profile.get("watchable") else "❌"))
+    _S._log(f"💾 SAVE {addr[:14]}… {e} elite={profile.get('elite')} verified={profile.get('verified')} watchable={profile.get('watchable')}", "DIAG")
     now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     watchable = 1 if profile.get("watchable") or profile.get("verified") else 0
     blob = json.dumps({k: v for k, v in profile.items() if k != "ts"})
@@ -499,9 +510,6 @@ def load_watchable_wallets(limit: int) -> "dict[str, WalletProfile | None]":
     """
     if not _DB_PATH:
         return {}
-    import time as _time
-    now_t = _time.time()
-    stale_ts = now_t - 600 + 60  # re-score soon after load
     with _connect() as cx:
         rows = cx.execute(
             """
@@ -518,7 +526,6 @@ def load_watchable_wallets(limit: int) -> "dict[str, WalletProfile | None]":
         if blob:
             try:
                 profile = json.loads(blob)
-                profile["ts"] = stale_ts
                 result[addr] = profile
             except Exception:
                 result[addr] = None
@@ -544,15 +551,15 @@ def save_signals(signals: list["Signal"], ts: float) -> None:
     if not _DB_PATH:
         return
     now = _ts_to_dt(ts)
-    rows: list[tuple[str, str, str]] = []
+    rows: list[tuple[str, str, str, str]] = []
     for signal in signals:
         payload = signal.to_json_dict()
         sanitized = _sanitize_signal_payload(payload)
         if sanitized is None:
             continue
-        rows.append((now, now, json.dumps(sanitized, default=str)))
+        rows.append((now, now, json.dumps(sanitized, default=str), signal.cid))
     with _connect() as cx:
-        cx.executemany("INSERT INTO signals (recorded_at, ts, data) VALUES (?, ?, ?)", rows)
+        cx.executemany("INSERT INTO signals (recorded_at, ts, data, live, cid) VALUES (?, ?, ?, 1, ?)", rows)
 
 
 def save_rejects(rejects: list[str], ts: float) -> None:
@@ -592,17 +599,20 @@ def _signal_from_row(payload: dict, snapshot_ts: float | None = None) -> "Signal
         return None
 
 
+def mark_signals_not_live(cids: list[str]) -> None:
+    if not _DB_PATH or not cids:
+        return
+    with _connect() as cx:
+        cx.executemany("UPDATE signals SET live = 0 WHERE live = 1 AND cid = ?", [(cid,) for cid in cids])
+
+
 def load_latest_signals(limit: int = 200) -> list["Signal"]:
     if not _DB_PATH:
         return []
     with _connect() as cx:
-        latest_ts_row = cx.execute("SELECT MAX(ts) FROM signals").fetchone()
-        latest_ts = latest_ts_row[0] if latest_ts_row else None
-        if latest_ts is None:
-            return []
         rows = cx.execute(
-            "SELECT data FROM signals WHERE ts = ? ORDER BY id ASC LIMIT ?",
-            (latest_ts, limit),
+            "SELECT data FROM signals WHERE live = 1 ORDER BY id DESC LIMIT ?",
+            (limit,),
         ).fetchall()
     signals: list[Signal] = []
     for row in rows:

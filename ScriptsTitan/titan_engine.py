@@ -56,8 +56,8 @@ def _rescore_watchlist():
         try:
             get_compute_and_store_wallet(w)
             time.sleep(0.15)
-        except Exception:
-            pass
+        except Exception as e:
+            _log(f"Re-score failed for {w}: {e}", "ERR")
     new_elite = sum(1 for w in S.env().wallet_cache if S.env().wallet_cache[w].get("elite"))
     _log(f"♻ Re-score done | {new_elite} elite total", "DATA")
     save_whale_roster_async()
@@ -168,16 +168,39 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
         strat_counts[primary] = strat_counts.get(primary, 0) + 1
     strat_str = " ".join(f"{s}:{n}" for s, n in strat_counts.items()) if strat_counts else "none"
 
+    prev_signals = S.env().LAST_SIGNALS
+    no_trades    = not trades
+
+    if no_trades:
+        feed_note = f" | ⏸ Polymarket /trades down — {len(prev_signals)} stale signal(s) not tradeable" if prev_signals else " | ⏸ Polymarket /trades down"
+    else:
+        feed_note = ""
+
     _log(
         f"🎯 {len(signals)} signals [{strat_str}] | {len(rejects)} rejects | "
-        f"{ver_count} verified ({elite_count} elite) wallets",
+        f"{ver_count} verified ({elite_count} elite) wallets{feed_note}",
         "INFO"
     )
 
-    if is_hft_loop and rejects and not signals:
+    if no_trades and prev_signals:
+        for ps in prev_signals:
+            _log(f"  ⏸ Stale (not traded): {ps.outcome:<12} {ps.title[:45]} score={ps.score:.2f}", "DIAG")
+    elif rejects:
+        prefix = "HFT Spike" if is_hft_loop else "Signal"
         for r in rejects:
-            clean_r = r.replace("\n", " ")
-            _log(f"  ❌ HFT Spike rejected: {clean_r}", "INFO")
+            _log(f"  ❌ {prefix} rejected: {r.replace(chr(10), ' ')}", "DIAG")
+
+    # Log signals that were active last cycle but didn't survive this cycle
+    if trades and prev_signals:
+        new_cids = {s.cid for s in signals}
+        for ps in prev_signals:
+            if ps.cid not in new_cids:
+                matched_reject = next((r for r in rejects if ps.title[:20] in r or ps.cid[:12] in r), None)
+                age_h = (time.time() - ps.newest_ts) / 3600
+                if matched_reject:
+                    _log(f"  ❌ Signal dropped: {ps.outcome} {ps.title[:45]} → {matched_reject.replace(chr(10), ' ')}", "DIAG")
+                else:
+                    _log(f"  ❌ Signal expired: {ps.outcome} {ps.title[:45]} — age={age_h:.1f}h, no trades in feed this cycle", "DIAG")
 
     trade_events = auto_trade(signals, wallet_exits)
     for ev_type, msg, _color in trade_events:
@@ -241,13 +264,18 @@ def _heartbeat_loop():
 
 
 def run_loop():
+    C.reload()
     while True:
         try:
+            C.reload()
             trades = fetch_trades()
             if not trades:
-                _log("⚠ No trades fetched", "WARN")
+                import titan_state as _S
+                if _S.env().feed_responded:
+                    _log(f"⚠ Polymarket /trades responded but 0 trades matched (HOT={C.HOT_HOURS}h WARM={C.WARM_HOURS}h MIN_CASH={C.MIN_TRADE_CASH}) — signal build skipped", "ERR")
+                else:
+                    _log(f"⚠ Polymarket /trades no response (HOT={C.HOT_HOURS}h WARM={C.WARM_HOURS}h MIN_CASH={C.MIN_TRADE_CASH}) — signal build skipped", "ERR")
                 trades = []
-            C.reload()
             analyse(trades)
         except Exception as e:
             import traceback

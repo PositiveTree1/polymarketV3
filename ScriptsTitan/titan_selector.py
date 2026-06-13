@@ -17,6 +17,7 @@ import time
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, fields
+import titan_config as C
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -83,13 +84,12 @@ class WalletSelector(ABC):
         Override for a different discovery source.
         """
         import titan_state as S
-        from titan_config import DATA_API
 
         candidates: set[str] = set()
         discovery = self.discovery_config()
 
         if discovery.use_large_trades:
-            top_trades = S.safe_get(f"{DATA_API}/trades", {
+            top_trades = S.safe_get(f"{C.DATA_API}/trades", {
                 "limit": discovery.large_trade_limit,
                 "filterType": "CASH",
                 "filterAmount": discovery.min_trade_cash,
@@ -103,7 +103,7 @@ class WalletSelector(ABC):
 
         if discovery.use_leaderboard:
             for period in discovery.leaderboard_periods:
-                lb_data = S.safe_get(f"{DATA_API}/leaderboard", {
+                lb_data = S.safe_get(f"{C.DATA_API}/leaderboard", {
                     "limit": discovery.leaderboard_limit,
                     "timePeriod": period,
                     "category": discovery.leaderboard_category,

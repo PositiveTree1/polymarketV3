@@ -13,3 +13,4 @@
 - Prefer small typed functions over large loosely typed functions.
 - If changing signatures, update all callers and tests.
 - Only change the minimum and don't touch code that is no directly related to the request
+- no silent fail or exception - we log all is

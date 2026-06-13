@@ -62,7 +62,7 @@ def load_state():
     line = (
         f"Startup: markets={len(S.market_cache)} | "
         f"wallets={len(S.env().wallet_cache)} watchable={len(wl)} | "
-        f"trades={ri['trades']} open={ri['open_positions']} closed={ri['closed_trades']} | "
+        f"trades={ri['trades']} Open Positions={ri['open_positions']} closed={ri['closed_trades']} | "
         f"equity_pts={ri['equity_points']} cooldowns={ri['cooldowns']}"
     )
     print(line)
@@ -222,6 +222,8 @@ def _load_wallets_from_db() -> None:
             if addr in S.env().wallet_cache:
                 continue
             if profile is not None:
+                e = "🔥ELITE" if profile.get("elite") else ("✅VER" if profile.get("verified") else "👁WATCH")
+                S._log(f"📂 LOAD {addr[:14]}… {e} elite={profile.get('elite')} verified={profile.get('verified')} watchable={profile.get('watchable')}", "DIAG")
                 S.env().wallet_cache[addr] = cast(WalletProfile, profile)
                 with_profile += 1
             else:

@@ -21,6 +21,7 @@ from datetime import datetime
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, cast
 from titan_protocol import TitanBackend
+from titan_client import _log as _client_log
     
 import os
 import webbrowser
@@ -171,8 +172,8 @@ def show_loading_screen(root, api, on_complete):
             current_step[0] = i
             try:
                 task()
-            except Exception:
-                pass
+            except Exception as e:
+                _client_log(f"Boot task '{label}' failed: {e}", "ERR")
         current_step[0] = total_steps
 
     draw_bar(0.0)
@@ -1602,13 +1603,50 @@ def run_ui(api: TitanBackend) -> None:
               font=bold_hd, padx=12, command=copy_all_logs).pack(side="left", padx=10)
     tk.Button(log_tool_bar, text="💾 SAVE SNAPSHOT TO FILE", bg="#1a2a3a", fg="#00aaff",
               font=mono, padx=8, command=save_snapshot_to_file).pack(side="left", padx=4)
+
+    _log_debug_btn_var = tk.StringVar(value="🐞 DEBUG OFF")
+    def _toggle_log_debug():
+        import titan_client as _tc
+        _debug_mode[0] = not _debug_mode[0]
+        _tc._debug_enabled = _debug_mode[0]
+        _log_debug_btn_var.set("🐞 DEBUG ON" if _debug_mode[0] else "🐞 DEBUG OFF")
+        _debug_btn_var.set("🐞 DEBUG ON" if _debug_mode[0] else "🐞 DEBUG OFF")
+    tk.Button(log_tool_bar, textvariable=_log_debug_btn_var, bg="#1a1320", fg="#d8b4ff",
+              font=mono_sm, command=_toggle_log_debug).pack(side="left", padx=4)
     tk.Label(log_tool_bar,
              text="Copies everything: positions · signals · elites · trades · exits · raw logs.",
              fg="#445566", bg="#0d0d1a", font=mono_sm).pack(side="left")
     
-    full_log = scrolledtext.ScrolledText(tab_log, bg="#050508", fg="#66ffaa", font=mono_sm,
+    log_paned = tk.PanedWindow(tab_log, orient=tk.HORIZONTAL, bg="#0d0d1a",
+                               sashwidth=4, sashrelief="flat")
+    log_paned.pack(fill="both", expand=True, padx=4, pady=4)
+
+    srv_frame = tk.Frame(log_paned, bg="#0d0d1a")
+    tk.Label(srv_frame, text="SERVER", bg="#0d0d1a", fg="#445566", font=mono_sm,
+             anchor="w").pack(fill="x", padx=2)
+    full_log = scrolledtext.ScrolledText(srv_frame, bg="#050508", fg="#66ffaa", font=mono_sm,
                                          selectbackground="#1a2a4a", wrap=tk.NONE)
-    full_log.pack(fill="both", expand=True, padx=4, pady=4)
+    full_log.pack(fill="both", expand=True)
+    log_paned.add(srv_frame, stretch="always")
+
+    cli_frame = tk.Frame(log_paned, bg="#0d0d1a")
+    tk.Label(cli_frame, text="CLIENT", bg="#0d0d1a", fg="#445566", font=mono_sm,
+             anchor="w").pack(fill="x", padx=2)
+    client_log = scrolledtext.ScrolledText(cli_frame, bg="#050508", fg="#aaddff", font=mono_sm,
+                                           selectbackground="#1a2a4a", wrap=tk.NONE)
+    client_log.pack(fill="both", expand=True)
+    log_paned.add(cli_frame, stretch="always")
+
+    _CLIENT_LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "Logs", "titan_client.log")
+
+    def _read_client_log(lines: int = 600) -> str:
+        if not os.path.exists(_CLIENT_LOG_FILE):
+            return ""
+        try:
+            with open(_CLIENT_LOG_FILE, "r", encoding="utf-8") as f:
+                return "\n".join(l.rstrip("\r\n") for l in f.readlines()[-lines:])
+        except Exception:
+            return ""
     
     
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -3419,7 +3457,8 @@ def run_ui(api: TitanBackend) -> None:
     
     def on_cycle_complete_cb(signals, wallets, rejects, trades):
         nonlocal _last_signals, _last_wallets, _last_rejects, _last_trades
-        _last_signals = signals
+        # Always read from api — it applies age-expiry and reject-clearing logic
+        _last_signals = api.get_signals()
         _last_wallets = wallets
         
         if rejects:
@@ -3557,6 +3596,14 @@ def run_ui(api: TitanBackend) -> None:
                 full_log.insert(tk.END, line + "\n")
             full_log.see(tk.END)
             full_log.configure(state="disabled")
+
+        cli_logs = _read_client_log(600)
+        client_log.configure(state="normal")
+        client_log.delete("1.0", tk.END)
+        for line in cli_logs.splitlines():
+            client_log.insert(tk.END, line + "\n")
+        client_log.see(tk.END)
+        client_log.configure(state="disabled")
 
         # Update position chart
         sel = pos_tree.selection()

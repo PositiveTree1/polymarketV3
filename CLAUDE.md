@@ -7,6 +7,7 @@
 - strongly typed
 - no dict,  classes instead, dict are nuisance,we hate dict
 - avoid default if unecessary, it is typed so we know what a class is made off
+- no silent fail - all exception return an error
 
 ## Response style
 - Be concise. No preamble.
