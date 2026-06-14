@@ -488,13 +488,11 @@ class TitanAPI:
             self._last_signals = DB.load_latest_signals(200)
             self._last_rejects = DB.load_latest_rejects(50)
             msg = f"Startup recovery: signals={len(self._last_signals)} | rejects={len(self._last_rejects)}"
-            print(msg)
-            _S._log(msg, "INFO")
+            _S.log_important(msg)
         except Exception as e:
             import traceback, titan_state as _S
             msg = f"⚠ Failed to restore signals/rejects from DB: {e}\n{traceback.format_exc()}"
-            print(msg)
-            _S._log(msg, "WARN")
+            _S.log_important(msg)
 
     def _on_cycle(self, signals, wallets, rejects, trades) -> None:
         from titan_signals import Signal, load_signal_prices_many

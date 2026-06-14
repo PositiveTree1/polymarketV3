@@ -15,10 +15,11 @@ def main() -> None:
     args = parser.parse_args()
 
 
+    from titan_server import run_server, _rotate_server_log
+    _rotate_server_log()
     from titan_api import TitanAPI
     api = TitanAPI(enable_telegram=True)
     api.start()
-    from titan_server import run_server
     run_server(api, host=args.host, port=args.port, token=args.token)
 
 

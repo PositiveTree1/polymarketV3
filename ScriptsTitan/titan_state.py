@@ -24,9 +24,10 @@ from titan_markets import MarketCache, market_cache
 _local = threading.local()
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-LOG_DIR  = os.path.join(os.path.dirname(os.path.dirname(__file__)), "Logs")
-LOG_FILE = os.path.join(LOG_DIR, "titan.log")
+LOG_DIR         = os.path.join(os.path.dirname(os.path.dirname(__file__)), "Logs")
+LOG_FILE        = os.path.join(LOG_DIR, "titan.log")
 VERBOSE_LOG_FILE = os.path.join(LOG_DIR, "titan_verbose.log")
+SERVER_LOG_FILE = os.path.join(LOG_DIR, "titan_server.log")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 def load_logs_from_disk() -> list[str]:
@@ -227,6 +228,20 @@ def _log(msg: str, level: str = "INFO") -> None:
         on_log(msg, level)
     else:
         print(line)
+
+
+def log_important(msg: str) -> None:
+    """Print to stdout AND write to titan_server.log. Use for startup/shutdown lines."""
+    ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line, flush=True)
+    try:
+        with open(SERVER_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+    _log(msg, "INFO")
+
 
 def safe_get(url: str, params: dict | None = None, retries: int = 3, timeout: int = 12, quiet: bool = False) -> list | dict | None:
     for i in range(retries):

@@ -29,7 +29,7 @@ from titan_api import TitanAPI
 # ── logging ───────────────────────────────────────────────────────────────────
 _LOG_DIR  = Path(__file__).parent.parent / "Logs"
 _LOG_DIR.mkdir(exist_ok=True)
-_LOG_FILE = _LOG_DIR / "titan_server.log"
+from titan_state import SERVER_LOG_FILE as _LOG_FILE  # single source of truth
 
 def _log(msg: str, level: str = "INFO") -> None:
     from datetime import datetime
@@ -302,6 +302,10 @@ def _dispatch(body: dict, sid: str | None, api: TitanAPI) -> dict | None:
         negotiated   = _PROTO_VERSION if client_proto >= _PROTO_FALLBACK else _PROTO_FALLBACK
         if sid:
             _sessions.mark_initialized(sid, negotiated)
+        client_info  = params.get("clientInfo", {})
+        client_name  = client_info.get("name", "unknown")
+        client_ver   = client_info.get("version", "?")
+        _log(f"Client connected: {client_name} v{client_ver}  proto={negotiated}  sid={sid}", "INFO")
         return _ok(rid, {
             "protocolVersion": negotiated,
             "capabilities": {
@@ -470,6 +474,7 @@ class _Handler(BaseHTTPRequestHandler):
             last_id = 0
 
         client = _sessions.add_sse_client(sid, last_id)
+        _log(f"SSE stream opened  sid={sid}  addr={self.client_address[0]}", "INFO")
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -493,6 +498,7 @@ class _Handler(BaseHTTPRequestHandler):
             pass
         finally:
             _sessions.remove_sse_client(sid)
+            _log(f"SSE stream closed  sid={sid}  addr={self.client_address[0]}", "INFO")
 
 
 # ── event bus → SSE bridge ────────────────────────────────────────────────────
@@ -504,13 +510,24 @@ def _wire_events(api: TitanAPI) -> None:
         return _cb
 
     def _on_log(payload: dict) -> None:
+        from datetime import datetime
+        level = payload.get("level", "INFO")
+        msg   = payload.get("data", "")
+        line  = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level:5}] {msg}"
+        try:
+            with open(_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
+        if str(level).upper() in {"ERR", "ERROR", "CRITICAL"}:
+            print(line, flush=True)
         _sessions.broadcast({
             "jsonrpc": "2.0",
             "method": "notifications/message",
             "params": {
-                "level": payload.get("level", "info").lower(),
+                "level": str(level).lower(),
                 "logger": "titan",
-                "data": payload.get("data", ""),
+                "data": msg,
             },
         })
 
@@ -540,14 +557,28 @@ def _wire_events(api: TitanAPI) -> None:
                 "params": {"uri": uri},
             })
 
+    def _on_position(method: str):
+        def _cb(payload) -> None:
+            _sessions.broadcast({"jsonrpc": "2.0", "method": method, "params": _to_serializable(payload)})
+        return _cb
+
     api.subscribe("notifications/message", _on_log)
     api.subscribe("titan/cycle_complete",  _on_cycle)
     api.subscribe("titan/heartbeat",       _notify("titan/heartbeat"))
-    api.subscribe("titan/position_open",   _notify("titan/position_open"))
-    api.subscribe("titan/position_close",  _notify("titan/position_close"))
+    api.subscribe("titan/position_open",   _on_position("titan/position_open"))
+    api.subscribe("titan/position_close",  _on_position("titan/position_close"))
 
 
 # ── server entry ──────────────────────────────────────────────────────────────
+
+def _rotate_server_log() -> None:
+    from datetime import datetime
+    import shutil
+    log = Path(_LOG_FILE)
+    if log.exists():
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        shutil.move(str(log), str(log.parent / f"titan_server_{ts}.log"))
+
 
 def run_server(api: TitanAPI, host: str = "127.0.0.1", port: int = 8765, token: str | None = None) -> None:
     tool_count = len(_build_tool_list(api))
@@ -566,6 +597,7 @@ def run_server(api: TitanAPI, host: str = "127.0.0.1", port: int = 8765, token: 
         pass
     finally:
         server.server_close()
+        _print("Server stopped")
 
 
 if __name__ == "__main__":

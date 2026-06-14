@@ -65,8 +65,7 @@ def load_state():
         f"trades={ri['trades']} Open Positions={ri['open_positions']} closed={ri['closed_trades']} | "
         f"equity_pts={ri['equity_points']} cooldowns={ri['cooldowns']}"
     )
-    print(line)
-    S._log(f"📦 {line}", "INFO")
+    S.log_important(line)
 
 
 def _load_trading_state() -> dict[str, int]:
