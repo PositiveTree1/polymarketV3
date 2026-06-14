@@ -30,23 +30,26 @@ TITAN exposes its full runtime state and configuration via an MCP server at `htt
 
 ```
 1. Call:  initialize  (protocolVersion: "2025-11-25")
-2. Call:  tools/list  to see all available tools (currently 30)
-3. Start with:  get_status  →  get_snapshot  →  get_logs
+2. Call:  tools/list  to see all available tools (currently 35)
+3. Call:  get_docs    to discover the knowledge base
+4. Start with:  get_status  →  get_snapshot  →  get_logs
 ```
 
 Full tool reference: [MCP_REFERENCE.md](MCP_REFERENCE.md)
 
 ---
 
-## Quick Status Check (3 calls)
+## Quick Status Check
 
 | Step | Tool | What to look for |
 |---|---|---|
-| 1 | `get_status` | `running`, `cycle_count`, `recent_error_count` |
-| 2 | `get_portfolio_overview` | `total_equity`, `session_pnl`, `open_positions` |
-| 3 | `get_snapshot` | Full snapshot — positions, signals, elite roster, last trades |
+| 1 | `get_docs` | Discover available knowledge-base documents |
+| 2 | `get_status` | `running`, `cycle_count`, `recent_error_count` |
+| 3 | `get_portfolio_overview` | `total_equity`, `session_pnl`, `open_positions` |
+| 4 | `get_snapshot` | Full snapshot — positions, signals, elite roster, last trades |
 
 If `recent_error_count > 0`, follow with `get_recent_errors`.
+For any config tuning question, call `read_doc("config/CONFIG_<DOMAIN>.md")` before proposing changes.
 
 ---
 
@@ -54,20 +57,20 @@ If `recent_error_count > 0`, follow with `get_recent_errors`.
 
 Use these docs for deeper context. Load only what you need.
 
-| Document | When to load |
-|---|---|
-| This file | Always — entry point |
-| [TITAN_CONTEXT.md](TITAN_CONTEXT.md) | Full architecture, module map, engine loop detail |
-| [TITAN_STRATEGIES.md](TITAN_STRATEGIES.md) | Strategy logic — entry/exit rules for each builder |
-| [MCP_REFERENCE.md](MCP_REFERENCE.md) | All 30 MCP tools with inputs/outputs and examples |
-| [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md) | Step-by-step AI analysis workflow + change proposals |
-| [config/CONFIG_WALLETS.md](config/CONFIG_WALLETS.md) | Wallet quality and elite threshold parameters |
-| [config/CONFIG_SIGNALS.md](config/CONFIG_SIGNALS.md) | Signal gates, scoring constants, price/drift zones |
-| [config/CONFIG_STRATEGIES.md](config/CONFIG_STRATEGIES.md) | Per-strategy configuration (recent_form, drift_discount, consensus_basket) |
-| [config/CONFIG_RISK.md](config/CONFIG_RISK.md) | Position management, stop-loss, Kelly sizing, timing |
-| [config/CONFIG_SIZING.md](config/CONFIG_SIZING.md) | Bankroll, bet caps, market quality filters |
-| [TITAN_POLYMARKET_DATA_MODEL.md](TITAN_POLYMARKET_DATA_MODEL.md) | Data structures: WhaleObservation, Market, Signal, Position, URL identity rules |
-| [MCP_REFERENCE.md#logging-architecture](MCP_REFERENCE.md#logging-architecture) | Log flow, levels, files, startup lines |
+| Document | When to load | MCP tool |
+|---|---|---|
+| This file | Always — entry point | `read_doc("TITAN_AI_GUIDE.md")` |
+| [TITAN_CONTEXT.md](TITAN_CONTEXT.md) | Full architecture, module map, engine loop detail | `read_doc("TITAN_CONTEXT.md")` |
+| [TITAN_STRATEGIES.md](TITAN_STRATEGIES.md) | Strategy logic — entry/exit rules for each builder | `read_doc("TITAN_STRATEGIES.md")` |
+| [MCP_REFERENCE.md](MCP_REFERENCE.md) | All 35 MCP tools with inputs/outputs and examples | `read_doc("MCP_REFERENCE.md")` |
+| [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md) | Step-by-step AI analysis workflow + change proposals | `read_doc("ANALYSIS_GUIDE.md")` |
+| [config/CONFIG_WALLETS.md](config/CONFIG_WALLETS.md) | Wallet quality and elite threshold parameters | `read_doc("config/CONFIG_WALLETS.md")` |
+| [config/CONFIG_SIGNALS.md](config/CONFIG_SIGNALS.md) | Signal gates, scoring constants, price/drift zones | `read_doc("config/CONFIG_SIGNALS.md")` |
+| [config/CONFIG_STRATEGIES.md](config/CONFIG_STRATEGIES.md) | Per-strategy configuration (recent_form, drift_discount, consensus_basket) | `read_doc("config/CONFIG_STRATEGIES.md")` |
+| [config/CONFIG_RISK.md](config/CONFIG_RISK.md) | Position management, stop-loss, Kelly sizing, timing | `read_doc("config/CONFIG_RISK.md")` |
+| [config/CONFIG_SIZING.md](config/CONFIG_SIZING.md) | Bankroll, bet caps, market quality filters | `read_doc("config/CONFIG_SIZING.md")` |
+| [TITAN_POLYMARKET_DATA_MODEL.md](TITAN_POLYMARKET_DATA_MODEL.md) | Data structures: WalletObservation, Market, Signal, Position, URL identity rules | `read_doc("TITAN_POLYMARKET_DATA_MODEL.md")` |
+| [MCP_REFERENCE.md#logging-architecture](MCP_REFERENCE.md#logging-architecture) | Log flow, levels, files, startup lines | `read_doc("MCP_REFERENCE.md")` |
 
 ---
 
@@ -82,7 +85,7 @@ Wallet Selector        ← score and classify wallets (elite / verified / watcha
       ▼
 Signal Builders        ← 3 parallel strategies produce scored signals (0–100)
   ├── recent_form      ← copy wallets profitable in last 30 days
-  ├── drift_discount   ← enter when price dips 4–12% below whale entry
+  ├── drift_discount   ← enter when price dips 4–12% below tracked wallet entry
   └── consensus_basket ← require ≥1 elite, enforce full gate sequence
       │
       ▼
@@ -92,10 +95,10 @@ Trade Gates            ← price 20–72¢, liquidity, volume, cooldown, positio
 Kelly Sizing           ← fractional Kelly × score × confluence × tier multipliers
       │
       ▼
-Paper Positions        ← tracked with live P&L, whale exit monitoring
+Paper Positions        ← tracked with live P&L, tracked wallet exit monitoring
       │
       ▼
-Exit Logic             ← whale exits, profit target (+40%), stop-loss (per strategy)
+Exit Logic             ← tracked wallet exits, profit target (+40%), stop-loss (per strategy)
 ```
 
 ---
@@ -104,7 +107,7 @@ Exit Logic             ← whale exits, profit target (+40%), stop-loss (per str
 
 | Tier | Meaning | Auto-traded? |
 |---|---|---|
-| `CONVICTION` | Whale commits ≥$1000 or ≥0.5% portfolio | Yes |
+| `CONVICTION` | Tracked wallet commits ≥$1000 or ≥0.5% portfolio | Yes |
 | `ALERT` | High-score signal, all gates pass | Yes |
 | `STRONG` | Score above STRONG_SCORE (62) | Displayed only |
 | `MEDIUM` | Lower score, informational | Displayed only |
@@ -124,7 +127,7 @@ All parameters live in `titan_config.json` (repo root) and hot-reload without re
 | `MAX_SIGNAL_AGE_H` | 0.25 (15 min) | Higher → more signals, more stale |
 | `MIN_ENTRY_PRICE` | 0.20 | Hard floor — never enter below this |
 | `MAX_ENTRY_PRICE` | 0.72 | Hard ceiling — avoids near-certainty trap |
-| `MIN_CONFLUENCE` | 2 | Lower → single-whale trades allowed |
+| `MIN_CONFLUENCE` | 2 | Lower → single-wallet trades allowed |
 | `MAX_OPEN_POSITIONS` | 5 | Higher → more concurrent positions |
 | `STOP_LOSS_PCT` | -0.30 | Less negative → tighter stop (-0.20) |
 | `PROFIT_TARGET_PCT` | 0.40 | Lower → takes gains earlier |
@@ -156,10 +159,10 @@ These are the documented root causes of losses in prior sessions:
 | Pattern | Description | Fix |
 |---|---|---|
 | Near-certainty trap | Entered above 85¢ — tiny upside, catastrophic downside | `MAX_ENTRY_PRICE` hard ceiling at 0.72 |
-| No stop loss | Whale never sold, position went to 0 | `STOP_LOSS_ENABLED=true`, `-30%` global |
+| No stop loss | Tracked wallet never sold, position went to 0 | `STOP_LOSS_ENABLED=true`, `-30%` global |
 | Stale signals | 30-min age allowed absorbed prices | `MAX_SIGNAL_AGE_H=0.25` (15 min) |
 | HFT spike copy | Copied one leg of a hedged arb | HFT excluded from recent_form (max_tph=20) |
-| Inflated EV | `fair_prob = whale_entry + 0.05` bypassed gate | Fixed in scoring |
+| Inflated EV | `fair_prob = tracked_wallet_entry + 0.05` bypassed gate | Fixed in scoring |
 | Too many positions | $7 bankroll ÷ 5 = $1.40 avg — too small | Adaptive Kelly caps for small bankrolls |
 
 ---
@@ -169,10 +172,12 @@ These are the documented root causes of losses in prior sessions:
 The following improvements would help an AI analyse and tune TITAN more effectively. They are not yet implemented.
 
 ### Observability
-1. **Per-strategy P&L breakdown** — `get_trade_stats` currently aggregates all strategies. Splitting by `recent_form` / `drift_discount` / `consensus_basket` would show which strategies are winning.
-2. **Signal-to-trade conversion rate** — how many ALERT signals were actually traded vs blocked by gates. Helps identify over-filtering.
-3. **Parameter change log endpoint** — `get_config_changes(n=20)` to retrieve recent config edits with timestamps. Currently changes are only in `titan_server.log`.
-4. **Position age histogram** — distribution of how long winning vs losing positions are held. Informs `MIN_HOLD_MINUTES` and `EXIT_COOLDOWN_SECONDS`.
+1. ~~**Per-strategy P&L breakdown**~~ — ✅ implemented as `get_strategy_stats()`
+2. ~~**Rejection reason frequency**~~ — ✅ implemented as `get_reject_summary()`
+3. ~~**Copy-trade ROI per wallet**~~ — ✅ implemented as `get_wallet_copy_roi()`
+4. **Signal-to-trade conversion rate** — how many ALERT signals were actually traded vs blocked by gates. Helps identify over-filtering.
+5. **Parameter change log endpoint** — `get_config_changes(n=20)` to retrieve recent config edits with timestamps. Currently changes are only in `titan_server.log`.
+6. **Position age histogram** — distribution of how long winning vs losing positions are held. Informs `MIN_HOLD_MINUTES` and `EXIT_COOLDOWN_SECONDS`.
 
 ### Config Intelligence
 5. **Parameter range hints in MCP** — `get_config_signals` currently returns current values. Adding `min`, `max`, `recommended_range` to each parameter would allow AI to propose bounded changes safely.
@@ -181,5 +186,5 @@ The following improvements would help an AI analyse and tune TITAN more effectiv
 
 ### Analysis
 8. **Rejection reason analytics** — `get_rejects` returns raw strings. Grouping by rejection type (price gate / age gate / score gate / cooldown / position limit) would make it easy to see which gate is blocking most signals.
-9. **Elite wallet performance delta** — compare elite wallet PnL from week ago vs now. A whale going cold should reduce their signal weight before the scoring naturally catches up.
+9. **Elite wallet performance delta** — compare elite wallet PnL from week ago vs now. A tracked wallet going cold should reduce their signal weight before the scoring naturally catches up.
 10. **Market type P&L split** — separate P&L for POLITICS vs EVENT vs SPORTS markets. If one type is consistently losing, `ALLOWED_MARKET_TYPES` is the lever.

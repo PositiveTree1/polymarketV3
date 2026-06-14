@@ -27,6 +27,8 @@ def _log(msg: str, level: str = "INFO") -> None:
     if level == "DEBUG" and not _debug_enabled:
         return
     line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level:5}] {msg}"
+    if level.upper() in {"ERR", "ERROR", "CRITICAL"}:
+        print(line, flush=True)
     try:
         with open(_LOG_FILE, "ab") as f:
             f.write((line + "\n").encode("utf-8"))

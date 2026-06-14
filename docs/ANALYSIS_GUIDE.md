@@ -110,9 +110,9 @@ get_trade_stats()          → compare avg_win vs avg_loss
   → Raise `PROFIT_TARGET_PCT` (try 0.60)
   → Tighten `STOP_LOSS_PCT` (try -0.20)
 
-- If wins are exiting too early (whale still holding):
+- If wins are exiting too early (tracked wallet still holding):
   → Raise `PROFIT_TARGET_PCT` (try 0.60 or 0.80)
-  → Or disable profit target temporarily: `PROFIT_TARGET_ENABLED=false` (follow whale only)
+  → Or disable profit target temporarily: `PROFIT_TARGET_ENABLED=false` (follow tracked wallet only)
 
 ---
 
@@ -123,7 +123,7 @@ get_positions()            → check hold time (entry_ts vs now)
 ```
 
 **Diagnosis:**
-- Whale exit not firing: check `WHALE_EXIT_SELL=true` in `get_config_risk()`
+- Tracked wallet exit not firing: check `WALLET_EXIT_SELL=true` in `get_config_risk()`
 - Stop-loss not firing: check `STOP_LOSS_ENABLED=true` and `STOP_LOSS_PCT`
 - Stale positions: `STALE_LOSER_AGE_H=0.5` — positions losing after 30min with drift < −8% should exit
 
@@ -180,7 +180,7 @@ These are the bounds within which changes are considered safe based on the syste
 | Parameter | Current | Safe range | Notes |
 |---|---|---|---|
 | `STOP_LOSS_PCT` | -0.30 | -0.15 to -0.40 | Never `null` globally |
-| `PROFIT_TARGET_PCT` | 0.40 | 0.20 – 1.00 | Higher = follow whale longer |
+| `PROFIT_TARGET_PCT` | 0.40 | 0.20 – 1.00 | Higher = follow tracked wallet longer |
 | `MAX_OPEN_POSITIONS` | 5 | 3 – 10 | More = more diversification |
 
 ### Sizing

@@ -136,7 +136,7 @@ Built-in MCP resources currently include:
 - `titan://logs` — recent log tail
 - `titan://wallets` — tracked wallet roster
 
-The server also exposes prompt templates: `titan_analysis`, `titan_signal_review`, `titan_whale_brief`.
+The server also exposes prompt templates: `titan_analysis`, `titan_signal_review`, `titan_wallet_brief`.
 
 **Full tool reference:** [MCP_REFERENCE.md](MCP_REFERENCE.md)
 **Analysis workflow:** [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md)
@@ -329,7 +329,7 @@ The bot also sends notifications on: boot, buy, sell, errors.
 | `PROFIT_TARGET_PCT` | 0.40 | +40% auto-exit |
 | `STOP_LOSS_PCT` | −0.30 | −30% hard stop (per-strategy overrides apply) |
 | `STOP_LOSS_ENABLED` | true | Toggle stop loss — must stay true |
-| `WHALE_EXIT_SELL` | true | Mirror wallet exits |
+| `WALLET_EXIT_SELL` | true | Mirror wallet exits |
 | `MIN_ENTRY_PRICE` | 0.20 | Min price to enter (20¢) |
 | `MAX_ENTRY_PRICE` | 0.72 | Max price to enter (72¢) |
 | `EXIT_COOLDOWN_SECONDS` | 600 | 10-minute cooldown before re-entry on same market |

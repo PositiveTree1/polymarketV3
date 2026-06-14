@@ -14,9 +14,9 @@ v10 CHANGES:
   4. CYCLE STATS: per-cycle log now shows signal counts per strategy.
 
 EXIT PHILOSOPHY (unchanged from v9):
-  Follow the whale. If the whale who triggered our buy has NOT sold, we do NOT
+  Follow the wallet. If the tracked wallet who triggered our buy has NOT sold, we do NOT
   sell regardless of stop-loss or profit target — unless the market is resolving.
-  WHALE_EXIT_SELL controls this. Each signal now also carries stop_loss_pct from
+  WALLET_EXIT_SELL controls this. Each signal now also carries stop_loss_pct from
   its strategy config (None = no stop loss).
 """
 
@@ -29,7 +29,7 @@ import titan_state as S
 from titan_state import _log, safe_get
 
 import titan_db as DB
-from titan_persistence import load_state, save_state, save_whale_roster, save_whale_roster_async
+from titan_persistence import load_state, save_state, save_wallet_roster, save_wallet_roster_async
 from titan_wallet  import (get_compute_and_store_wallet, get_elite_wallets, discover_new_wallets,
                            scan_top_market_holders, get_wallet_performance_summary,
                            _refresh_recent_form_scores)
@@ -60,7 +60,7 @@ def _rescore_watchlist():
             _log(f"Re-score failed for {w}: {e}", "ERR")
     new_elite = sum(1 for w in S.env().wallet_cache if S.env().wallet_cache[w].get("elite"))
     _log(f"♻ Re-score done | {new_elite} elite total", "DATA")
-    save_whale_roster_async()
+    save_wallet_roster_async()
 
 
 def analyse(trades: list, is_hft_loop: bool = False) -> None:
@@ -78,10 +78,10 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
         threading.Thread(target=_refresh_recent_form_scores, daemon=True).start()
 
     # Score wallets seen in the feed
-    from titan_market import WhaleObservation as _WO
+    from titan_market import WalletObservation as _WO
     bad = [t for t in trades if not isinstance(t, _WO)]
     if bad:
-        _log(f"⚠ analyse() got non-WhaleObservation items: {[type(x).__name__ for x in bad[:3]]}", "ERR")
+        _log(f"⚠ analyse() got non-WalletObservation items: {[type(x).__name__ for x in bad[:3]]}", "ERR")
         trades = [t for t in trades if isinstance(t, _WO)]
     feed_wallets = {t.wallet for t in trades}
     wallets      = {}
@@ -141,7 +141,7 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
             _log(f"🔥 Elite ({len(elite_ws)}, ⚡{hft_count} HFT): {', '.join(names)}", "INFO")
 
     # Wallet exit monitoring
-    cid_to_wallet_sets = {cid: set(ws) for cid, ws in S.env().position_whale_map.items()}
+    cid_to_wallet_sets = {cid: set(ws) for cid, ws in S.env().position_wallet_map.items()}
     entry_times = {
         (pos.cid or key[0]): pos.entry_ts
         for key, pos in S.env().open_positions.items()
@@ -153,7 +153,7 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
         rebuilt = {}
         for key, pos in S.env().open_positions.items():
             cid = pos.cid or key[0]
-            lwallets = set(pos.elite_wallets + pos.whale_wallets)
+            lwallets = set(pos.elite_wallets + pos.tracked_wallets)
             if lwallets:
                 rebuilt[cid] = lwallets
         if rebuilt:
@@ -247,7 +247,7 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
         )
 
     if S.env().cycle_count % 4 == 0:
-        save_whale_roster_async()
+        save_wallet_roster_async()
 
     if S.on_cycle_complete:
         S.on_cycle_complete(signals, wallets, rejects, trades)
@@ -335,7 +335,7 @@ def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycl
     load_state()
     C.reload()
 
-    _log("🚀 TITAN v10 — Multi-Strategy Whale Mirror Engine", "INFO")
+    _log("🚀 TITAN v10 — Multi-Strategy tracked wallet Mirror Engine", "INFO")
 
     # v10: Print active strategies and their key params
     active = getattr(C, "ACTIVE_STRATEGIES", [])
@@ -384,8 +384,8 @@ def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycl
         "INFO"
     )
     _log(
-        f"   StopLoss: {'ON' if STOP_LOSS_ENABLED else 'OFF (whale-exit only)'}  "
-        f"ProfitTarget: {PROFIT_TARGET_PCT*100:.0f}%  WhaleExitSell: {WHALE_EXIT_SELL}",
+        f"   StopLoss: {'ON' if STOP_LOSS_ENABLED else 'OFF (wallet-exit only)'}  "
+        f"ProfitTarget: {PROFIT_TARGET_PCT*100:.0f}%  WalletExitSell: {WALLET_EXIT_SELL}",
         "INFO"
     )
     _log("─" * 60, "DATA")

@@ -1,20 +1,20 @@
 EXIT PHILOSOPHY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Follow the whale. You enter
-because a whale bought. You
+Follow the wallet. You enter
+because a wallet bought. You
 exit when THEY sell.
 
-  WHALE_EXIT_SELL=true
+  WALLET_EXIT_SELL=true
     → Mirror their exit. No
       questions asked.
 
   STOP_LOSS_ENABLED=false
     → No stop fires unless
-      the whale exits first.
+      the wallet exits first.
 
   PROFIT_TARGET_PCT=0.20
     → Take profit even if
-      whale still holds.
+      wallet still holds.
       (protects vs bagholder)
 
   Trailing stop activates
@@ -24,7 +24,7 @@ exit when THEY sell.
 TWO SIGNAL TYPES
 
   💎 CONVICTION (big trades)
-    Whale commits >= 0.5%
+    wallet commits >= 0.5%
     portfolio OR >= $1000.
     These are rare, high-quality
     calls. Use full Kelly sizing.

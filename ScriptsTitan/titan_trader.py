@@ -2,7 +2,7 @@
 TITAN — Auto paper trading. Single-wallet edition. v10.
 
 EXIT PHILOSOPHY — FOLLOW THE WHALE (UPDATED v10):
-  1. WHALE_EXIT_SELL=true  → exit immediately when the triggering elite sells
+  1. WALLET_EXIT_SELL=true  → exit immediately when the triggering elite sells
   2. PROFIT_TARGET_PCT     → take profit even if whale still holds (optional guard)
   3. Per-signal STOP LOSS  → each signal carries stop_loss_pct from its strategy:
        recent_form:      None (no stop loss — price ceiling is protection)
@@ -30,7 +30,7 @@ from titan_market  import get_market, get_outcome_price, is_market_resolving, Ma
 from titan_prices  import PRICES
 from titan_signals import estimate_expected_value, _KNOWN_HEDGE_WALLETS, Signal
 from titan_wallet  import is_hft_wallet, record_whale_trade_performance
-from titan_persistence import save_state, save_whale_roster_async
+from titan_persistence import save_state, save_wallet_roster_async
 from titan_trade import TradeRecord
 import titan_db as DB
 
@@ -285,7 +285,7 @@ def _build_entry_audit(sig: Signal, cur: float, shares: float, bet: float, ev_in
             "shares": shares,
             "bet": bet,
             "fee_rate": TAKER_FEE_RATE,
-            "avg_whale_entry": sig.avg_entry,
+            "avg_wallet_entry": sig.avg_entry,
             "bankroll_after_buy": round(bankroll_after, 4),
         },
         "ev_snapshot": dict(ev_info or {}),
@@ -363,7 +363,7 @@ def _collect_action_http_traces(*, since_ts: float, cid: str = "", asset: str = 
     return compact
 
 # Returns UI/log event tuples as (level, message, color).
-def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str, str]]:
+def auto_trade(signals: list[Signal], wallet_exits: dict) -> list[tuple[str, str, str]]:
     now_t = time.time()
 
     # Expire stale cooldowns
@@ -421,8 +421,8 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             reason = f"MARKET_RESOLVING cur={cur:.3f}"
 
         # (b) WHALE EXIT — follow the whale
-        elif C.WHALE_EXIT_SELL and whale_exits.get(cid):
-            exiting         = set(whale_exits[cid])
+        elif C.WALLET_EXIT_SELL and wallet_exits.get(cid):
+            exiting         = set(wallet_exits[cid])
             elite_entry_set = set(w.lower() for w in pos.elite_wallets)
             matched_elite   = list(exiting & elite_entry_set)
 
@@ -603,7 +603,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             tier=pos.tier,
             strategy=pos.strategy,
             elite_wallets=pos.elite_wallets,
-            whale_buy_cash=pos.whale_buy_cash,
+            wallet_buy_cash=pos.wallet_buy_cash,
             wallet_names=[
                 S.env().wallet_cache.get(w, {}).get("name", w[:10]+"…")
                 for w in pos.elite_wallets[:3]
@@ -616,7 +616,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         S.env().trade_stats.record_sell(pnl_usdc_net)
         DB.upsert_trade_stats(S.env().trade_stats)
         S.env().active_market_cids.discard(cid_out)
-        S.env().position_whale_map.pop(cid_out, None)
+        S.env().position_wallet_map.pop(cid_out, None)
         del S.env().open_positions[key]
         S.env().cooldown_cids[cid_out] = now_t
 
@@ -728,9 +728,9 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         if sig_elites and len(sig_elites) == 1:
             w0   = sig_elites[0]
             used = whale_position_counts.get(w0, 0) + opening_whale_counts.get(w0, 0)
-            if used >= MAX_POSITIONS_PER_WHALE:
+            if used >= MAX_POSITIONS_PER_WALLET:
                 w_name = S.env().wallet_cache.get(w0, {}).get("name", w0[:10]+"…")
-                S._log(f"  🚫 Whale cap ({MAX_POSITIONS_PER_WHALE}): {w_name} — {title[:30]}", "DIAG")
+                S._log(f"  🚫 Whale cap ({MAX_POSITIONS_PER_WALLET}): {w_name} — {title[:30]}", "DIAG")
                 continue
 
         if cid in closed_this_cycle_cids:
@@ -808,7 +808,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         resolved_slug = mkt_obj.slug or sig.slug
 
         elite_ver = sig.elite_ver
-        whale_buy_cash = {
+        wallet_buy_cash = {
             w.lower(): t.cash
             for w, t in elite_ver.items()
         }
@@ -837,7 +837,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             stop_loss_pct=sig_stop_loss,
             elite_wallets=elite_wallet_addrs,
             wallet_names=elite_names,
-            whale_buy_cash=whale_buy_cash,
+            wallet_buy_cash=wallet_buy_cash,
             avg_entry=sig.avg_entry,
             score=sig.score,
             n_confluence=sig.n_confluence,
@@ -856,7 +856,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
             status=            "open",
             type=              "OPEN",
             # signal-only fields not on TradeRecord
-            whale_wallets=     all_whale_addrs,
+            tracked_wallets=     all_whale_addrs,
             elite_names=       elite_names,
             n_elite=           sig.n_elite,
             is_hft=            sig.is_hft,
@@ -874,7 +874,7 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
 
         S.env().open_positions[key]    = pos
         S.env().active_market_cids.add(cid)
-        S.env().position_whale_map[cid] = set(all_whale_addrs)
+        S.env().position_wallet_map[cid] = set(all_whale_addrs)
 
         # WS: subscribe to real-time resolution events
         _ws_sub = _get_ws_monitor()
@@ -917,6 +917,6 @@ def auto_trade(signals: list[Signal], whale_exits: dict) -> list[tuple[str, str,
         save_state()
 
     if S.env().cycle_count % 10 == 0:
-        save_whale_roster_async()
+        save_wallet_roster_async()
 
     return events

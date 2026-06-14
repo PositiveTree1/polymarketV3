@@ -6,9 +6,31 @@ import json
 import requests
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Literal
 from titan_client import TitanClient, _log
 from titan_protocol import TitanBackend
+
+# ── ai config (persisted) ─────────────────────────────────────────────────────
+_AI_CONFIG_PATH = Path(__file__).parent.parent / "titan_ai_config.json"
+
+_DEFAULT_LOCAL_MODELS = ["qwen/qwen3.6-35b-a3b", "gemma@q4_k_xl", "gemma@q8_0", "gemma@q5_k_m"]
+
+def _load_ai_config() -> dict:
+    if _AI_CONFIG_PATH.exists():
+        try:
+            return json.loads(_AI_CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"local_models": _DEFAULT_LOCAL_MODELS, "last_local_model": _DEFAULT_LOCAL_MODELS[0]}
+
+def _save_ai_config(cfg: dict) -> None:
+    try:
+        _AI_CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    except Exception as e:
+        _log(f"AI config save failed: {e}", "ERR")
+
+_ai_config = _load_ai_config()
 
 # ── backends ──────────────────────────────────────────────────────────────────
 ACTIVE_BACKEND = "local"   # "ollama" | "groq" | "openai" | "gemini" | "local"
@@ -22,9 +44,9 @@ BACKENDS: dict[str, dict] = {
     },
     "local": {
         "type":     "openai_compat",
-        "base_url": "http://localhost:8000/v1",
+        "base_url": "http://localhost:1234/v1",
         "api_key":  "not-needed",
-        "model":    "gemma4:4b",
+        "model":    _ai_config["last_local_model"],
     },
     "openai": {
         "type":     "openai_compat",
@@ -57,21 +79,25 @@ FG_USER  = "#00aaff"; FG_AI    = "#ccffee"; FG_SYS    = "#556655"
 FG_WARN  = "#ffaa00"; FG_ERR   = "#ff4444"; BORDER    = "#1a2a4a"
 
 SYSTEM_PROMPT = """\
-You are TITAN AI, a quantitative trading analyst for the TITAN Polymarket engine.
+You are TITAN AI, a quantitative trading analyst for the TITAN Polymarket paper-trading engine.
 Parse the [LIVE SYSTEM SNAPSHOT] carefully. Answer questions about positions, P&L,
-signals, and whale wallets. Be concise, sharp, and data-first. Under 400 words.
+signals, and wallets. Be concise, sharp, and data-first. Under 400 words.
 
-If your runtime supports MCP or tool use, a Titan MCP server may be available from
-the running server at http://127.0.0.1:8765/mcp. Prefer Titan MCP tools for fresh
-live data when the snapshot may be stale. Relevant tool names can include:
-status, get_status, get_positions, get_closed_positions, get_signals,
-get_signal_history, get_rejects, get_alerts, get_tracked_wallets, get_pnl_summary,
-get_trade_history, get_snapshot, get_portfolio_overview, get_recent_errors,
-force_cycle, pause, resume, and update_config.
+You have access to a live TITAN MCP server. Always prefer calling MCP tools for fresh
+data rather than relying on the snapshot alone. The full list of available tools is
+appended below — use it to answer questions accurately.
 
-If MCP/tool use is not actually available in your host runtime, say so plainly and
-answer from the provided snapshot and conversation context instead of pretending you
-queried tools.
+When asked about a specific wallet by name, always call get_tracked_wallets(search="name")
+rather than loading the full roster — it filters server-side and returns instantly.
+
+A knowledge base of documentation is available via two tools:
+  get_docs()         — lists all available docs with descriptions
+  read_doc(path)     — returns the full content of a doc
+
+At the start of every session, call read_doc("TITAN_AI_GUIDE.md") to load the
+entry point. It contains the architecture overview, signal tiers, known loss
+patterns, and links to all other docs. Then call the specific config or strategy
+doc before proposing any parameter change.
 """
 
 
@@ -119,13 +145,7 @@ class TitanMCPBridge:
     def available_tools(self) -> list[dict]:
         with self._lock:
             if self._tools_cache is None:
-                tools = self._client.list_tools()
-                safe_tools = []
-                for tool in tools:
-                    annotations = tool.get("annotations") or {}
-                    if annotations.get("readOnlyHint", False):
-                        safe_tools.append(tool)
-                self._tools_cache = safe_tools
+                self._tools_cache = self._client.list_tools()
             return list(self._tools_cache)
 
     def openai_tools(self) -> list[dict]:
@@ -211,9 +231,16 @@ def _ollama_chat_once(messages: list[dict], tools: list[dict] | None = None) -> 
     return body.get("message") or {}
 
 
+def _strip_think(text: str) -> str:
+    import re
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
 def _message_tool_calls(msg: dict) -> list[dict]:
     tool_calls = msg.get("tool_calls") or []
     return [tc for tc in tool_calls if isinstance(tc, dict)]
+
+def _clean_content(msg: dict) -> str:
+    return _strip_think(msg.get("content", "") or "")
 
 
 def _tool_call_name(tc: dict) -> str:
@@ -276,7 +303,7 @@ def _append_ollama_tool_roundtrip(messages: list[dict], assistant_msg: dict, too
 
 
 def _dispatch_with_titan_tools(messages: list[dict], bridge: TitanMCPBridge, on_token, on_done, on_error, on_tool_call=None) -> bool:
-    if _btype not in {"openai_compat", "ollama", "local"}:
+    if _btype not in {"openai_compat", "ollama"}:
         return False
 
     try:
@@ -300,7 +327,7 @@ def _dispatch_with_titan_tools(messages: list[dict], bridge: TitanMCPBridge, on_
                     _append_openai_tool_roundtrip(tool_messages, assistant_msg, tool_calls, bridge, on_tool_call)
                     continue
 
-            final_text = assistant_msg.get("content", "") or ""
+            final_text = _clean_content(assistant_msg)
             break
 
         if not final_text:
@@ -308,7 +335,8 @@ def _dispatch_with_titan_tools(messages: list[dict], bridge: TitanMCPBridge, on_
         on_token(final_text)
         on_done(final_text)
         return True
-    except Exception:
+    except Exception as e:
+        _log(f"Tool dispatch failed: {e}", "ERR")
         return False
 
 
@@ -401,13 +429,25 @@ class TitanAIClient:
         self._lock = threading.Lock()
         self._mcp = TitanMCPBridge()
 
+    def _build_system_prompt(self) -> str:
+        try:
+            tools = self._mcp.available_tools()
+            tool_lines = "\n".join(
+                f"  {t['name']}: {t.get('description', '').splitlines()[0]}"
+                for t in tools
+            )
+            tool_section = f"\nAVAILABLE MCP TOOLS ({len(tools)}):\n{tool_lines}\n"
+        except Exception as exc:
+            tool_section = f"\n(MCP tool list unavailable: {exc})\n"
+        return SYSTEM_PROMPT + tool_section
+
     def _build_request_messages(self, full_msg: str) -> list[dict]:
         history: list[dict] = []
         for message in self._messages:
             if message.get("role") == "system":
                 continue
             history.append(dict(message))
-        return [{"role": "system", "content": SYSTEM_PROMPT}, *history, {"role": "user", "content": full_msg}]
+        return [{"role": "system", "content": self._build_system_prompt()}, *history, {"role": "user", "content": full_msg}]
 
 
     def ask(self, user_msg: str, on_token, on_done, on_error, on_tool_call=None) -> None:
@@ -467,7 +507,7 @@ class AIPanel:
         frame.pack(fill="both", expand=True)
         frame.pack_propagate(False)
 
-        hdr = tk.Frame(frame, bg=BG_MID, pady=6)
+        self._hdr = hdr = tk.Frame(frame, bg=BG_MID, pady=6)
         hdr.pack(fill="x")
         tk.Label(hdr, text="🤖  TITAN AI", fg=FG_ACCENT, bg=BG_MID, font=bold_hd).pack(side="left", padx=10)
 
@@ -482,6 +522,29 @@ class AIPanel:
 
         self._status_var = tk.StringVar(value=f"⬤ {ACTIVE_BACKEND}/{MODEL}")
         tk.Label(hdr, textvariable=self._status_var, fg=FG_SYS, bg=BG_MID, font=mono_sm).pack(side="right", padx=8)
+
+        # local model selector row (only visible when backend=local)
+        self._model_row = tk.Frame(frame, bg=BG_MID, pady=2)
+        self._model_var = tk.StringVar(value=BACKENDS["local"]["model"])
+        self._model_menu = tk.OptionMenu(self._model_row, self._model_var,
+                                         *_ai_config["local_models"])
+        self._model_var.trace_add("write", self._on_local_model_changed)
+        self._model_menu.config(bg=BG_LIGHT, fg=FG_ACCENT, font=mono_sm, relief="flat",
+                                activebackground=BG_MID, highlightthickness=0)
+        self._model_menu["menu"].config(bg=BG_MID, fg=FG_MAIN)
+        self._model_menu.pack(side="left", padx=(10, 2))
+
+        self._new_model_var = tk.StringVar()
+        new_model_entry = tk.Entry(self._model_row, textvariable=self._new_model_var,
+                                   bg=BG_INPUT, fg=FG_MAIN, font=mono_sm, width=22,
+                                   insertbackground=FG_ACCENT, relief="flat",
+                                   highlightthickness=1, highlightbackground=BORDER)
+        new_model_entry.pack(side="left", padx=2)
+        new_model_entry.bind("<Return>", lambda _e: self._save_new_local_model())
+        tk.Button(self._model_row, text="+ Save", bg=BG_LIGHT, fg=FG_ACCENT, font=mono_sm,
+                  relief="flat", padx=4, command=self._save_new_local_model).pack(side="left", padx=2)
+
+        self._update_model_row_visibility()
 
         btn_bar = tk.Frame(frame, bg=BG_MID, pady=3)
         btn_bar.pack(fill="x")
@@ -547,6 +610,40 @@ class AIPanel:
 
     def _on_backend_var_changed(self, *_args: str) -> None:
         self._switch_backend(self._backend_var.get())
+        self._update_model_row_visibility()
+
+    def _update_model_row_visibility(self) -> None:
+        if ACTIVE_BACKEND == "local":
+            self._model_row.pack(fill="x", after=self._hdr)
+        else:
+            self._model_row.pack_forget()
+
+    def _on_local_model_changed(self, *_args: str) -> None:
+        name = self._model_var.get()
+        if not name:
+            return
+        global MODEL
+        BACKENDS["local"]["model"] = name
+        MODEL = name
+        _ai_config["last_local_model"] = name
+        _save_ai_config(_ai_config)
+        self._client.clear_history()
+        self._status_var.set(f"⬤ local/{name}")
+        self._write_system(f"🔀 Local model → {name}")
+
+    def _save_new_local_model(self) -> None:
+        name = self._new_model_var.get().strip()
+        if not name:
+            return
+        models: list[str] = _ai_config.setdefault("local_models", [])
+        if name not in models:
+            models.insert(0, name)
+            _save_ai_config(_ai_config)
+            menu = self._model_menu["menu"]
+            menu.add_command(label=name, command=tk._setit(self._model_var, name))
+            self._write_system(f"💾 Saved model: {name}")
+        self._new_model_var.set("")
+        self._model_var.set(name)
 
     def _write(self, text: str, tag: str = "ai") -> None:
         self._chat.configure(state="normal")
@@ -582,32 +679,60 @@ class AIPanel:
         self._write(f"[{datetime.now().strftime('%H:%M:%S')}] ", "ts")
         self._write("TITAN AI: ", "user")
 
+        def _ui(fn):
+            import traceback
+            def _safe():
+                try:
+                    fn()
+                except Exception:
+                    tb = traceback.format_exc()
+                    _log(f"AI UI crash:\n{tb}", "ERR")
+                    try:
+                        self._chat.configure(state="normal")
+                        self._chat.insert(tk.END, f"\n[UI ERR] {tb}\n", "error")
+                        self._chat.see(tk.END)
+                        self._chat.configure(state="disabled")
+                        self._busy = False
+                        self._set_controls("normal")
+                        self._status_var.set("⬤ ui-error")
+                    except Exception:
+                        pass
+            self._chat.after(0, _safe)
+
         def on_token(tok: str) -> None:
-            self._chat.configure(state="normal")
-            self._chat.insert(tk.END, tok, "ai")
-            self._chat.see(tk.END)
-            self._chat.configure(state="disabled")
+            def _fn():
+                self._chat.configure(state="normal")
+                self._chat.insert(tk.END, tok, "ai")
+                self._chat.see(tk.END)
+                self._chat.configure(state="disabled")
+            _ui(_fn)
 
         def on_tool_call(name: str, args: dict) -> None:
             args_str = ", ".join(f"{k}={v!r}" for k, v in args.items()) if args else ""
             label = f"{name}({args_str})" if args_str else name
-            self._chat.configure(state="normal")
-            self._chat.insert(tk.END, f"\n  ⚙ MCP → {label}\n", "tool")
-            self._chat.see(tk.END)
-            self._chat.configure(state="disabled")
+            def _fn():
+                self._chat.configure(state="normal")
+                self._chat.insert(tk.END, f"\n  ⚙ MCP → {label}\n", "tool")
+                self._chat.see(tk.END)
+                self._chat.configure(state="disabled")
+            _ui(_fn)
 
         def on_done() -> None:
-            self._prettify_last_message()
-            self._write("\n", "ai")
-            self._busy = False
-            self._set_controls("normal")
-            self._status_var.set(f"⬤ ready  [{ACTIVE_BACKEND}/{MODEL}]")
+            def _fn():
+                self._prettify_last_message()
+                self._write("\n", "ai")
+                self._busy = False
+                self._set_controls("normal")
+                self._status_var.set(f"⬤ ready  [{ACTIVE_BACKEND}/{MODEL}]")
+            _ui(_fn)
 
         def on_error(msg: str) -> None:
-            self._write(f"\n⚠ {msg}\n", "error")
-            self._busy = False
-            self._set_controls("normal")
-            self._status_var.set("⬤ error")
+            def _fn():
+                self._write(f"\n⚠ {msg}\n", "error")
+                self._busy = False
+                self._set_controls("normal")
+                self._status_var.set("⬤ error")
+            _ui(_fn)
 
         self._client.ask(text, on_token, on_done, on_error, on_tool_call)
 

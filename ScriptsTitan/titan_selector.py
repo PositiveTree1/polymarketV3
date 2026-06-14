@@ -266,7 +266,8 @@ class PerformanceSelector(WalletSelector):
             roi_ok  = True
             port_ok = cur >= p.min_portfolio_or_pnl or pnl >= p.min_portfolio_or_pnl
         else:
-            roi_ok  = avg_profit >= p.min_avg_profit and avg_bet >= p.min_avg_bet
+            bet_ok  = avg_bet == 0 or avg_bet >= p.min_avg_bet
+            roi_ok  = avg_profit >= p.min_avg_profit and bet_ok
             port_ok = cur >= p.min_portfolio_or_pnl or pnl >= p.min_portfolio_or_pnl
 
         verified = (
@@ -278,7 +279,8 @@ class PerformanceSelector(WalletSelector):
 
         if watchable and not roi_ok:
             fail_reasons.append(
-                f"ROI: avg_profit=${avg_profit:.1f}<${p.min_avg_profit}, avg_bet=${avg_bet:.0f}"
+                f"ROI: avg_profit=${avg_profit:.1f}<${p.min_avg_profit}"
+                + (f", avg_bet=${avg_bet:.0f}<${p.min_avg_bet:.0f}" if avg_bet > 0 and avg_bet < p.min_avg_bet else "")
             )
         if watchable and not port_ok:
             fail_reasons.append(f"PORT: cur=${cur:,.0f} pnl=${pnl:+,.0f}")

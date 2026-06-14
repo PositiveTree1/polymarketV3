@@ -252,12 +252,12 @@ Old `strategy_*` keys kept during migration, removed after.
 ```python
 # Before (hard-coded)
 if "recent_form" in active:
-    sigs, rejs = _build_recent_form_signals(trades, wallets, whale_exits)
+    sigs, rejs = _build_recent_form_signals(trades, wallets, wallet_exits)
     ...
 
 # After (builder registry)
 for builder in C.get_active_builders():
-    sigs, rejs = builder.build(trades, wallets, whale_exits)
+    sigs, rejs = builder.build(trades, wallets, wallet_exits)
     all_signals.extend(sigs)
     all_rejects.extend(rejs)
 ```

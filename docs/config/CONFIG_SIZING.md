@@ -47,7 +47,7 @@ final_bet = clamp(kelly_bet, MIN_BET, min(MAX_BET_ABS, bankroll × MAX_BET_PCT))
 
 | Parameter | Default | Type | Description |
 |---|---|---|---|
-| `USE_PROPORTIONAL_SIZING` | `false` | bool | If true, scales bet proportionally to whale's bet relative to their portfolio. Disabled — wrong for small bankrolls. |
+| `USE_PROPORTIONAL_SIZING` | `false` | bool | If true, scales bet proportionally to tracked wallet's bet relative to their portfolio. Disabled — wrong for small bankrolls. |
 | `PROPORTIONAL_WEIGHT` | `0.0` | float (0–1) | Weight of proportional component (0 = fully disabled). |
 
 Leave both at their defaults unless testing a new sizing model.
@@ -102,7 +102,7 @@ Read via `get_config_sourcing`. Edit `titan_config.json` directly to change.
 | `CYCLE_SECONDS` | `15` | Main loop interval in seconds. 15s = 4 cycles per minute. |
 
 **Tuning guide:**
-- Missing small-size whale signals → lower `MIN_TRADE_CASH` (try 50) — but more noise
+- Missing small-size wallet signals → lower `MIN_TRADE_CASH` (try 50) — but more noise
 - API rate limit pressure → raise `CYCLE_SECONDS` (try 30) or lower `MAX_TRADES_FETCH` (try 150)
 - Stale signal problem → lower `HOT_HOURS` / `WARM_HOURS` (already at minimum = 1)
 

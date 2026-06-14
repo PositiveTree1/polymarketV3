@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, asdict
 import titan_state as S
 import titan_config as C
 from titan_config import *
-from titan_market import get_market, get_outcome_price, get_outcome_price_by_trade, fetch_wallet_sells, mark_cid_verified, WhaleObservation, Market
+from titan_market import get_market, get_outcome_price, get_outcome_price_by_trade, fetch_wallet_sells, mark_cid_verified, WalletObservation, Market
 from titan_wallet import is_hft_wallet, get_whale_weekly_pnl, is_recent_form_qualified
 
 
@@ -26,8 +26,8 @@ class Signal:
     stop_loss_pct:  float | None
 
     # ── whale observations ────────────────────────────────────────────────────
-    ver:            dict[str, WhaleObservation]
-    elite_ver:      dict[str, WhaleObservation]
+    ver:            dict[str, WalletObservation]
+    elite_ver:      dict[str, WalletObservation]
     n_ver:          int
     n_elite:        int
     n_confluence:   int
@@ -156,14 +156,14 @@ class Signal:
         outcome = str(data.get("outcome") or "")
         asset = str(data.get("asset") or "")
 
-        def _whale_obs_map(raw: object) -> dict[str, WhaleObservation]:
+        def _whale_obs_map(raw: object) -> dict[str, WalletObservation]:
             if not isinstance(raw, dict):
                 return {}
-            out: dict[str, WhaleObservation] = {}
+            out: dict[str, WalletObservation] = {}
             for wallet, obs in raw.items():
                 if not isinstance(obs, dict):
                     continue
-                out[str(wallet)] = WhaleObservation(
+                out[str(wallet)] = WalletObservation(
                     wallet=str(obs.get("wallet") or wallet),
                     name=str(obs.get("name") or ""),
                     cid=cid,
@@ -253,7 +253,7 @@ def load_signal_prices_many(signals: list["Signal"]) -> list["Signal"]:
     return signals
 
 
-def _hft_spike_ratio_value(trade: WhaleObservation) -> float:
+def _hft_spike_ratio_value(trade: WalletObservation) -> float:
     ratio = trade.hft_spike_ratio
     if ratio is None:
         return 0.0
@@ -343,8 +343,8 @@ def check_wallet_exist(cid_to_wallet_sets: dict, entry_times: dict | None = None
     cid_wallet_buy_cash: dict = {}
     for key, pos in S.env().open_positions.items():
         cid = pos.cid or key[0]
-        if pos.whale_buy_cash:
-            cid_wallet_buy_cash[cid] = pos.whale_buy_cash
+        if pos.wallet_buy_cash:
+            cid_wallet_buy_cash[cid] = pos.wallet_buy_cash
         else:
             for w in pos.elite_wallets:
                 w_lower = w.lower()
@@ -388,7 +388,7 @@ def check_wallet_exist(cid_to_wallet_sets: dict, entry_times: dict | None = None
             buy_cash = cid_wallet_buy_cash.get(cid, {}).get(wallet.lower(), 0)
             if buy_cash > 0 and sell_cash > 0:
                 sell_fraction = sell_cash / buy_cash
-                _min_frac = float(getattr(C, "position_management_ext", {}).get("whale_exit_min_sell_fraction", 0.30))
+                _min_frac = float(getattr(C, "position_management_ext", {}).get("wallet_exit_min_sell_fraction", 0.30))
                 if sell_fraction < _min_frac:
                     S._log(
                         f"  🐋 Partial trim ignored: {S.env().wallet_cache.get(wallet,{}).get('name',wallet[:10])} "
@@ -477,10 +477,10 @@ def score_signal(s: "Signal") -> dict:
         bd["price_zone"] = _sc.get("price_zone_outside_penalty", -10)
 
     n_el = s.n_elite
-    _mw = _sc.get("multi_whale_pts", [0, 0, 5, 8])
+    _mw = _sc.get("multi_wallet_pts", [0, 0, 5, 8])
     bd["multi_whale"] = _mw[min(n_el, len(_mw) - 1)]
 
-    bd["exit_penalty"] = len(s.exits_same_side) * _sc.get("exit_penalty_per_whale", -8)
+    bd["exit_penalty"] = len(s.exits_same_side) * _sc.get("exit_penalty_per_wallet", -8)
 
     weekly_pnl_total = sum(
         get_whale_weekly_pnl(w)
@@ -657,12 +657,12 @@ def _check_price_zone(cur: float, price_min: float, price_max: float,
 # ─────────────────────────────────────────────────────────────────────────────
 #  MAIN MULTI-STRATEGY DISPATCHER
 # ─────────────────────────────────────────────────────────────────────────────
-def build_signals(trades: list, wallets: dict, whale_exits: dict) -> tuple[list[Signal], list[str]]:
+def build_signals(trades: list, wallets: dict, wallet_exits: dict) -> tuple[list[Signal], list[str]]:
     all_signals = []
     all_rejects = []
 
     for builder in C.get_active_builders():
-        sigs, rejs = builder.build(trades, wallets, whale_exits)
+        sigs, rejs = builder.build(trades, wallets, wallet_exits)
         all_signals.extend(sigs)
         all_rejects.extend(rejs)
 

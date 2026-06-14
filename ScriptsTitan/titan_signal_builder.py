@@ -38,7 +38,7 @@ class SignalBuilderBase(ABC):
         self,
         trades: list,
         wallets: dict,
-        whale_exits: dict,
+        wallet_exits: dict,
     ) -> tuple[list, list[str]]:
         """Return (signals, rejects)."""
 
@@ -71,7 +71,7 @@ class ConsensusBasketBuilder(SignalBuilderBase):
     display_name = "Consensus Basket"
     params: ConsensusBasketParams
 
-    def build(self, trades: list, wallets: dict, whale_exits: dict) -> tuple[list, list[str]]:
+    def build(self, trades: list, wallets: dict, wallet_exits: dict) -> tuple[list, list[str]]:
         from titan_signals import Signal, score_signal, kelly_bet, _build_names, _get_market_for_signal, _check_price_zone, _hft_spike_ratio_value, _EMPTY_W, _KNOWN_HEDGE_WALLETS
 
         min_confluence = self.params.min_elite_confluence
@@ -148,7 +148,7 @@ class ConsensusBasketBuilder(SignalBuilderBase):
                 if opposition_ratio > _opp_block:
                     rejects.append(
                         f"  {outcome:<12} {title[:40]}\n"
-                        f"    ↳ [CB] Counter-whale: {opposition_ratio*100:.0f}% opposing flow"
+                        f"    ↳ [CB] Counter-wallet: {opposition_ratio*100:.0f}% opposing flow"
                     )
                     continue
 
@@ -302,7 +302,7 @@ class ConsensusBasketBuilder(SignalBuilderBase):
 
             avg_wscore = sum(wallets.get(w, _EMPTY_W).get("score", 0.10) for w in elite_wallets) / len(elite_wallets)
 
-            exits_here   = whale_exits.get(cid, [])
+            exits_here   = wallet_exits.get(cid, [])
             exits_same_side = list(set(exits_here) & set(all_ver.keys()))
 
             elite_only_mode = len(verified_wallets) == 0
@@ -387,7 +387,7 @@ class RecentFormBuilder(SignalBuilderBase):
     display_name = "Recent Form"
     params: RecentFormParams
 
-    def build(self, trades: list, wallets: dict, whale_exits: dict) -> tuple[list, list[str]]:
+    def build(self, trades: list, wallets: dict, wallet_exits: dict) -> tuple[list, list[str]]:
         from titan_signals import Signal, score_signal, kelly_bet, _build_names, _get_market_for_signal, _check_price_zone, _EMPTY_W, _KNOWN_HEDGE_WALLETS
 
         max_tph       = self.params.max_tph
@@ -522,7 +522,7 @@ class RecentFormBuilder(SignalBuilderBase):
             scoring_elites = elite_wallets_rf if elite_wallets_rf else rf_qualified
             avg_wscore = sum(wallets.get(w, _EMPTY_W).get("score", 0.10) for w in scoring_elites) / len(scoring_elites)
 
-            exits_here = whale_exits.get(cid, [])
+            exits_here = wallet_exits.get(cid, [])
             exits_same_side = list(set(exits_here) & set(all_ver.keys()))
 
             total_flow = sum(t.cash for t in by_w.values())
@@ -593,7 +593,7 @@ class DriftDiscountBuilder(SignalBuilderBase):
     display_name = "Drift Discount"
     params: DriftDiscountParams
 
-    def build(self, trades: list, wallets: dict, whale_exits: dict) -> tuple[list, list[str]]:
+    def build(self, trades: list, wallets: dict, wallet_exits: dict) -> tuple[list, list[str]]:
         from titan_signals import Signal, kelly_bet, _build_names, _get_market_for_signal, _check_price_zone, _EMPTY_W, _KNOWN_HEDGE_WALLETS
 
         min_discount  = self.params.min_discount_pct
@@ -665,15 +665,15 @@ class DriftDiscountBuilder(SignalBuilderBase):
             total_w = sum(c for _, c in entries)
             if total_w == 0:
                 continue
-            avg_whale_entry = sum(p * w for p, w in entries) / total_w
+            avg_wallet_entry = sum(p * w for p, w in entries) / total_w
 
-            discount = (avg_whale_entry - cur) / max(avg_whale_entry, 0.01)
+            discount = (avg_wallet_entry - cur) / max(avg_wallet_entry, 0.01)
 
             if discount < min_discount:
                 rejects.append(
                     f"  {outcome:<12} {title[:40]}\n"
                     f"    ↳ [DD] Discount {discount*100:.1f}% < {min_discount*100:.0f}% min "
-                    f"(whale @{avg_whale_entry:.3f}, now @{cur:.3f})"
+                    f"(wallet @{avg_wallet_entry:.3f}, now @{cur:.3f})"
                 )
                 continue
             if discount > max_discount:
@@ -712,17 +712,17 @@ class DriftDiscountBuilder(SignalBuilderBase):
                     entries = [(t.price, t.cash) for t in all_ver.values()]
                     total_w = sum(c for _, c in entries)
                     if total_w > 0:
-                        avg_whale_entry = sum(p * w for p, w in entries) / total_w
-                        discount = (avg_whale_entry - cur) / max(avg_whale_entry, 0.01)
+                        avg_wallet_entry = sum(p * w for p, w in entries) / total_w
+                        discount = (avg_wallet_entry - cur) / max(avg_wallet_entry, 0.01)
 
             event_slug = next((t.event_slug for t in group if t.event_slug), "")
             if not event_slug:
                 event_slug = mkt.event_slug
 
-            drift = (cur - avg_whale_entry) / max(avg_whale_entry, 0.01)
+            drift = (cur - avg_wallet_entry) / max(avg_wallet_entry, 0.01)
             avg_wscore = sum(wallets.get(w, _EMPTY_W).get("score", 0.10) for w in all_ver) / max(len(all_ver), 1)
 
-            exits_here = whale_exits.get(cid, [])
+            exits_here = wallet_exits.get(cid, [])
             exits_same_side = list(set(exits_here) & set(all_ver.keys()))
 
             total_flow   = sum(t.cash for t in by_w.values())
@@ -745,7 +745,7 @@ class DriftDiscountBuilder(SignalBuilderBase):
                 ver=all_ver, elite_ver=elite_wallets,
                 n_ver=len(all_ver), n_elite=len(elite_wallets),
                 n_confluence=len(all_ver), n_total=len(by_w),
-                avg_entry=avg_whale_entry, cur=cur, drift=drift, slippage=drift,
+                avg_entry=avg_wallet_entry, cur=cur, drift=drift, slippage=drift,
                 total_flow=total_flow, ver_flow=total_flow,
                 max_bet_cash=max_bet_cash, opposing_flow=0.0,
                 newest_ts=newest_ts, oldest_ts=oldest_ts, first_seen_ts=oldest_ts, age_h=age_h, window=window,
@@ -765,7 +765,7 @@ class DriftDiscountBuilder(SignalBuilderBase):
             signals.append(sig)
             S._log(
                 f"  📉 DD signal: {title[:35]} [{outcome}] "
-                f"whale@{avg_whale_entry:.3f} now@{cur:.3f} discount={discount*100:.1f}%",
+                f"wallet@{avg_wallet_entry:.3f} now@{cur:.3f} discount={discount*100:.1f}%",
                 "DIAG"
             )
 

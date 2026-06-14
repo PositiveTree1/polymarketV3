@@ -69,7 +69,7 @@ Important rule:
 
 #### `/trades`
 
-Used for whale/public trade ingestion and several recovery paths.
+Used for wallet/public trade ingestion and several recovery paths.
 
 Current uses:
 
@@ -149,11 +149,11 @@ Important rule:
 
 ## 3. Titan structures
 
-### `WhaleObservation`
+### `WalletObservation`
 
 Defined in `ScriptsTitan/titan_market.py`.
 
-This is Titan's normalized view of a Polymarket trade from the whale/public feed.
+This is Titan's normalized view of a Polymarket trade from the wallet/public feed.
 
 Key fields:
 
@@ -178,7 +178,7 @@ Source mapping:
 
 Important rule:
 
-- `WhaleObservation.event_slug` comes from trade `eventSlug`
+- `WalletObservation.event_slug` comes from trade `eventSlug`
 - this is often the earliest URL-quality identifier Titan sees
 
 ### `Market`
@@ -320,7 +320,7 @@ Main sources:
 - public feed polling
 - HFT spike polling
 
-These become `WhaleObservation`.
+These become `WalletObservation`.
 
 ### B. Titan's own executed trades
 

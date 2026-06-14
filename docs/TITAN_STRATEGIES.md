@@ -20,7 +20,7 @@ Any strategy can be removed from this list or disabled via its `"enabled": false
 ## Strategy 1 — Recent Form Copy (`recent_form`)
 
 ### Philosophy
-Copy wallets that have been profitable in the last 30 days, regardless of their all-time standing. A wallet doesn't need to be "elite" — any verified wallet with positive recent PnL qualifies. The bet is scaled by the source whale's recent win rate.
+Copy wallets that have been profitable in the last 30 days, regardless of their all-time standing. A wallet doesn't need to be "elite" — any verified wallet with positive recent PnL qualifies. The bet is scaled by the source tracked wallet's recent win rate.
 
 ### Entry Criteria
 | Gate | Logic |
@@ -31,20 +31,20 @@ Copy wallets that have been profitable in the last 30 days, regardless of their 
 | HFT exclusion | Wallet TPH must be below `max_tph` (default 20) — filters out bots |
 | Signal age | Trade must be within `max_signal_age_h` (default 45 min) |
 | Price zone | `price_min` ≤ current price ≤ `price_max` (default 18¢–78¢, slightly wider) |
-| Slippage | Current price must not be more than `2× MAX_ENTRY_SLIPPAGE` above whale entry |
+| Slippage | Current price must not be more than `2× MAX_ENTRY_SLIPPAGE` above tracked wallet entry |
 | EV floor | Raw expected value must be > 0.5% |
 | Hedge check | Wallet must not be a known hedge bot |
 
 ### Exit
 - No stop loss by default (`stop_loss_pct: null`)
 - The price ceiling (78¢) acts as the protection instead
-- Follows whale exits and profit target normally
+- Follows tracked wallet exits and profit target normally
 
 ### Bet Sizing
 - Kelly bet scaled by `source_recent_wr` (estimated from wallet's recent PnL)
 - Multiplier: `max(0.8, min(1.6, (wr - 0.50) * 4 + 0.8))`
-- A whale with 55% recent win rate → 0.8× multiplier
-- A whale with 70% recent win rate → 1.4× multiplier
+- A tracked wallet with 55% recent win rate → 0.8× multiplier
+- A tracked wallet with 70% recent win rate → 1.4× multiplier
 
 ### Tier Assignment
 | Score | Tier |
@@ -71,22 +71,22 @@ Copy wallets that have been profitable in the last 30 days, regardless of their 
 ## Strategy 2 — Drift Discount (`drift_discount`)
 
 ### Philosophy
-Enter when the current price has dropped 4–12% below the whale's entry price, and the whale is still holding. The whale's thesis hasn't changed — we get the same bet at a discount. This strategy deliberately looks back up to 6 hours, much longer than the other two.
+Enter when the current price has dropped 4–12% below the tracked wallet's entry price, and the tracked wallet is still holding. The tracked wallet's thesis hasn't changed — we get the same bet at a discount. This strategy deliberately looks back up to 6 hours, much longer than the other two.
 
 ### Entry Criteria
 | Gate | Logic |
 |---|---|
 | Wallet qualification | Verified OR elite |
 | Signal age | Trade within `max_signal_age_h` (default 6 hours) |
-| Discount direction | Current price must be **below** whale's avg entry |
+| Discount direction | Current price must be **below** tracked wallet's avg entry |
 | Min discount | `(avg_entry − cur) / avg_entry ≥ min_discount_pct` (default 4%) |
 | Max discount | Same ratio ≤ `max_discount_pct` (default 12%) — beyond this the market is disagreeing |
 | Price zone | `price_min` ≤ current price ≤ `price_max` (default 20¢–72¢) |
-| Still holding check | Optionally calls `fetch_wallet_sells()` to confirm whale hasn't exited since buying |
+| Still holding check | Optionally calls `fetch_wallet_sells()` to confirm tracked wallet hasn't exited since buying |
 | Hedge check | Wallet must not be a known hedge bot |
 
 ### Still-Holding Check (`require_still_holding_check`)
-When enabled (default true), TITAN calls the Polymarket API to verify each whale hasn't sold since their buy. If **all** whales have exited → signal rejected. If partial exits → those wallets are removed, signal continues with remaining holders.
+When enabled (default true), TITAN calls the Polymarket API to verify each tracked wallet hasn't sold since their buy. If **all** tracked wallets have exited → signal rejected. If partial exits → those wallets are removed, signal continues with remaining holders.
 
 ### Scoring Formula
 This strategy uses a custom formula instead of the shared `score_signal()`:
@@ -101,8 +101,8 @@ base_score = 60
 
 ### Exit
 - No stop loss by default (`stop_loss_pct: null`)
-- Whale exit sell still applies
-- If price drops below `price_min` after entry, no forced exit — rely on whale mirror
+- Tracked wallet exit sell still applies
+- If price drops below `price_min` after entry, no forced exit — rely on wallet mirror
 
 ### Bet Sizing
 - Kelly bet scaled by discount percentage
@@ -114,12 +114,12 @@ base_score = 60
 | Key | Default | Description |
 |---|---|---|
 | `enabled` | `true` | Enable/disable this strategy |
-| `min_discount_pct` | `0.04` | Minimum price drop below whale entry (4%) |
+| `min_discount_pct` | `0.04` | Minimum price drop below tracked wallet entry (4%) |
 | `max_discount_pct` | `0.12` | Maximum drop — beyond this the market is disagreeing (12%) |
-| `max_signal_age_h` | `6.0` | How far back to look for whale trades |
+| `max_signal_age_h` | `6.0` | How far back to look for tracked wallet trades |
 | `price_min` | `0.20` | Minimum current price |
 | `price_max` | `0.72` | Maximum current price |
-| `require_still_holding_check` | `true` | Verify whale hasn't sold since buying |
+| `require_still_holding_check` | `true` | Verify tracked wallet hasn't sold since buying |
 | `stop_loss_pct` | `null` | Stop loss (null = no stop) |
 
 ---
@@ -133,13 +133,13 @@ The original TITAN conviction strategy, slightly relaxed. Requires at least one 
 | Gate | Logic |
 |---|---|
 | Elite wallet present | At least `min_elite_confluence` elite wallets (default 1) |
-| Counter-whale check | If >60% of elite flow is on the opposite outcome → reject |
+| Counter-wallet check | If >60% of elite flow is on the opposite outcome → reject |
 | Market fetch | Must resolve market data from Gamma API |
 | Price zone | `price_min` ≤ current price ≤ `price_max` (default 20¢–72¢) |
 | Sports gate | Sports markets need ≥1 genuine (non-sports-bot) elite |
 | Signal age | Elite trade must be within `max_signal_age_h` (default 30 min) |
-| Slippage | Current price ≤ whale entry + `MAX_ENTRY_SLIPPAGE` (or HFT variant) |
-| Drift | Current price within `[MIN_DRIFT, MAX_DRIFT]` range relative to whale entry |
+| Slippage | Current price ≤ tracked wallet entry + `MAX_ENTRY_SLIPPAGE` (or HFT variant) |
+| Drift | Current price within `[MIN_DRIFT, MAX_DRIFT]` range relative to tracked wallet entry |
 | EV floor | Raw EV must be > 1% |
 | Stale loser gate | Old signal + price already down → reject |
 | Fee gate | Net return after fees must be positive; price must be below 96.5¢ |
@@ -158,12 +158,12 @@ Wallets with a spike trade (`hft_spike_ratio ≥ 20` or `is_large_trade=True`) a
 | Score ≥ STRONG_SCORE | STRONG |
 | No verified wallets alongside elite | ELITE_ONLY |
 | Default | MEDIUM |
-| Whale exits detected on ALERT/CONVICTION | Downgraded to STRONG |
+| Tracked wallet exits detected on ALERT/CONVICTION | Downgraded to STRONG |
 | Signal age > `max_age_h` and not CONVICTION | STALE |
 
 ### Exit
 - Soft stop loss at −35% by default (`stop_loss_pct: -0.35`)
-- Full whale exit mirroring applies
+- Full tracked wallet exit mirroring applies
 
 ### Bet Sizing
 - Standard Kelly (no strategy multiplier — flat sizing)
@@ -190,15 +190,15 @@ Score is computed by `score_signal()` and capped at 100.
 | Component | Max | How it's calculated |
 |---|---|---|
 | Wallet quality | 30 | `avg_wscore × 30` (avg score of elite wallets, 0–1 scale) |
-| Confluence | 18 | 4+ whales=18 / 3=14 / 2=10 / 1=6 / 0=0. Elite-only mode floors at 8. Large trade adds +4. |
+| Confluence | 18 | 4+ wallets=18 / 3=14 / 2=10 / 1=6 / 0=0. Elite-only mode floors at 8. Large trade adds +4. |
 | Recency | 20 | Hot/HFT window: 20pts if <15min, down to 2pts at >4h. Warm window: 6pts if <4h, 1pt at >8h. HFT signal within mirror delay: +5 (capped at 20). |
 | Price window | 15 | Negative drift (price below entry): 8 + abs(drift)×25. Positive drift: 15pts if <4%, down to 0pts if >15%. |
 | Market quality | 10 | Liquidity (up to 5pts) + volume (up to 3pts) + time-to-close (0–2pts) |
 | Conviction bonus | 5 | 5pts if trade ≥ MASSIVE_TRADE / 2pts if ≥ LARGE_TRADE. Large trade adds +3. |
 | Price zone bonus | 7 | +5 if in ideal zone (25¢–65¢) / +2 if in acceptable zone / −10 if outside |
-| Multi-whale bonus | 8 | 3+ elite=8pts / 2 elite=5pts / 1=0pts |
-| Exit penalty | −8× | −8 per whale on the same side who has already sold |
-| Weekly PnL penalty | −10 max | If sum of sourcing whales' 7d PnL is negative: penalty scales from 0 to −10 |
+| Multi-wallet bonus | 8 | 3+ elite=8pts / 2 elite=5pts / 1=0pts |
+| Exit penalty | −8× | −8 per tracked wallet on the same side who has already sold |
+| Weekly PnL penalty | −10 max | If sum of sourcing tracked wallets' 7d PnL is negative: penalty scales from 0 to −10 |
 
 ---
 
@@ -249,7 +249,7 @@ Adaptive caps tighten automatically when bankroll is small:
 | **Min confluence** | 1 recent-form wallet | 1 verified wallet | `min_elite_confluence` (default 1) |
 | **Signal age window** | 45 min | 6 hours | 30 min |
 | **Price zone** | 18¢–78¢ | 20¢–72¢ | 20¢–72¢ |
-| **Key gate** | Recent PnL 30d ≥ 0 | Price 4–12% below entry | Full drift/EV/fee/stale gate sequence |
+| **Key gate** | Recent PnL 30d ≥ 0 | Price 4–12% below tracked wallet entry | Full drift/EV/fee/stale gate sequence |
 | **Stop loss** | None | None | −35% soft stop |
 | **Max bet** | Global cap | Global cap | $1.20 hard cap |
 | **Bet multiplier** | Recent win rate (0.8–1.6×) | Discount size (0.9–1.5×) | None (flat) |

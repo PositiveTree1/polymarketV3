@@ -485,9 +485,6 @@ def load_equity_history(limit: int = 4000) -> list[tuple[float, float]]:
 def upsert_wallet_profile(addr: str, profile: "WalletProfile") -> None:
     if not _DB_PATH:
         return
-    import titan_state as _S
-    e = "🔥ELITE" if profile.get("elite") else ("✅VER" if profile.get("verified") else ("👁WATCH" if profile.get("watchable") else "❌"))
-    _S._log(f"💾 SAVE {addr[:14]}… {e} elite={profile.get('elite')} verified={profile.get('verified')} watchable={profile.get('watchable')}", "DIAG")
     now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     watchable = 1 if profile.get("watchable") or profile.get("verified") else 0
     blob = json.dumps({k: v for k, v in profile.items() if k != "ts"})
@@ -532,6 +529,41 @@ def load_watchable_wallets(limit: int) -> "dict[str, WalletProfile | None]":
         else:
             result[addr] = None
     return result
+
+
+def clear_wallet_profile(addr: str) -> None:
+    """Remove profile_json and mark watchable=0 for a wallet that failed verification."""
+    if not _DB_PATH:
+        return
+    with _connect() as cx:
+        cx.execute(
+            "UPDATE watchlist SET watchable=0, profile_json=NULL WHERE address=?",
+            (addr.lower(),),
+        )
+
+
+def purge_non_watchable(keep_seed: set[str] | None = None) -> int:
+    """
+    Delete watchlist rows where watchable=0 and no profile_json.
+    Also wipe profile_json from watchable=0 rows that have stale profiles (old code wrote everything).
+    Returns total rows deleted.
+    """
+    if not _DB_PATH:
+        return 0
+    seeds = {a.lower() for a in (keep_seed or set())}
+    with _connect() as cx:
+        # Clear stale profiles on non-watchable rows (left over from old code)
+        cx.execute("UPDATE watchlist SET profile_json=NULL WHERE watchable=0")
+        # Delete stub rows (no profile, not a seed)
+        if seeds:
+            placeholders = ",".join("?" * len(seeds))
+            rows = cx.execute(
+                f"DELETE FROM watchlist WHERE watchable=0 AND profile_json IS NULL AND address NOT IN ({placeholders})",
+                list(seeds),
+            )
+        else:
+            rows = cx.execute("DELETE FROM watchlist WHERE watchable=0 AND profile_json IS NULL")
+        return rows.rowcount
 
 
 def set_watchable(addr: str, flag: bool) -> None:
@@ -837,7 +869,7 @@ def _row_to_trade(row: sqlite3.Row, wallets: list[dict], audits: list[dict]) -> 
     ts_value = row_data.get("ts")
     elite_wallets = [str(wallet["wallet"]) for wallet in wallets]
     wallet_names = [str(wallet["name"]) for wallet in wallets if wallet.get("name")]
-    whale_buy_cash = {
+    wallet_buy_cash = {
         str(wallet["wallet"]): float(wallet["cash"])
         for wallet in wallets
         if wallet.get("cash") is not None
@@ -868,7 +900,7 @@ def _row_to_trade(row: sqlite3.Row, wallets: list[dict], audits: list[dict]) -> 
         market_url=_as_str(row_data.get("market_url")),
         elite_wallets=elite_wallets,
         wallet_names=wallet_names,
-        whale_buy_cash=whale_buy_cash,
+        wallet_buy_cash=wallet_buy_cash,
     )
 
     if row_data.get("pnl_usdc") is not None:
@@ -905,7 +937,7 @@ def append_trade(trade: TradeRecord) -> None:
 
         wallets = trade.elite_wallets
         names = trade.wallet_names
-        cash_map = trade.whale_buy_cash
+        cash_map = trade.wallet_buy_cash
         wallet_rows = [
             (trade_id, w, names[i] if i < len(names) else None, cash_map.get(w))
             for i, w in enumerate(wallets)

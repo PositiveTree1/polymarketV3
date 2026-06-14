@@ -12,7 +12,7 @@ TITAN — Market data fetching and trade feed. v10 FIXES:
 3. HFT SIGNIFICANT TRADE FILTER: For HFT wallets, only mirror trades
    that are significantly above their rolling average (conviction filter).
 
-4. LARGE TRADE DETECTION: Trades >> whale avg_bet get elevated priority
+4. LARGE TRADE DETECTION: Trades >> wallet avg_bet get elevated priority
    and higher bet sizing multiplier.
 
 5. v10: 422 FLOOD FIX — four changes to eliminate Gamma spam:
@@ -148,7 +148,7 @@ def classify_market_type(title: str, event_slug: str, hrs_left: float | None = N
 
 
 @dataclass
-class WhaleObservation:
+class WalletObservation:
     wallet:         str
     name:           str
     cid:            str
@@ -757,7 +757,7 @@ def is_market_resolving(mkt: Market) -> bool:
 #  TRADE NORMALISER
 # ─────────────────────────────────────────────────────────────────────────────
 def _normalise_trade(t: dict, wallet: str, hot_cutoff: float, warm_cutoff: float,
-                     source: str, is_elite: bool = False) -> WhaleObservation | None:
+                     source: str, is_elite: bool = False) -> WalletObservation | None:
     try:
         ts = float(t.get("timestamp") or 0)
         if ts < warm_cutoff:
@@ -773,7 +773,7 @@ def _normalise_trade(t: dict, wallet: str, hot_cutoff: float, warm_cutoff: float
         cash = S.extract_cash(t)
         if cash <= 0:
             return None
-        return WhaleObservation(
+        return WalletObservation(
             wallet     = wallet.lower(),
             name       = t.get("name") or t.get("pseudonym") or wallet[:10] + "…",
             cid        = cid,
@@ -804,7 +804,7 @@ def _poll_wallet_trades(wallet: str, limit: int, min_cash: float,
                         hot_cutoff: float, warm_cutoff: float,
                         source: str, is_elite: bool = False,
                         avg_bet: float = 0, hft: bool = False,
-                        is_large_trade_mode: bool = False) -> list[WhaleObservation]:
+                        is_large_trade_mode: bool = False) -> list[WalletObservation]:
     data = S.safe_get(f"{C.DATA_API}/trades", {
         "user":         wallet,
         "limit":        limit,
@@ -823,9 +823,9 @@ def _poll_wallet_trades(wallet: str, limit: int, min_cash: float,
 
     prof    = S.env().wallet_cache.get(wallet, {})
     name    = prof.get("name", wallet[:10] + "…")
-    results : list[WhaleObservation] = []
+    results : list[WalletObservation] = []
     for t in data:
-        whaletrade : WhaleObservation | None = _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, source, is_elite)
+        whaletrade : WalletObservation | None = _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, source, is_elite)
         if whaletrade is None:
             continue
 
@@ -860,7 +860,7 @@ def _poll_wallet_trades(wallet: str, limit: int, min_cash: float,
 # ─────────────────────────────────────────────────────────────────────────────
 #  VIP / ELITE DIRECT POLLING (PRIMARY source)
 # ─────────────────────────────────────────────────────────────────────────────
-def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list[WhaleObservation]:
+def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list[WalletObservation]:
     elite_addrs = set()
     for e in S.wallets:
         elite_addrs.update(a.lower() for a, p in e.wallet_cache.items() if p.get("elite"))
@@ -871,7 +871,7 @@ def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list[WhaleObse
         return []
 
     S._log(f"🐳 Polling {len(all_to_poll)} elite/VIP wallets…", "DIAG")
-    results : list[WhaleObservation] = []
+    results : list[WalletObservation] = []
 
     for wallet in sorted(all_to_poll):
         prof: WalletProfile = next(
@@ -891,7 +891,7 @@ def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list[WhaleObse
             limit    = ELITE_POLL_LIMIT
             source   = "elite_poll" if is_elite else "vip_poll"
 
-        trades : list[WhaleObservation] = _poll_wallet_trades(
+        trades : list[WalletObservation] = _poll_wallet_trades(
             wallet, limit, min_cash, hot_cutoff, warm_cutoff,
             source, is_elite, avg_bet, hft
         )
@@ -909,7 +909,7 @@ def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list[WhaleObse
 # ─────────────────────────────────────────────────────────────────────────────
 #  WATCHLIST POLLING (verified non-elite)
 # ─────────────────────────────────────────────────────────────────────────────
-def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) -> list[WhaleObservation]:
+def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) -> list[WalletObservation]:
     candidates = set()
     e = S.env()
     for w in S.get_watchlist():
@@ -918,12 +918,12 @@ def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) 
             candidates.add(w)
     candidates = list(candidates)[:50]
 
-    results : list[WhaleObservation] = []
+    results : list[WalletObservation] = []
     cache = S.env().wallet_cache
     for wallet in candidates:
         prof = cache.get(wallet)
         avg_bet = prof["avg_bet"] if prof is not None else 0
-        trades : list[WhaleObservation]  = _poll_wallet_trades(
+        trades : list[WalletObservation]  = _poll_wallet_trades(
             wallet, 100, max(50.0, float(C.MIN_TRADE_CASH)),
             hot_cutoff, warm_cutoff, "watchlist_poll",
             False, avg_bet, False
@@ -940,7 +940,7 @@ def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) 
 # ─────────────────────────────────────────────────────────────────────────────
 #  PUBLIC FEED (secondary — discovery + confluence)
 # ─────────────────────────────────────────────────────────────────────────────
-def _fetch_public_feed(hot_cutoff: float, warm_cutoff: float) -> list[WhaleObservation]:
+def _fetch_public_feed(hot_cutoff: float, warm_cutoff: float) -> list[WalletObservation]:
     pub_data = S.safe_get(f"{C.DATA_API}/trades", {
         "limit":        C.MAX_TRADES_FETCH,
         "filterType":   "CASH",
@@ -968,7 +968,7 @@ def _fetch_public_feed(hot_cutoff: float, warm_cutoff: float) -> list[WhaleObser
         ts = float(t.get("timestamp") or 0)
         if oldest_ts is None or ts < oldest_ts:
             oldest_ts = ts
-        whaletrade: WhaleObservation | None = _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, "public_feed")
+        whaletrade: WalletObservation | None = _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, "public_feed")
         if whaletrade:
             results.append(whaletrade)
     if not results and pub_data:
@@ -1039,7 +1039,7 @@ def fetch_wallet_sells(wallet: str, since_ts: float, limit: int = 100) -> list[W
 # ─────────────────────────────────────────────────────────────────────────────
 #  MAIN FETCH ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
-def fetch_trades() -> list[WhaleObservation]:
+def fetch_trades() -> list[WalletObservation]:
     S.env().feed_responded = False
     hot_cutoff  = time.time() - C.HOT_HOURS  * 3600
     warm_cutoff = time.time() - C.WARM_HOURS * 3600
@@ -1069,7 +1069,7 @@ def fetch_trades() -> list[WhaleObservation]:
 # ─────────────────────────────────────────────────────────────────────────────
 #  HFT SPIKE FAST POLL — dedicated, runs every 3-5s on its own thread
 # ─────────────────────────────────────────────────────────────────────────────
-def fetch_hft_spike_trades() -> list[WhaleObservation]:
+def fetch_hft_spike_trades() -> list[WalletObservation]:
     """
     Dedicated fast poll for HFT Spike Detector.
 
@@ -1095,7 +1095,7 @@ def fetch_hft_spike_trades() -> list[WhaleObservation]:
     if not hft_wallets:
         return []
 
-    results : list[WhaleObservation] = []
+    results : list[WalletObservation] = []
     for wallet, prof in hft_wallets.items():
         avg_bet = prof.get("avg_bet", 0)
         if avg_bet <= 0:
@@ -1113,7 +1113,7 @@ def fetch_hft_spike_trades() -> list[WhaleObservation]:
             continue
 
         for t in raw:
-            whaletrade : WhaleObservation | None= _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, "hft_spike_poll")
+            whaletrade : WalletObservation | None= _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, "hft_spike_poll")
             if whaletrade is None:
                 continue
             cash = whaletrade.cash

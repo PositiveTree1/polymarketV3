@@ -20,7 +20,7 @@ Raw wallet trade observation
    Price in 20–72¢ zone?
         │
         ▼  drift_gates
-   Price drift from whale entry acceptable?
+   Price drift from tracked wallet entry acceptable?
         │
         ▼
    Signal passed → auto-trade if tier ≥ ALERT
@@ -34,17 +34,17 @@ Top-level gates applied to every signal regardless of strategy.
 
 | Parameter | Default | Type | Description |
 |---|---|---|---|
-| `MAX_SIGNAL_AGE_H` | `0.25` | float (hours) | **Key parameter.** Maximum age of the whale's trade. 0.25 = 15 minutes. Older signals are likely already price-absorbed. |
+| `MAX_SIGNAL_AGE_H` | `0.25` | float (hours) | **Key parameter.** Maximum age of the tracked wallet's trade. 0.25 = 15 minutes. Older signals are likely already price-absorbed. |
 | `MIN_SCORE` | `55` | float (0–100) | Minimum score to display a signal. Signals below this are silently dropped. |
 | `STRONG_SCORE` | `62` | float (0–100) | Score threshold for STRONG tier. |
 | `ALERT_SCORE` | `70` | float (0–100) | Score threshold for ALERT tier (auto-traded). |
-| `MIN_CONFLUENCE` | `2` | int | Minimum number of qualifying wallets agreeing on the same outcome. 1 = single-whale allowed. |
+| `MIN_CONFLUENCE` | `2` | int | Minimum number of qualifying wallets agreeing on the same outcome. 1 = single-wallet allowed. |
 
 **Tuning guide:**
 - Getting 0 signals → lower `MIN_SCORE` (try 45) and/or raise `MAX_SIGNAL_AGE_H` (try 0.5)
 - Too many low-quality trades → raise `MIN_SCORE` and `MIN_CONFLUENCE`
 - Signals appear but nothing auto-trades → check `ALERT_SCORE` vs signal scores in `get_signals`
-- Single-whale signals causing losses → raise `MIN_CONFLUENCE` to 2 or 3
+- Single-wallet signals causing losses → raise `MIN_CONFLUENCE` to 2 or 3
 
 **Important:** Each strategy also has its own `min_score` gate (lower than this global one). The global gate is the final filter — a strategy-level signal must survive both.
 
@@ -79,16 +79,16 @@ price outside zone                   → −10 pts (hard gate also blocks it)
 
 ## Group: `drift_gates`
 
-Drift = (current_price − whale_entry_price) / whale_entry_price
+Drift = (current_price − tracked_wallet_entry_price) / tracked_wallet_entry_price
 
-A positive drift means price rose after the whale bought (edge partially absorbed).
+A positive drift means price rose after the tracked wallet bought (edge partially absorbed).
 A negative drift means price fell (discount opportunity, used by drift_discount strategy).
 
 | Parameter | Default | Type | Description |
 |---|---|---|---|
-| `MAX_DRIFT` | `0.05` | float | Max positive drift from whale entry. 5% = if price already moved 5% up, edge is gone. |
+| `MAX_DRIFT` | `0.05` | float | Max positive drift from tracked wallet entry. 5% = if price already moved 5% up, edge is gone. |
 | `MIN_DRIFT` | `-0.08` | float | Max negative drift. −8% = allow some adverse drift but not too much. |
-| `MAX_ENTRY_SLIPPAGE` | `0.03` | float | Max difference between current price and whale entry at moment of trade. 3% slippage cap. |
+| `MAX_ENTRY_SLIPPAGE` | `0.03` | float | Max difference between current price and tracked wallet entry at moment of trade. 3% slippage cap. |
 | `HFT_MAX_DRIFT` | `0.02` | float | Tighter drift for HFT signals (2% — must be very fresh). |
 | `HFT_MIN_DRIFT` | `-0.05` | float | Tighter floor for HFT. |
 | `HFT_MAX_ENTRY_SLIPPAGE` | `0.02` | float | Tighter slippage for HFT. |
@@ -150,18 +150,18 @@ Volume:     min(vol_quality_max, vol / vol_quality_scale)   → max 3 pts  (scal
 Time:       72h+ left → 2pts   24–72h → 1pt   <24h → 0pts
 ```
 
-### Conviction & Multi-Whale Bonuses
+### Conviction & Multi-Wallet Bonuses
 ```
 conviction_bonus_massive = 5    ← trade ≥ MASSIVE_TRADE ($5000)
 conviction_bonus_large   = 2    ← trade ≥ LARGE_TRADE ($1000)
 large_trade_bonus        = 3    ← signal contains a large trade
 
-multi_whale_pts = [0, 0, 5, 8]  ← 0/1/2/3+ elite wallets → 0/0/5/8 pts
+multi_wallet_pts = [0, 0, 5, 8]  ← 0/1/2/3+ elite wallets → 0/0/5/8 pts
 ```
 
 ### Penalties
 ```
-exit_penalty_per_whale   = −8   ← per whale already selling this outcome
+exit_penalty_per_wallet   = −8   ← per tracked wallet already selling this outcome
 weekly_pnl_penalty_min   = −10  ← max penalty if source wallets have negative 7d PnL
 ```
 

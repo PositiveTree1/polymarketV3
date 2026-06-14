@@ -2,7 +2,7 @@
 
 > Server: `http://127.0.0.1:8765`
 > Protocol: MCP 2025-11-25 (JSON-RPC 2.0 over HTTP + SSE)
-> Total tools: 30
+> Total tools: 37
 > All tools are methods on `TitanAPI` decorated with `@mcp_tool`.
 
 ---
@@ -46,7 +46,7 @@ Access via `resources/read` with `{"uri": "titan://snapshot"}`.
 |---|---|
 | `titan_analysis` | Inject current snapshot, ask for position/performance analysis |
 | `titan_signal_review` | Inject current signals, ask for action recommendations |
-| `titan_whale_brief` | Inject wallet roster, ask for whale activity summary |
+| `titan_wallet_brief` | Inject wallet roster, ask for wallet activity summary |
 
 ---
 
@@ -107,7 +107,7 @@ score             float   Signal score at entry
 elite_wallets     list    Wallet addresses that triggered this
 elite_names       list    Known names of those wallets
 is_hft            bool    Was this an HFT-triggered position?
-avg_entry         float   Whale's average entry price
+avg_entry         float   Tracked wallet's average entry price
 price_history     list    [[ts, price], ...] for chart rendering
 ```
 
@@ -141,7 +141,7 @@ score         float   0–100
 tier          str     CONVICTION / ALERT / STRONG / MEDIUM / ELITE_ONLY
 strategy      str     which builder(s) produced this
 cur           float   Current market price
-avg_entry     float   Whale's average entry price
+avg_entry     float   Tracked wallet's average entry price
 drift         float   (cur − avg_entry) / avg_entry
 names         list    Names of contributing wallets
 cid           str     Condition ID (market identifier)
@@ -170,12 +170,30 @@ Returns: list of strings. Common patterns:
 - `"max positions reached"`
 - `"in cooldown"`
 
+### `get_reject_summary`
+Frequency map of rejection reasons — faster than parsing `get_rejects()` manually.
+
+Inputs:
+```
+limit   int   Number of recent rejects to analyse (default 200)
+```
+
+Returns: `{"total": int, "by_reason": {"reason": count, ...}}` sorted by count desc.
+
 ---
 
 ## Tools — Wallets
 
 ### `get_tracked_wallets`
 Current wallet roster with tier flags and performance metrics.
+
+Inputs:
+```
+search   str   Filter by wallet name or address prefix (case-insensitive). Use this when asking about a specific wallet.
+tier     str   Filter by tier: elite | verified | watchable
+```
+
+Without filters returns the full roster. **Always pass `search=` when asking about a specific wallet by name** — much faster than loading the full list.
 
 Returns: list of `TrackedWalletDict`
 ```
@@ -229,6 +247,17 @@ avg_loss      float   Average loss size
 expectancy    float   avg_win × win_rate − avg_loss × loss_rate
 ```
 
+### `get_strategy_stats`
+Per-strategy P&L breakdown. Faster than `query_db` for the most common diagnostic query.
+
+Returns: list of `{strategy, trades, wins, win_rate, total_pnl, avg_pct, avg_win, avg_loss}`
+
+### `get_wallet_copy_roi`
+TITAN's own copy-trade ROI per tracked wallet — how profitable it has been to **follow** each wallet. Different from their Polymarket stats.
+
+Returns: list of `{wallet_names, signals_followed, wins, total_pnl, avg_pct}` top 30 by PnL.
+Note: `wallet_names` is a JSON-encoded list stored as a string.
+
 ### `get_trade_history`
 Full trade history (buys and sells).
 
@@ -243,7 +272,7 @@ bet           float   Dollar size
 pnl_usdc      float   P&L in USD (SELL only)
 pnl_pct       float   P&L % (SELL only)
 tier          str
-wallet_names  list    Source whale names
+wallet_names  list    Source wallet names
 strategy      str     Which strategy produced this trade
 ```
 
@@ -373,15 +402,29 @@ All changes are logged: `Config updated: <domain>/<group> {key: value}`.
 ### `update_config_wallets`
 Inputs:
 ```
-group     str    wallet_quality | elite_thresholds | elite_polling
+group     str    wallet_quality | elite_thresholds | elite_polling | wallet_selector
 patch     dict   {key: new_value} — only existing keys accepted
 dry_run   bool   default false
+```
+
+Changing `wallet_quality`, `elite_thresholds`, or `wallet_selector` automatically triggers a full wallet re-classification (`_reeval_wallets_impl`) after saving — all cached profiles are re-scored against the new thresholds immediately without any API calls.
+
+### `reeval_wallets`
+Re-classify all wallets in the DB using current config thresholds. Does **not** hit the Polymarket API — re-runs `is_selected()` on every stored `profile_json`. Use manually if you edited `titan_config.json` directly (bypassing MCP) or need to force a re-sync.
+
+Returns:
+```
+ok               bool
+reclassified     int    Number of wallets whose tier changed
+now_watchable    int    Wallets that gained watchable/verified status
+now_unwatchable  int    Wallets that lost watchable/verified status
+total            int    Total profiles evaluated
 ```
 
 ### `update_config_signals`
 Inputs:
 ```
-group     str    signal_quality | drift_gates | price_zone_gates
+group     str    signal_quality | drift_gates | price_zone_gates | strategy_scoring
 patch     dict
 dry_run   bool
 ```
@@ -397,7 +440,7 @@ dry_run   bool
 ### `update_config_risk`
 Inputs:
 ```
-group     str    position_management | timing
+group     str    position_management | timing | strategy_kelly
 patch     dict
 dry_run   bool
 ```

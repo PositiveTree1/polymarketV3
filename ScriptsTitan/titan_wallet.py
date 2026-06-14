@@ -450,6 +450,31 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
     losses = len(lost_keys)
     total  = wins + losses
 
+    # When no matches between REDEEM and BUY trades (window mismatch: wallet traded >LIMIT times),
+    # fall back to using REDEEM count as wins against total open positions.
+    if total == 0 and len(all_won) > 0 and len(positions_raw) > 0:
+        n_open = len(positions_raw)
+        wins   = len(all_won)
+        total  = wins + n_open
+        avg_bet = total_spent / len(trade_by_key) if trade_by_key else 0
+        if avg_bet == 0:
+            open_costs = [float(p.get("initialValue", 0) or p.get("currentValue", 0) or 0) for p in positions_raw]
+            open_costs = [s for s in open_costs if s > 0]
+            if open_costs:
+                avg_bet = sum(open_costs) / len(open_costs)
+        wr = wins / total
+        wb = wilson_lower_bound(wins, total)
+        avg_profit = round(total_redeem_value / wins, 2) if wins > 0 else -1
+        return {
+            "wins": wins, "losses": n_open, "total": total,
+            "win_rate": round(wr, 4), "wilson_lb": round(wb, 4),
+            "source": "redeem_window_fallback",
+            "avg_profit": avg_profit, "avg_bet": round(avg_bet, 2),
+            "trades_per_hour": round(trades_per_hour, 2),
+            "recent_pnl_30d": round(recent_pnl_30d, 2),
+            "recent_pnl_7d":  round(recent_pnl_7d, 2),
+        }
+
     resolved_keys    = all_won | lost_keys
     resolved_spend   = sum(td["cash"] for k, td in trade_by_key.items() if k in resolved_keys)
     n_res_with_spend = sum(1 for k in resolved_keys if k in trade_by_key)
@@ -468,6 +493,11 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
         open_wins = sum(1 for p in positions_raw if float(p.get("cashPnl", 0) or 0) > 0)
         wr_open   = open_wins / n_open if n_open > 0 else 0
         wb        = wilson_lower_bound(open_wins, n_open)
+        if avg_bet == 0 and n_open > 0:
+            open_costs = [float(p.get("initialValue", 0) or p.get("currentValue", 0) or 0) for p in positions_raw]
+            open_costs = [s for s in open_costs if s > 0]
+            if open_costs:
+                avg_bet = sum(open_costs) / len(open_costs)
         return {
             "wins": open_wins, "losses": n_open - open_wins,
             "total": n_open, "win_rate": wr_open,
@@ -662,8 +692,10 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
                 "total_pnl", "name", "hft", "sports_bot", "recent_pnl_30d", "recent_pnl_7d")
     _changed = cached is None or any(result.get(k) != cached.get(k) for k in _TRACKED)
     S.env().wallet_cache[wallet] = result
-    if _changed:
+    if watchable and _changed:
         DB.upsert_wallet_profile(wallet, result)
+    elif not watchable and (cached or {}).get("watchable"):
+        DB.clear_wallet_profile(wallet)
     return result
 
 

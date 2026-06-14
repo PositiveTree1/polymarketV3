@@ -81,7 +81,7 @@ TITAN_ASCII = [
     "     ██║   ██║   ██║   ██║  ██║██║ ╚████║",
     "     ╚═╝   ╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═══╝",
     "",
-    "    🐳  WHALE MIRROR ENGINE  —  SINGLE WALLET  🐳",
+    "    🐳  TRACKED WALLETS MIRROR ENGINE  —  SINGLE WALLET  🐳",
     "",
 ]
 
@@ -98,7 +98,7 @@ def show_loading_screen(root, api, on_complete):
     mono_sm   = font.Font(family="Courier", size=9)
 
     for line in TITAN_ASCII:
-        col = "#00ff88" if ("TITAN" in line or "WHALE" in line) else "#1a4a2a"
+        col = "#00ff88" if ("TITAN" in line or "WALLET" in line) else "#1a4a2a"
         tk.Label(inner, text=line, fg=col, bg="#080810", font=mono_big, pady=0).pack()
 
     tk.Label(inner, text="", bg="#080810").pack()
@@ -127,7 +127,7 @@ def show_loading_screen(root, api, on_complete):
         ("Fetching tracked wallet roster...", lambda: api.get_tracked_wallets()),
         ("Syncing open positions...", lambda: api.get_positions()),
         ("Downloading latest signals...", lambda: api.get_signals()),
-        ("TITAN ONLINE — Follow The Whale", lambda: None),
+        ("TITAN ONLINE — Follow The Wallet", lambda: None),
     ]
     total_steps = len(BOOT_TASKS)
     current_step = [0]
@@ -204,7 +204,7 @@ def run_ui(api: TitanBackend) -> None:
 
     root = tk.Tk()
 
-    root.title("🐳 TITAN — Whale Mirror Engine")
+    root.title("🐳 TITAN — Tracked Wallet Mirror Engine")
     root.configure(bg="#080810")
     root.geometry("1600x960")
     root.minsize(1200, 700)
@@ -221,7 +221,7 @@ def run_ui(api: TitanBackend) -> None:
     hdr1 = tk.Frame(root, bg="#0a0a1a", pady=3)
     hdr1.pack(fill="x")
 
-    app_title_var    = tk.StringVar(value="🐳 TITAN — Whale Mirror Engine")
+    app_title_var    = tk.StringVar(value="🐳 TITAN — Tracked Wallet Mirror Engine")
     app_subtitle_var = tk.StringVar(value="v10 CONVICTION-ONLY | 2+ Elites | 20-72¢ Zone | -30% Stop | ENGINE ACTIVE")
 
     tk.Label(hdr1, textvariable=app_title_var,
@@ -427,7 +427,7 @@ def run_ui(api: TitanBackend) -> None:
     sb_.pack(side="right", fill="y")
     sig_log.pack(fill="both", expand=True)
     
-    _live_subtitle_var = tk.StringVar(value="Follow The Whale: BUY when whale buys, SELL when whale sells | connecting...")
+    _live_subtitle_var = tk.StringVar(value="Follow The Wallet: BUY when wallet buys, SELL when wallet sells | connecting...")
     tk.Label(tab_live, textvariable=_live_subtitle_var,
              fg="#335544", bg="#080810", font=mono, pady=2).pack()
 
@@ -474,10 +474,10 @@ def run_ui(api: TitanBackend) -> None:
     
     pos_hdr = tk.Frame(tab_positions, bg="#001820", pady=4)
     pos_hdr.pack(fill="x", padx=4, pady=(4,0))
-    tk.Label(pos_hdr, text="🤖  OPEN POSITIONS  (auto-trading active — following whale exits)",
+    tk.Label(pos_hdr, text="🤖  OPEN POSITIONS  (auto-trading active — following wallet exits)",
              fg="#00aaff", bg="#001820", font=bold_hd).pack(side="left", padx=8)
     tk.Label(pos_hdr,
-             text=f"Exits: whale sells → immediate | +{_cfg.get("PROFIT_TARGET_PCT", 0.20)*100:.0f}% target | "
+             text=f"Exits: wallet sells → immediate | +{_cfg.get("PROFIT_TARGET_PCT", 0.20)*100:.0f}% target | "
                   f"{_cfg.get("MIN_HOLD_MINUTES", 15)}min hold guard | {_cfg.get("EXIT_COOLDOWN_SECONDS", 300)//60}min cooldown",
              fg="#334455", bg="#001820", font=mono_sm).pack(side="left", padx=4)
     
@@ -560,7 +560,7 @@ def run_ui(api: TitanBackend) -> None:
             tk.Label(f, text=value, fg=color, bg="#0d0d20", font=bold9, pady=2).pack()
 
         stats_data = [
-            ("Whale Entry",   f"${w_entry:.4f}",      "#ffaa44"),
+            ("Wallet Entry",   f"${w_entry:.4f}",      "#ffaa44"),
             ("Our Entry",     f"${entry:.4f}",         "#aaaaff"),
             (price_label,     f"${cur:.4f}",           pnl_color),
             ("P&L $",         f"${pnl_usd:+.4f}",      pnl_color),
@@ -583,7 +583,7 @@ def run_ui(api: TitanBackend) -> None:
         tk.Label(wf, text="SELECTED WALLETS", fg="#00ff88", bg="#060615", font=bold9).pack(anchor="w", padx=4, pady=(4,2))
         seen_wallets: set[str] = set()
         elite_wallets: list[str] = []
-        for wallet_addr in pos.elite_wallets + pos.whale_wallets:
+        for wallet_addr in pos.elite_wallets + pos.tracked_wallets:
             wallet_key = str(wallet_addr).lower()
             if wallet_key in seen_wallets:
                 continue
@@ -802,7 +802,7 @@ def run_ui(api: TitanBackend) -> None:
             tk.Label(f, text=label, fg="#445566", bg="#0d0d20", font=mono9, pady=2).pack()
             tk.Label(f, text=value, fg=color, bg="#0d0d20", font=bold9, pady=2).pack()
         stats_data = [
-            ("Whale Entry",  f"${trade.avg_entry:.4f}",                          "#ffaa44"),
+            ("Wallet Entry",  f"${trade.avg_entry:.4f}",                          "#ffaa44"),
             ("Price",        f"${trade.price:.4f}",                          "#aaaaff"),
             #("Exit Price",   f"${exit_p:.4f}" if exit_p else "—",        pnl_color if typ=="SELL" else "#888888"),
             ("P&L $",        f"${pnl_u:+.4f}" if typ=="SELL" else "—",   pnl_color),
@@ -815,12 +815,12 @@ def run_ui(api: TitanBackend) -> None:
             sf2.columnconfigure(i % 4, weight=1)
             stat_cell(sf2, lbl, val, col, i % 4, i // 4)
     
-        # Wallets — show name + how much each whale put into this trade
+        # Wallets — show name + how much each wallet put into this trade
         wf = tk.Frame(win, bg="#060615")
         wf.pack(fill="x", padx=8)
         wallet_names = trade.wallet_names
         whale_addrs = trade.elite_wallets
-        whale_cash  = trade.whale_buy_cash  # addr → $ amount
+        whale_cash  = trade.wallet_buy_cash  # addr → $ amount
         if wallet_names or whale_addrs:
             tk.Label(wf, text="VIA WALLETS:", fg="#00ff88", bg="#060615", font=mono9).pack(anchor="w", padx=12, pady=(4,2))
             for i, name in enumerate(wallet_names[:6]):
@@ -1379,14 +1379,14 @@ def run_ui(api: TitanBackend) -> None:
 
     
     # ═══════════════════════════════════════════════════════════════════════════════
-    #  TAB 5: WHALE ROSTER
+    #  TAB 5: WALLET ROSTER
     # ═══════════════════════════════════════════════════════════════════════════════
 
     tab_wallets = tk.Frame(nb, bg="#080810")
     
     wh_header = tk.Frame(tab_wallets, bg="#0d0d1a", pady=4)
     wh_header.pack(fill="x", padx=4, pady=(4,0))
-    tk.Label(wh_header, text="WHALE ROSTER", fg="#00ff88", bg="#0d0d1a", font=bold_hd).pack(side="left", padx=8)
+    tk.Label(wh_header, text="WALLET ROSTER", fg="#00ff88", bg="#0d0d1a", font=bold_hd).pack(side="left", padx=8)
     wh_filter_var = tk.StringVar(value="ALL")
     for val, label in [("ALL","All"),("ELITE","🔥 Elite"),("VER","✅ Verified"),("HFT","⚡ HFT")]:
         tk.Radiobutton(wh_header, text=label, variable=wh_filter_var, value=val,
@@ -2090,7 +2090,7 @@ def run_ui(api: TitanBackend) -> None:
         ],
         "drift_discount": [
             ("min_discount_pct",        "Min discount %",                "float",
-             "Signal only fires if (whale_entry_price - current_price) / whale_entry_price >= this. "
+             "Signal only fires if (wallet_entry_price - current_price) / wallet_entry_price >= this. "
              "Default 0.04 — the market must have drifted at least 4 points below the wallet's entry to confirm a real discount."),
             ("max_discount_pct",        "Max discount %",                "float",
              "Signal is rejected if the discount exceeds this. Default 0.12 — beyond 12 points the market "
@@ -3122,7 +3122,7 @@ def run_ui(api: TitanBackend) -> None:
                 f"  Drift: {s.drift*100:+.1f}%  {fresh}\n"
                 f"  Auto-size: ${s.bet:.2f}  ({s.bet/max(api.get_pnl_summary()['bankroll'],0.01)*100:.1f}% bankroll)\n"
                 f"  Shares: ~{s.bet/max(s.cur,0.01):.1f}\n\n"
-                f"  WHALE INTEL  ({s.n_elite} elite / {s.n_ver} total verified)\n  {'─'*50}\n"
+                f"  WALLET INTEL  ({s.n_elite} elite / {s.n_ver} total verified)\n  {'─'*50}\n"
             )
             for line in elite_detail:
                 alert_txt.insert(tk.END, line + "\n")
@@ -3378,8 +3378,8 @@ def run_ui(api: TitanBackend) -> None:
         cd_lines = []
         cid_to_title = {}
         for trade in trades:
-            cid = trade.cid
-            title = trade.title
+            cid = trade["cid"]
+            title = trade["title"]
             if cid and title and cid not in cid_to_title:
                 cid_to_title[cid] = title
         for cid, cd_ts in api.get_pnl_summary()["cooldown_cids"].items():
@@ -3578,8 +3578,8 @@ def run_ui(api: TitanBackend) -> None:
         if bk_start:
             sl_on = _cfg.get("STOP_LOSS_ENABLED", True)
             _live_subtitle_var.set(
-                f"Follow The Whale: BUY when whale buys, SELL when whale sells | "
-                f"Bankroll ${bk_start:.2f} | StopLoss: {'ON' if sl_on else 'OFF (whale-exit only)'}"
+                f"Follow The tracked wallet: BUY when wallet buys, SELL when wallet sells | "
+                f"Bankroll ${bk_start:.2f} | StopLoss: {'ON' if sl_on else 'OFF (wallet-exit only)'}"
             )
         n_open = len(pos)
         if n_open > 0:
@@ -3695,7 +3695,7 @@ def run_ui(api: TitanBackend) -> None:
         api.subscribe("titan/position_close",  lambda p: on_position_close_cb(p["pos"], p["pnl_usdc"], p["pnl_pct"]))
         api.subscribe("titan/cycle_complete",  lambda p: on_cycle_complete_cb(p["signals"], p["wallets"], p["rejects"], p["trades"]))
         root.after(1000, ui_refresh)
-        status_var.set("🟢 LIVE — Follow The Whale | HFT Spike + Conviction")
+        status_var.set("🟢 LIVE — Follow The wallet | HFT Spike + Conviction")
 
         # ── Attach AI panel ───────────────────────────────────────────────────────
         if AIPanel is not None:
@@ -3727,9 +3727,9 @@ def run_ui(api: TitanBackend) -> None:
                 if n_eq >= 2:
                     from datetime import datetime as _dt
                     first_ts = _dt.fromtimestamp(eq_hist[0][0]).strftime("%Y-%m-%d %H:%M")
-                    root.after(0, lambda: log(f"📂 Boot: {n_pos} position(s) | {n_whale} whale(s) | equity history: {n_eq} pts from {first_ts}", "INFO"))
+                    root.after(0, lambda: log(f"📂 Boot: {n_pos} position(s) | {n_whale} wallet(s) | equity history: {n_eq} pts from {first_ts}", "INFO"))
                 else:
-                    root.after(0, lambda: log(f"📂 Boot: {n_pos} position(s) | {n_whale} whale(s) | equity history: empty", "INFO"))
+                    root.after(0, lambda: log(f"📂 Boot: {n_pos} position(s) | {n_whale} wallet(s) | equity history: empty", "INFO"))
             except Exception as _be:
                 _msg = str(_be)
                 root.after(0, lambda: log(f"📂 Boot summary unavailable: {_msg}", "WARN"))

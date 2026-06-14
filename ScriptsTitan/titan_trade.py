@@ -25,7 +25,7 @@ class TradeRecord:
     market_url:           str = ""
     elite_wallets:        list[str] = field(default_factory=list)
     wallet_names:         list[str] = field(default_factory=list)
-    whale_buy_cash:       dict[str, float] = field(default_factory=dict)
+    wallet_buy_cash:       dict[str, float] = field(default_factory=dict)
     slug:                 str = ""
     event_slug:           str = ""
     pnl_usdc:             float | None = None
@@ -59,12 +59,12 @@ class TradeRecord:
                     if isinstance(ts_value, (int, float)) and isinstance(price_value, (int, float)):
                         price_history.append((float(ts_value), float(price_value)))
 
-        raw_whale_buy_cash = value.get("whale_buy_cash")
-        whale_buy_cash: dict[str, float] = {}
-        if isinstance(raw_whale_buy_cash, Mapping):
-            for key, cash_value in raw_whale_buy_cash.items():
+        raw_wallet_buy_cash = value.get("wallet_buy_cash")
+        wallet_buy_cash: dict[str, float] = {}
+        if isinstance(raw_wallet_buy_cash, Mapping):
+            for key, cash_value in raw_wallet_buy_cash.items():
                 if isinstance(cash_value, (int, float)):
-                    whale_buy_cash[str(key)] = float(cash_value)
+                    wallet_buy_cash[str(key)] = float(cash_value)
 
         entry_audit = value.get("entry_audit")
         exit_audit = value.get("exit_audit")
@@ -87,7 +87,7 @@ class TradeRecord:
             market_url=str(value.get("market_url") or ""),
             elite_wallets=[str(item) for item in value.get("elite_wallets", []) if isinstance(value.get("elite_wallets", []), list)],
             wallet_names=[str(item) for item in value.get("wallet_names", []) if isinstance(value.get("wallet_names", []), list)],
-            whale_buy_cash=whale_buy_cash,
+            wallet_buy_cash=wallet_buy_cash,
             slug=str(value.get("slug") or ""),
             event_slug=str(value.get("event_slug") or ""),
             pnl_usdc=float(value["pnl_usdc"]) if value.get("pnl_usdc") is not None else None,

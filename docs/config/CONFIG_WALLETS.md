@@ -1,8 +1,7 @@
 # Config Reference — Wallet Selection & Elite Classification
 
-> MCP tools: `get_config_wallets` (read) · `update_config_wallets` (write)
-> Groups: `wallet_quality` · `elite_thresholds` · `elite_polling`
-> Selector config is read-only via MCP (requires code change to add a new selector type).
+> MCP tools: `get_config_wallets` (read) · `update_config_wallets` (write) · `reeval_wallets` (force re-classify)
+> Groups: `wallet_quality` · `elite_thresholds` · `elite_polling` · `wallet_selector`
 
 ---
 
@@ -31,22 +30,25 @@ A wallet flagged `hft=True` is a separate classification — it trades too fast 
 
 Controls who enters the watchable and verified tiers.
 
-| Parameter | Default | Type | Description |
+| Parameter | Current | Type | Description |
 |---|---|---|---|
 | `MIN_WIN_RATE_WATCH` | `0.53` | float (0–1) | Minimum win rate to become watchable. 53% = slightly above coin flip. |
 | `MIN_WIN_RATE_VER` | `0.56` | float (0–1) | Minimum win rate to become verified. Must exceed watchable threshold. |
 | `MIN_RESOLVED_BETS` | `10` | int | Minimum number of resolved (closed) bets. Prevents small-sample flukes. |
 | `MIN_PNL` | `0.0` | float ($) | Minimum lifetime PnL. 0 = any profitable wallet qualifies. |
-| `WILSON_MIN_WATCH` | `0.45` | float (0–1) | Wilson lower-bound confidence floor for watchable. Statistically accounts for small samples. |
-| `WILSON_MIN_VER` | `0.49` | float (0–1) | Wilson lower-bound confidence floor for verified. |
-| `MIN_AVG_PROFIT_PER_TRADE` | `2.0` | float ($) | Average dollar profit per resolved trade. Filters wallets with many tiny wins. |
+| `WILSON_MIN_WATCH` | `0.30` | float (0–1) | Wilson lower-bound confidence floor for watchable. Statistically accounts for small samples. |
+| `WILSON_MIN_VER` | `0.38` | float (0–1) | Wilson lower-bound confidence floor for verified. |
+| `MIN_AVG_PROFIT_PER_TRADE` | `0.5` | float ($) | Average dollar profit per resolved trade. Filters wallets with many tiny wins. |
 | `MIN_AVG_BET_SIZE` | `10.0` | float ($) | Average bet size. Filters out small-stake wallets whose signals are noisy. |
 
 **Wilson Lower Bound** — why it matters:
-A wallet with 8/10 wins (80%) looks great, but 10 bets is a tiny sample. Wilson LB for 8/10 at 95% CI ≈ 0.49. That same wallet needs 20+ bets before the LB reaches 0.55. This prevents copying a lucky newcomer.
+A wallet with 8/10 wins (80%) looks great, but 10 bets is a tiny sample. Wilson LB for 8/10 at 95% CI ≈ 0.49. At 30 bets with 80% WR the LB reaches ~0.62. The 0.30 floor requires roughly 80% WR over 15+ bets, or 65%+ WR over 50+ bets. This prevents copying a lucky newcomer.
+
+**Threshold change behaviour:**
+Changing `wallet_quality` or `wallet_selector` thresholds via MCP automatically triggers `_reeval_wallets_impl()` — all ~4700 cached wallet profiles are re-scored against the new thresholds immediately, without any API calls. The `watchable`, `verified`, `elite`, and `fail_reasons` fields in the DB are updated in the same request.
 
 **Tuning guide:**
-- Too few watchable wallets → lower `MIN_WIN_RATE_WATCH` or `WILSON_MIN_WATCH`
+- Too few watchable wallets → lower `WILSON_MIN_WATCH` (most impactful lever) or `MIN_WIN_RATE_WATCH`
 - Too many low-quality signals → raise `MIN_AVG_PROFIT_PER_TRADE` or `MIN_RESOLVED_BETS`
 
 ---
@@ -87,9 +89,9 @@ Controls how often and how deeply elite wallets are polled.
 
 ## Wallet Selector — Performance Selector Parameters
 
-The active selector is `performance`. Its full parameter set (not editable via MCP — requires config file edit):
+The active selector is `performance`. Its full parameter set is editable via `update_config_wallets(group="wallet_selector", patch={...})`. Changes automatically trigger a full wallet re-classification.
 
-| Parameter | Default | Description |
+| Parameter | Current | Description |
 |---|---|---|
 | `discovery_use_large_trades` | `true` | Discover new wallets from large public trades |
 | `discovery_large_trade_limit` | `200` | Max large trades to scan per discovery cycle |
@@ -100,6 +102,15 @@ The active selector is `performance`. Its full parameter set (not editable via M
 | `discovery_leaderboard_category` | `"OVERALL"` | Leaderboard category |
 | `discovery_leaderboard_order_by` | `"PNL"` | Sort leaderboard by PnL |
 | `leaderboard_periods` | `["ALL","MONTH","WEEK"]` | Which time windows to pull |
+| `min_win_rate_watch` | `0.53` | Mirrors `wallet_quality.MIN_WIN_RATE_WATCH` — used by selector at runtime |
+| `wilson_min_watch` | `0.30` | Mirrors `wallet_quality.WILSON_MIN_WATCH` — used by selector at runtime |
+| `min_resolved_bets` | `10` | Mirrors `wallet_quality.MIN_RESOLVED_BETS` |
+| `min_pnl` | `0.0` | Mirrors `wallet_quality.MIN_PNL` |
+| `min_win_rate_ver` | `0.56` | Mirrors `wallet_quality.MIN_WIN_RATE_VER` |
+| `wilson_min_ver` | `0.38` | Mirrors `wallet_quality.WILSON_MIN_VER` |
+| `min_avg_profit` | `0.5` | Mirrors `wallet_quality.MIN_AVG_PROFIT_PER_TRADE` |
+| `min_avg_bet` | `10.0` | Mirrors `wallet_quality.MIN_AVG_BET_SIZE` |
+| `min_portfolio_or_pnl` | `100.0` | Min current portfolio OR lifetime PnL to pass VERIFIED gate |
 | `weight_wilson` | `0.30` | Weight of Wilson LB in composite score |
 | `weight_pnl_pct` | `0.25` | Weight of PnL percentage in composite score |
 | `weight_portfolio` | `0.15` | Weight of portfolio value |
@@ -114,7 +125,22 @@ The active selector is `performance`. Its full parameter set (not editable via M
 score = (wilson_lb × 0.30) + (pnl_pct_norm × 0.25) + (portfolio_norm × 0.15)
       + (trade_count_norm × 0.10) + (open_pos_norm × 0.10) + (alpha_norm × 0.10)
 ```
-All components are normalised to 0–1 before weighting.
+All components are normalised to 0-1 before weighting.
+
+---
+
+## Bootstrap and Refresh Flow
+
+When TITAN starts, the tracked-wallet roster is rebuilt in this order:
+
+1. Load persisted `watchable=True` wallet profiles from the state DB, capped by `MAX_WATCHLIST_SIZE`.
+2. Add configured seed wallets if there is still room. `SEED_WATCHLIST` is built from `seed_watchlist` plus all `vip_wallets` and `priority_wallets` in `titan_config.json`.
+3. During each main analysis cycle, score every wallet seen in the fresh public trade feed.
+4. Every `DISCOVERY_INTERVAL_CYCLES` cycles, call `discover_new_wallets()`. The active selector discovers candidates from large recent Polymarket BUY trades and the Polymarket leaderboard, then scores them before adding only qualifying wallets.
+5. Every 5 cycles, `scan_top_market_holders()` scans high-volume active markets and scores wallets from recent BUY trades on those markets.
+6. Every 20 cycles, `_rescore_watchlist()` refreshes stale tracked wallets plus VIP and priority wallets.
+
+So from a completely empty DB, the first tracked wallets come from configured seeds/VIP/priority wallets and from the first public trade-feed cycles. Discovery then expands the roster from large trades, leaderboard entries, and high-volume market scans. Wallets are not blindly requested every cycle: cached profiles are reused until `WALLET_TTL` expires, while VIP/priority wallets are deliberately re-polled more often.
 
 ---
 

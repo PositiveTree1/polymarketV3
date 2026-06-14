@@ -49,7 +49,7 @@ class Position:
     is_hft:               bool  = False
 
     # ── whale info ────────────────────────────────────────────────────────────
-    whale_wallets:        list[str]         = field(default_factory=list)
+    tracked_wallets:        list[str]         = field(default_factory=list)
     elite_names:          list[str]         = field(default_factory=list)
     n_elite:              int   = 0
     ver_flow:             float = 0.0
@@ -292,8 +292,8 @@ class Position:
         return list(self.buy_trade.wallet_names)
 
     @property
-    def whale_buy_cash(self) -> dict[str, float]:
-        return dict(self.buy_trade.whale_buy_cash)
+    def wallet_buy_cash(self) -> dict[str, float]:
+        return dict(self.buy_trade.wallet_buy_cash)
 
     @property
     def n_confluence(self) -> int:
@@ -428,7 +428,7 @@ class Position:
             "cur_price":            self.cur_price,
             "conviction_detail":    self.conviction_detail,
             "is_hft":               self.is_hft,
-            "whale_wallets":        self.whale_wallets,
+            "tracked_wallets":        self.tracked_wallets,
             "elite_names":          self.elite_names,
             "n_elite":              self.n_elite,
             "ver_flow":             self.ver_flow,
@@ -458,7 +458,7 @@ class Position:
             _bankroll=            float(d.get("bankroll") or 0.0),
             conviction_detail=    str(d.get("conviction_detail", "")),
             is_hft=               bool(d.get("is_hft", False)),
-            whale_wallets=        [str(w) for w in d.get("whale_wallets", [])],
+            tracked_wallets=        [str(w) for w in d.get("tracked_wallets", [])],
             elite_names=          [str(n) for n in d.get("elite_names", [])],
             n_elite=              int(d.get("n_elite") or 0),
             ver_flow=             float(d.get("ver_flow") or 0.0),

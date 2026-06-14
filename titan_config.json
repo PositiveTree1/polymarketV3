@@ -9,10 +9,10 @@
   "_ANALYSIS": {
     "root_causes_of_losses": [
       "1. BUYING NEAR-CERTAINTIES (entry >0.85): tiny upside (15c max), catastrophic downside (-85%). Clavicular pregnancy 0.94 entry -> -97%. WTI crude 0.70 -> -98%.",
-      "2. NO STOP LOSSES: whale exit philosophy fails when whales don't exit before resolution. US-Iran deal whale never sold = -96%.",
+      "2. NO STOP LOSSES: wallet exit philosophy fails when wallets don't exit before resolution. US-Iran deal wallet never sold = -96%.",
       "3. STALE SIGNALS: 30min age limit allows copying prices already fully absorbed.",
       "4. HFT SPIKE COPYING: HFT bots have hedged positions we can't see. Their 'spike' is one leg of an arb.",
-      "5. FLAWED EV: fair_prob = whale_entry + 0.05 inflates EV for all trades, bypassing the gate.",
+      "5. FLAWED EV: fair_prob = wallet_entry + 0.05 inflates EV for all trades, bypassing the gate.",
       "6. TOO MANY POSITIONS: 5 positions at $7 bankroll = $1.40 average, too small to matter when right, still hurts when wrong."
     ],
     "new_strategy": "MULTI-STRATEGY: recent_form (copy recent winners), drift_discount (discounted entry on dipped positions), consensus_basket (single elite, small bets). All gated to 20-72c price zone."
@@ -51,7 +51,7 @@
     "_group": "Trade Sourcing",
     "MIN_TRADE_CASH": {
       "value": 200,
-      "_description": "Raised to $200 \u00e2\u20ac\u201d filter out noise trades. Whales bet meaningfully."
+      "_description": "Raised to $200 \u00e2\u20ac\u201d filter out noise trades. Wallets bet meaningfully."
     },
     "MAX_TRADES_FETCH": {
       "value": 300,
@@ -148,14 +148,14 @@
     },
     "MIN_CONFLUENCE": {
       "value": 2,
-      "_description": "KEY CHANGE: Require 2+ elite whales. Single-whale signals have lost us most money."
+      "_description": "KEY CHANGE: Require 2+ elite wallets. Single-wallet signals have lost us most money."
     }
   },
   "drift_gates": {
     "_group": "Price Drift Gates",
     "MAX_DRIFT": {
       "value": 0.05,
-      "_description": "5% drift max \u00e2\u20ac\u201d if price already moved 5% from whale entry, edge is gone."
+      "_description": "5% drift max \u00e2\u20ac\u201d if price already moved 5% from wallet entry, edge is gone."
     },
     "MIN_DRIFT": {
       "value": -0.08,
@@ -239,16 +239,16 @@
       "_description": "Unchanged."
     },
     "WILSON_MIN_WATCH": {
-      "value": 0.45,
+      "value": 0.3,
       "_description": "Unchanged."
     },
     "WILSON_MIN_VER": {
-      "value": 0.49,
+      "value": 0.38,
       "_description": "Unchanged."
     },
     "MIN_AVG_PROFIT_PER_TRADE": {
-      "value": 2.0,
-      "_description": "Raised \u00e2\u20ac\u201d want whales who actually profit per trade."
+      "value": 0.5,
+      "_description": "Raised \u00e2\u20ac\u201d want wallets who actually profit per trade."
     },
     "MIN_AVG_BET_SIZE": {
       "value": 10.0,
@@ -295,9 +295,9 @@
       "value": 1,
       "_description": "Unchanged."
     },
-    "MAX_POSITIONS_PER_WHALE": {
+    "MAX_POSITIONS_PER_WALLET": {
       "value": 2,
-      "_description": "Raised to 2 \u00e2\u20ac\u201d allows same whale to appear in recent_form and consensus_basket."
+      "_description": "Raised to 2 \u00e2\u20ac\u201d allows same wallet to appear in recent_form and consensus_basket."
     },
     "MAX_WATCHLIST_SIZE": {
       "value": 400,
@@ -305,11 +305,11 @@
     },
     "PROFIT_TARGET_PCT": {
       "value": 0.4,
-      "_description": "Take profit at +40% if whale is still in. Lock in gains."
+      "_description": "Take profit at +40% if wallet is still in. Lock in gains."
     },
-    "WHALE_EXIT_SELL": {
+    "WALLET_EXIT_SELL": {
       "value": true,
-      "_description": "Still follow whale exits."
+      "_description": "Still follow wallet exits."
     },
     "STOP_LOSS_ENABLED": {
       "value": true,
@@ -335,7 +335,7 @@
     "_group": "Sizing",
     "USE_PROPORTIONAL_SIZING": {
       "value": false,
-      "_description": "Disabled \u00e2\u20ac\u201d proportional to whale portfolio is wrong for small bankrolls."
+      "_description": "Disabled \u00e2\u20ac\u201d proportional to wallet portfolio is wrong for small bankrolls."
     },
     "PROPORTIONAL_WEIGHT": {
       "value": 0.0,
@@ -343,7 +343,7 @@
     }
   },
   "discovery": {
-    "_group": "Whale Discovery",
+    "_group": "Wallet Discovery",
     "DISCOVERY_INTERVAL_CYCLES": {
       "value": 20,
       "_description": "Every 20 cycles."
@@ -378,7 +378,7 @@
     ],
     "_NOTE_MARKETS": "CRYPTO removed \u00e2\u20ac\u201d crypto prediction markets are dominated by bots with info advantages. POLITICS and EVENT are more human-driven.",
     "MIN_ELITE_CONFLUENCE": 2,
-    "_NOTE_CONFLUENCE": "KEY CHANGE: Require 2+ elite whales minimum for consensus_basket. recent_form and drift_discount have their own thresholds.",
+    "_NOTE_CONFLUENCE": "KEY CHANGE: Require 2+ elite wallets minimum for consensus_basket. recent_form and drift_discount have their own thresholds.",
     "BLOCK_SPORTS": true,
     "MIN_SPORTS_CONFLUENCE": 4,
     "SPORTS_STOP_LOSS_PCT": -0.15,
@@ -410,7 +410,7 @@
   },
   "strategy_drift_discount": {
     "_group": "Strategy: Drift Discount",
-    "_NOTE": "Enter when a verified whale bought earlier and price has dipped 4-12% below their entry. We get the same bet at a discount. Whale still holding check via fetch_wallet_sells.",
+    "_NOTE": "Enter when a verified wallet bought earlier and price has dipped 4-12% below their entry. We get the same bet at a discount. Wallet still holding check via fetch_wallet_sells.",
     "enabled": true,
     "min_discount_pct": 0.04,
     "max_discount_pct": 0.12,
@@ -612,13 +612,13 @@
     "price_zone_ideal_bonus": 5,
     "price_zone_acceptable_bonus": 2,
     "price_zone_outside_penalty": -10,
-    "multi_whale_pts": [
+    "multi_wallet_pts": [
       0,
       0,
       5,
       8
     ],
-    "exit_penalty_per_whale": -8,
+    "exit_penalty_per_wallet": -8,
     "weekly_pnl_penalty_min": -10,
     "score_discount_wscore_ref": 0.85,
     "score_discount_factor": 0.15
@@ -662,7 +662,7 @@
   },
   "position_management_ext": {
     "_group": "Position Management Extensions",
-    "whale_exit_min_sell_fraction": 0.3
+    "wallet_exit_min_sell_fraction": 0.3
   },
   "wallet_selector": {
     "_group": "Wallet Selector",
@@ -683,14 +683,14 @@
           "WEEK"
         ],
         "min_win_rate_watch": 0.53,
-        "wilson_min_watch": 0.45,
+        "wilson_min_watch": 0.30,
         "min_resolved_bets": 10,
         "min_pnl": 0.0,
         "min_win_rate_ver": 0.56,
-        "wilson_min_ver": 0.49,
-        "min_avg_profit": 2.0,
+        "wilson_min_ver": 0.38,
+        "min_avg_profit": 0.5,
         "min_avg_bet": 10.0,
-        "min_portfolio_or_pnl": 500.0,
+        "min_portfolio_or_pnl": 100.0,
         "elite_min_pnl": 40000.0,
         "elite_min_portfolio": 80000.0,
         "elite_min_score": 0.72,

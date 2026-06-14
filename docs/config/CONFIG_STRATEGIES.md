@@ -71,18 +71,18 @@ multiplier = max(0.8, min(1.6, (recent_wr - 0.50) × 4 + 0.8))
 
 ## Strategy 2: `drift_discount`
 
-**Philosophy:** Enter when the current price has dropped 4–12% below the whale's entry price, and the whale is still holding. We get the same bet at a discount. Looks back up to 6 hours — much longer than other strategies.
+**Philosophy:** Enter when the current price has dropped 4–12% below the tracked wallet's entry price, and the tracked wallet is still holding. We get the same bet at a discount. Looks back up to 6 hours — much longer than other strategies.
 
 | Parameter | Default | Type | Description |
 |---|---|---|---|
 | `enabled` | `true` | bool | Enable/disable this strategy |
-| `min_discount_pct` | `0.04` | float (0–1) | Minimum price drop below whale entry. 4% = meaningful discount. |
-| `max_discount_pct` | `0.12` | float (0–1) | Maximum drop. Beyond 12% the market is likely disagreeing with the whale, not just dipping. |
-| `max_signal_age_h` | `6.0` | float (hours) | How far back to look for whale trades. Long window is deliberate — looking for held positions. |
+| `min_discount_pct` | `0.04` | float (0–1) | Minimum price drop below tracked wallet entry. 4% = meaningful discount. |
+| `max_discount_pct` | `0.12` | float (0–1) | Maximum drop. Beyond 12% the market is likely disagreeing with the tracked wallet, not just dipping. |
+| `max_signal_age_h` | `6.0` | float (hours) | How far back to look for tracked wallet trades. Long window is deliberate — looking for held positions. |
 | `price_min` | `0.20` | float (0–1) | Min current price (at time of our entry). |
 | `price_max` | `0.72` | float (0–1) | Max current price. |
 | `max_positions` | `3` | int | Max simultaneous positions from this strategy. |
-| `require_still_holding_check` | `true` | bool | Verify whale hasn't sold since their buy. API call per signal. |
+| `require_still_holding_check` | `true` | bool | Verify tracked wallet hasn't sold since their buy. API call per signal. |
 | `stop_loss_pct` | `null` | float or null | No stop loss. Entry discount + price ceiling = protection. |
 
 **Scoring formula (custom — not shared score_signal):**
@@ -102,7 +102,7 @@ multiplier = max(0.9, min(1.5, 1.0 + discount × 5))
 
 **Tuning guide:**
 - No drift_discount signals → lower `min_discount_pct` (try 0.02) or raise `max_discount_pct` (try 0.18)
-- Whale already sold by the time we check → `require_still_holding_check=true` is correct behaviour (signal correctly rejected)
+- Tracked wallet already sold by the time we check → `require_still_holding_check=true` is correct behaviour (signal correctly rejected)
 - Too many 6-hour-old signals → lower `max_signal_age_h` (try 3.0)
 
 ---
@@ -122,7 +122,7 @@ multiplier = max(0.9, min(1.5, 1.0 + discount × 5))
 | `max_positions` | `5` | int | Max simultaneous positions from this strategy. |
 | `max_bet_abs` | `1.20` | float ($) | Hard absolute bet cap. Overrides global `MAX_BET_ABS` when lower. |
 | `stop_loss_pct` | `-0.35` | float | Soft stop at −35%. Harder stop than recent_form/drift_discount. |
-| `conviction_portfolio_pct` | `0.005` | float (0–1) | Trade ≥ 0.5% of whale's portfolio triggers CONVICTION tier. |
+| `conviction_portfolio_pct` | `0.005` | float (0–1) | Trade ≥ 0.5% of tracked wallet's portfolio triggers CONVICTION tier. |
 | `opposition_ratio_block` | `0.60` | float (0–1) | If ≥60% of elite flow is on the opposing outcome → reject signal entirely. |
 
 **Tier assignment (unique to consensus_basket):**
@@ -139,7 +139,7 @@ signal stale + not CONVICTION → STALE
 - consensus_basket not trading → check `min_elite_confluence` — if no elites in roster, no signals
 - Too conservative (low bet sizes) → raise `max_bet_abs` (try 2.0) or lower `min_score` (try 42)
 - Too many small losing bets → raise `min_score` (try 60) or `min_elite_confluence` (try 2)
-- Counter-whale blocking too many signals → lower `opposition_ratio_block` (try 0.75)
+- Counter-wallet blocking too many signals → lower `opposition_ratio_block` (try 0.75)
 
 ---
 

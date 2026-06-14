@@ -11,7 +11,7 @@
 Risk management in TITAN has three layers:
 
 ```
-1. Position limits          ← how many positions, per whale, per event
+1. Position limits          ← how many positions, per tracked wallet, per event
 2. Exit triggers            ← when to close a position
 3. Kelly sizing             ← how much to bet on each signal
 ```
@@ -26,10 +26,10 @@ All three interact. Tight position limits + conservative Kelly = very small expo
 |---|---|---|---|
 | `MAX_OPEN_POSITIONS` | `5` | int | Hard cap on simultaneous open positions across all strategies. |
 | `MAX_POSITIONS_PER_EVENT` | `1` | int | Only 1 position per Polymarket event (prevents doubling up on correlated outcomes). |
-| `MAX_POSITIONS_PER_WHALE` | `2` | int | A single elite wallet can appear in at most 2 open positions (recent_form + consensus_basket). |
+| `MAX_POSITIONS_PER_WALLET` | `2` | int | A single elite wallet can appear in at most 2 open positions (recent_form + consensus_basket). |
 | `MAX_WATCHLIST_SIZE` | `400` | int | Maximum wallets in the active monitoring pool. |
-| `PROFIT_TARGET_PCT` | `0.40` | float (0–1) | Auto-sell at +40% gain even if the whale is still holding. Locks in gains. |
-| `WHALE_EXIT_SELL` | `true` | bool | Mirror whale exits immediately. The core "follow the whale" principle. |
+| `PROFIT_TARGET_PCT` | `0.40` | float (0–1) | Auto-sell at +40% gain even if the tracked wallet is still holding. Locks in gains. |
+| `WALLET_EXIT_SELL` | `true` | bool | Mirror tracked wallet exits immediately. The core "follow the tracked wallet" principle. |
 | `STOP_LOSS_ENABLED` | `true` | bool | **Must stay true.** Prior sessions without stop-losses saw −97%, −99% losses. |
 | `STOP_LOSS_PCT` | `-0.30` | float (negative) | Global stop-loss floor at −30%. Note: recent_form and drift_discount override to `null` per their strategy config. |
 
@@ -57,7 +57,7 @@ Each strategy can set its own `stop_loss_pct`. The per-strategy value takes prio
 | `EXIT_COOLDOWN_SECONDS` | `600` | int (seconds) | After closing a position on a market, wait this long before re-entering. 10 minutes. |
 
 **Tuning guide:**
-- Whale exit happening immediately after entry (noise) → raise `MIN_HOLD_MINUTES` (try 10)
+- Tracked wallet exit happening immediately after entry (noise) → raise `MIN_HOLD_MINUTES` (try 10)
 - Missing re-entry opportunities after good exits → lower `EXIT_COOLDOWN_SECONDS` (try 300)
 - Re-entering too quickly on the same bad market → raise `EXIT_COOLDOWN_SECONDS` (try 1800)
 
@@ -69,7 +69,7 @@ Not editable via MCP. Edit `titan_config.json` directly.
 
 | Parameter | Default | Description |
 |---|---|---|
-| `whale_exit_min_sell_fraction` | `0.30` | A whale must sell ≥30% of their position to trigger an exit signal. Prevents overreacting to partial profit-taking. |
+| `wallet_exit_min_sell_fraction` | `0.30` | A tracked wallet must sell ≥30% of their position to trigger an exit signal. Prevents overreacting to partial profit-taking. |
 
 ---
 
@@ -109,7 +109,7 @@ Each signal tier gets a fixed multiplier applied to the base Kelly bet.
 
 | Tier | Multiplier | Description |
 |---|---|---|
-| `CONVICTION` | `1.6` | Highest conviction — whale commits large size |
+| `CONVICTION` | `1.6` | Highest conviction — tracked wallet commits large size |
 | `ALERT` | `1.2` | Standard auto-trade tier |
 | `STRONG` | `1.0` | Not auto-traded (display only) |
 | `MEDIUM` | `0.7` | Lower confidence |
@@ -129,7 +129,7 @@ score_floor = score_floor_mult × (score / score_floor_base_ref) × score_floor_
 | `score_floor_mult` | `1.5` | Multiplier |
 
 ### Large Trade Boost
-When a signal contains a whale's large trade, the bet gets a small boost.
+When a signal contains a tracked wallet's large trade, the bet gets a small boost.
 ```
 large_trade_max_abs_boost  = 1.50   ← max absolute $$ increase from large trade
 large_trade_bankroll_cap   = 0.22   ← still capped at 22% of bankroll after boost
@@ -171,7 +171,7 @@ Exits are checked every cycle for every open position:
 | 1 | Min hold guard | Position held < `MIN_HOLD_MINUTES` | Block all exits |
 | 2 | Market resolution | Price > 97¢ or < 3¢ | Immediate sell |
 | 3 | Market expiry | < 4h left | Sell |
-| 4 | Whale exit | Tracked whale sells ≥30% of position | Sell (if `WHALE_EXIT_SELL=true`) |
+| 4 | Wallet exit | Tracked wallet sells ≥30% of position | Sell (if `WALLET_EXIT_SELL=true`) |
 | 5 | Profit target | P&L ≥ `PROFIT_TARGET_PCT` | Sell (if `PROFIT_TARGET_ENABLED=true`) |
 | 6 | Trailing stop | Activated at +15%, trails 10% from peak | Sell on reversal |
 | 7 | Strategy stop-loss | P&L ≤ strategy `stop_loss_pct` | Sell |

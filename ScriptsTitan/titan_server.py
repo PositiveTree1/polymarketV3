@@ -213,12 +213,12 @@ _PROMPTS = [
     },
     {
         "name": "titan_signal_review",
-        "description": "Review current whale signals and recommend actions.",
+        "description": "Review current wallet signals and recommend actions.",
         "arguments": [],
     },
     {
-        "name": "titan_whale_brief",
-        "description": "Summarise recent elite whale activity.",
+        "name": "titan_wallet_brief",
+        "description": "Summarise recent elite wallet activity.",
         "arguments": [],
     },
 ]
@@ -241,7 +241,7 @@ def _get_prompt(name: str, api: TitanAPI) -> dict:
         }
     if name == "titan_signal_review":
         sigs = api.get_signals()
-        sigs_text = json.dumps(sigs, indent=2)
+        sigs_text = json.dumps(_to_serializable(sigs), indent=2)
         return {
             "description": _PROMPTS[1]["description"],
             "messages": [
@@ -254,7 +254,7 @@ def _get_prompt(name: str, api: TitanAPI) -> dict:
                 }
             ],
         }
-    if name == "titan_whale_brief":
+    if name == "titan_wallet_brief":
         wallets = api.get_tracked_wallets()
         wallets_text = json.dumps(wallets, indent=2)
         return {

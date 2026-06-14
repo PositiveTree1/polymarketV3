@@ -100,7 +100,7 @@ class WalletEnv:
         self.session_pnl:         float                                  = 0.0
         self.active_market_cids:  set[str]                              = set()
         self.cooldown_cids:       dict[str, float]                      = {}
-        self.position_whale_map:  dict[str, set[str]]                   = {}
+        self.position_wallet_map:  dict[str, set[str]]                   = {}
         self.signal_first_seen_by_asset: dict[str, float]               = {}
         self.equity_history:      list[tuple[float, float]]             = []
 

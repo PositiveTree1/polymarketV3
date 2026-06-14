@@ -36,7 +36,7 @@ def _reset_env_for_true_scratch() -> None:
     env.open_positions = {}
     env.active_market_cids = set()
     env.cooldown_cids = {}
-    env.position_whale_map = {}
+    env.position_wallet_map = {}
     env.signal_first_seen_by_asset = {}
     env.equity_history = []
     env.LAST_SIGNALS = []

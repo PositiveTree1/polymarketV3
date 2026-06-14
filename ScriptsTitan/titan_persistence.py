@@ -23,7 +23,7 @@ def save_state():
             "session_pnl":        env.session_pnl,
             "active_market_cids": list(env.active_market_cids),
             "cooldown_cids":      env.cooldown_cids,
-            "position_whale_map": {k: list(v) for k, v in env.position_whale_map.items()},
+            "position_wallet_map": {k: list(v) for k, v in env.position_wallet_map.items()},
             "signal_first_seen_by_asset": env.signal_first_seen_by_asset,
             "saved_at":           datetime.now().isoformat(),
         }
@@ -33,7 +33,7 @@ def save_state():
         S._log(f"⚠ Save failed: {e}", "WARN")
 
 
-def save_whale_roster():
+def save_wallet_roster():
     try:
         saved = 0
         for addr, profile in S.env().wallet_cache.items():
@@ -41,13 +41,13 @@ def save_whale_roster():
                 DB.upsert_wallet_profile(addr, profile)
                 saved += 1
         if saved:
-            S._log(f"💾 Whale roster saved: {saved} profiles to DB", "DATA")
+            S._log(f"💾 Wallet roster saved: {saved} profiles to DB", "DATA")
     except Exception as e:
-        S._log(f"⚠ Whale save failed: {e}", "WARN")
+        S._log(f"⚠ Wallet roster save failed: {e}", "WARN")
 
 
-def save_whale_roster_async():
-    threading.Thread(target=save_whale_roster, daemon=True).start()
+def save_wallet_roster_async():
+    threading.Thread(target=save_wallet_roster, daemon=True).start()
 
 
 def load_state():
@@ -56,6 +56,10 @@ def load_state():
     srv = PricesCacheSrv()
     srv.init_db(STATE_DB)
     titan_prices.PRICES = srv
+    from titan_config import SEED_WATCHLIST as _SEEDS
+    pruned = DB.purge_non_watchable(keep_seed=set(_SEEDS))
+    if pruned:
+        S._log(f"🗑 Pruned {pruned} non-watchable wallet stubs from DB", "INFO")
     _load_wallets_from_db()
     ri = _load_trading_state()
     wl = S.get_watchlist()
@@ -91,7 +95,7 @@ def _load_trading_state() -> dict[str, int]:
         env.session_pnl        = float(state.get("session_pnl", 0.0))
         env.active_market_cids = set(state.get("active_market_cids", []))
         env.cooldown_cids      = state.get("cooldown_cids", {})
-        env.position_whale_map = {k: set(v) for k, v in state.get("position_whale_map", {}).items()}
+        env.position_wallet_map = {k: set(v) for k, v in state.get("position_wallet_map", {}).items()}
         env.signal_first_seen_by_asset = {
             str(asset): float(ts)
             for asset, ts in state.get("signal_first_seen_by_asset", {}).items()

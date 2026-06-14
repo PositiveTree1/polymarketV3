@@ -201,15 +201,30 @@ class TitanAPI:
         return [{"msg": l} for l in logs if "ALERT" in l or "WARN" in l or "ERR" in l]
 
     @mcp_tool(
-        description="Returns the current tracked wallet roster with performance metrics.",
+        description=(
+            "Returns tracked wallets with performance metrics. "
+            "Pass 'search' to filter by name or address prefix (case-insensitive) — use this when asking about a specific wallet. "
+            "Pass 'tier' to filter by elite | verified | watchable. "
+            "Without filters returns the full roster."
+        ),
+        input_schema={
+            "search": {"type": "string", "description": "Filter by wallet name or address prefix (case-insensitive)"},
+            "tier":   {"type": "string", "description": "Filter by tier: elite | verified | watchable"},
+        },
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_tracked_wallets(self) -> list[TrackedWalletDict]:
+    def get_tracked_wallets(self, search: str = "", tier: str = "") -> list[TrackedWalletDict]:
         import titan_state as _TS
-        return [
-            {"wallet": w, **p}
-            for w, p in _TS.env().wallet_cache.items()
-        ]
+        results = []
+        search_lower = search.lower()
+        for w, p in _TS.env().wallet_cache.items():
+            if search_lower and search_lower not in (p.get("name") or "").lower() and not w.lower().startswith(search_lower):
+                continue
+            if tier == "elite"     and not p.get("elite"):     continue
+            if tier == "verified"  and not p.get("verified"):  continue
+            if tier == "watchable" and not p.get("watchable"): continue
+            results.append({"wallet": w, **p})
+        return results
 
     @mcp_tool(
         description=(
@@ -435,7 +450,7 @@ class TitanAPI:
         description=(
             "Returns per-strategy configuration for all signal builders. "
             "recent_form: copy recent winners — max_tph=20, min_score=42, age<=45min, price 0.18-0.78, max 4 positions, no stop-loss. "
-            "drift_discount: discounted entry 4-12% below whale — age<=6h, price 0.20-0.72, max 3 positions, no stop-loss. "
+            "drift_discount: discounted entry 4-12% below tracked wallet entry — age<=6h, price 0.20-0.72, max 3 positions, no stop-loss. "
             "consensus_basket: volume play — min_elite=1, min_score=50, price 0.20-0.72, max 5 positions, stop-loss=-35%. "
             "open_book: disabled — needs 3+ elites holding same outcome. "
             "Also returns active_strategies list, tradeable_tiers, allowed_market_types, signal_builders registry."
@@ -462,9 +477,9 @@ class TitanAPI:
         description=(
             "Returns position management and risk parameters. "
             "position_management: MAX_OPEN_POSITIONS=5, PROFIT_TARGET_PCT=40%, STOP_LOSS_PCT=-30%, "
-            "STOP_LOSS_ENABLED=true, WHALE_EXIT_SELL=true, MAX_POSITIONS_PER_EVENT=1, MAX_POSITIONS_PER_WHALE=2. "
+            "STOP_LOSS_ENABLED=true, WALLET_EXIT_SELL=true, MAX_POSITIONS_PER_EVENT=1, MAX_POSITIONS_PER_WALLET=2. "
             "timing: MIN_HOLD_MINUTES=5, EXIT_COOLDOWN_SECONDS=600. "
-            "position_management_ext: whale_exit_min_sell_fraction=0.3. "
+            "position_management_ext: wallet_exit_min_sell_fraction=0.3. "
             "strategy_kelly: score_mult, conf_mult_cap=1.75, tier_multipliers (CONVICTION=1.6, ALERT=1.2), adaptive_caps."
         ),
         annotations={"readOnlyHint": True, "openWorldHint": False},
@@ -541,28 +556,123 @@ class TitanAPI:
     @mcp_tool(
         description=(
             "Update wallet selection and elite classification thresholds. "
-            "group: wallet_quality | elite_thresholds | elite_polling. "
+            "group: wallet_quality | elite_thresholds | elite_polling | wallet_selector. "
             "patch: {key: new_value} — only existing keys accepted. "
+            "For wallet_selector, patches the active selector's flat params (e.g. wilson_min_watch, min_portfolio_or_pnl). "
             "dry_run=true previews without saving. Returns {ok, errors, applied}."
         ),
         input_schema={
-            "group": {"type": "string", "description": "wallet_quality | elite_thresholds | elite_polling"},
+            "group": {"type": "string", "description": "wallet_quality | elite_thresholds | elite_polling | wallet_selector"},
             "patch": {"type": "object", "description": "Key/value pairs to update"},
             "dry_run": {"type": "boolean", "description": "Validate only, do not save"},
         },
         annotations={"readOnlyHint": False, "destructiveHint": False},
     )
     def update_config_wallets(self, group: str, patch: dict, dry_run: bool = False) -> dict:
-        allowed = {"wallet_quality", "elite_thresholds", "elite_polling"}
+        allowed = {"wallet_quality", "elite_thresholds", "elite_polling", "wallet_selector"}
         if group not in allowed:
             return {"ok": False, "errors": [f"group must be one of {sorted(allowed)}"], "applied": {}}
         cfg = self._read_cfg()
+        _REEVAL_GROUPS = {"wallet_quality", "elite_thresholds", "wallet_selector"}
+        if group == "wallet_selector":
+            ws = cfg.setdefault("wallet_selector", {})
+            active = ws.get("active_selector", "performance")
+            target = ws.setdefault("selectors", {}).setdefault(active, {})
+            errors = [f"unknown key {k!r} in wallet_selector/{active}" for k in patch if k not in target]
+            if errors:
+                return {"ok": False, "errors": errors, "applied": {}}
+            if not dry_run:
+                target.update(patch)
+                self._write_cfg(cfg, f"wallets/wallet_selector/{active} {patch}")
+                TitanAPI._reeval_wallets_impl()
+            return {"ok": True, "errors": [], "applied": patch}
         errors = self._patch_group(cfg, group, patch)
         if errors:
             return {"ok": False, "errors": errors, "applied": {}}
         if not dry_run:
             self._write_cfg(cfg, f"wallets/{group} {patch}")
+            if group in _REEVAL_GROUPS:
+                TitanAPI._reeval_wallets_impl()
         return {"ok": True, "errors": [], "applied": patch}
+
+    @mcp_tool(
+        description=(
+            "Re-classify all wallets in the DB using the current config thresholds. "
+            "Does NOT hit the Polymarket API — re-runs is_selected() on the stored profile_json. "
+            "Use after changing wallet quality thresholds to immediately propagate new tiers. "
+            "Returns {reclassified, now_watchable, now_unwatchable, total}."
+        ),
+        input_schema={},
+        annotations={"readOnlyHint": False, "destructiveHint": False},
+    )
+    def reeval_wallets(self) -> dict:
+        return TitanAPI._reeval_wallets_impl()
+
+    @staticmethod
+    def _reeval_wallets_impl() -> dict:
+        import json as _json
+        import titan_config as _C
+        import titan_db as _DB
+        import titan_state as _S
+
+        sel = _C.get_active_selector()
+        if sel is None:
+            return {"ok": False, "error": "No active selector"}
+
+        with _DB._connect() as cx:
+            rows = cx.execute("SELECT address, watchable, profile_json FROM watchlist WHERE profile_json IS NOT NULL").fetchall()
+
+        now_watchable = 0
+        now_unwatchable = 0
+        reclassified = 0
+
+        updates: list[tuple[int, str]] = []
+        profile_updates: list[tuple[str, str]] = []
+
+        for addr, old_watchable, profile_json in rows:
+            try:
+                prof = _json.loads(profile_json)
+            except Exception:
+                continue
+
+            raw = {
+                "win_rate":        prof.get("win_rate", 0.0),
+                "wilson_lb":       prof.get("wilson_lb", 0.0),
+                "n_resolved":      prof.get("n_resolved", 0),
+                "total_pnl":       prof.get("total_pnl", 0.0),
+                "total_value":     prof.get("total_value", 0.0),
+                "avg_profit":      prof.get("avg_profit", 0.0),
+                "avg_bet":         prof.get("avg_bet", 0.0),
+                "trades_per_hour": prof.get("trades_per_hour", 0.0),
+                "alpha_per_trade": prof.get("alpha_per_trade", 0.0),
+                "n_pos":           prof.get("n_pos", 0),
+                "pnl_pct":         prof.get("pnl_pct", 0.0),
+            }
+            score = sel.score(raw)
+            watchable, verified, elite, fail_reasons = sel.is_selected(raw, score)
+
+            new_watchable = 1 if (watchable or verified) else 0
+            if new_watchable != old_watchable:
+                reclassified += 1
+                if new_watchable:
+                    now_watchable += 1
+                else:
+                    now_unwatchable += 1
+
+            prof["score"]        = round(score, 5)
+            prof["verified"]     = verified
+            prof["watchable"]    = bool(watchable or verified)
+            prof["elite"]        = elite
+            prof["fail_reasons"] = fail_reasons
+            updates.append((new_watchable, addr))
+            profile_updates.append((_json.dumps(prof), addr))
+
+        with _DB._connect() as cx:
+            cx.executemany("UPDATE watchlist SET watchable=? WHERE address=?", updates)
+            cx.executemany("UPDATE watchlist SET profile_json=? WHERE address=?", profile_updates)
+
+        _S._log(f"reeval_wallets: {reclassified} reclassified ({now_watchable} gained, {now_unwatchable} lost) of {len(rows)} total", "INFO")
+        return {"ok": True, "reclassified": reclassified, "now_watchable": now_watchable, "now_unwatchable": now_unwatchable, "total": len(rows)}
 
     @mcp_tool(
         description=(
@@ -572,17 +682,26 @@ class TitanAPI:
             "dry_run=true previews without saving. Returns {ok, errors, applied}."
         ),
         input_schema={
-            "group": {"type": "string", "description": "signal_quality | drift_gates | price_zone_gates"},
+            "group": {"type": "string", "description": "signal_quality | drift_gates | price_zone_gates | strategy_scoring"},
             "patch": {"type": "object", "description": "Key/value pairs to update"},
             "dry_run": {"type": "boolean", "description": "Validate only, do not save"},
         },
         annotations={"readOnlyHint": False, "destructiveHint": False},
     )
     def update_config_signals(self, group: str, patch: dict, dry_run: bool = False) -> dict:
-        allowed = {"signal_quality", "drift_gates", "price_zone_gates"}
+        allowed = {"signal_quality", "drift_gates", "price_zone_gates", "strategy_scoring"}
         if group not in allowed:
             return {"ok": False, "errors": [f"group must be one of {sorted(allowed)}"], "applied": {}}
         cfg = self._read_cfg()
+        if group == "strategy_scoring":
+            block = cfg.setdefault("strategy_scoring", {})
+            errors = [f"key {k!r} is reserved" for k in patch if k.startswith("_")]
+            if errors:
+                return {"ok": False, "errors": errors, "applied": {}}
+            if not dry_run:
+                block.update(patch)
+                self._write_cfg(cfg, f"signals/strategy_scoring {patch}")
+            return {"ok": True, "errors": [], "applied": patch}
         errors = self._patch_group(cfg, group, patch)
         if errors:
             return {"ok": False, "errors": errors, "applied": {}}
@@ -633,10 +752,19 @@ class TitanAPI:
         annotations={"readOnlyHint": False, "destructiveHint": False},
     )
     def update_config_risk(self, group: str, patch: dict, dry_run: bool = False) -> dict:
-        allowed = {"position_management", "timing"}
+        allowed = {"position_management", "timing", "strategy_kelly"}
         if group not in allowed:
             return {"ok": False, "errors": [f"group must be one of {sorted(allowed)}"], "applied": {}}
         cfg = self._read_cfg()
+        if group == "strategy_kelly":
+            block = cfg.setdefault("strategy_kelly", {})
+            errors = [f"key {k!r} is reserved" for k in patch if k.startswith("_")]
+            if errors:
+                return {"ok": False, "errors": errors, "applied": {}}
+            if not dry_run:
+                block.update(patch)
+                self._write_cfg(cfg, f"risk/strategy_kelly {patch}")
+            return {"ok": True, "errors": [], "applied": patch}
         errors = self._patch_group(cfg, group, patch)
         if errors:
             return {"ok": False, "errors": errors, "applied": {}}
@@ -669,6 +797,112 @@ class TitanAPI:
         if not dry_run:
             self._write_cfg(cfg, f"sizing/{group} {patch}")
         return {"ok": True, "errors": [], "applied": patch}
+
+    @mcp_tool(
+        description="Per-strategy P&L breakdown: trade count, win rate, total PnL, avg PnL%. Faster than query_db for the most common diagnostic query.",
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def get_strategy_stats(self) -> list[dict]:
+        import titan_db as _DB
+        rows = _DB.query_db(
+            "SELECT strategy, COUNT(*) as trades, "
+            "SUM(CASE WHEN pnl_usdc > 0 THEN 1 ELSE 0 END) as wins, "
+            "ROUND(SUM(pnl_usdc), 2) as total_pnl, "
+            "ROUND(AVG(pnl_pct) * 100, 1) as avg_pct, "
+            "ROUND(AVG(CASE WHEN pnl_usdc > 0 THEN pnl_usdc END), 2) as avg_win, "
+            "ROUND(AVG(CASE WHEN pnl_usdc < 0 THEN pnl_usdc END), 2) as avg_loss "
+            "FROM trade_history WHERE type='SELL' "
+            "GROUP BY strategy ORDER BY total_pnl DESC"
+        )
+        for row in rows:
+            trades = row.get("trades") or 0
+            wins = row.get("wins") or 0
+            row["win_rate"] = round(wins / trades, 3) if trades else 0.0
+        return rows
+
+    @mcp_tool(
+        description="Frequency map of signal rejection reasons from the last N cycles. Shows which gate is blocking most signals — faster than parsing get_rejects() manually.",
+        input_schema={"limit": {"type": "integer", "description": "Number of recent rejects to analyse (default 200)"}},
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def get_reject_summary(self, limit: int = 200) -> dict:
+        rejects = self._last_rejects[-limit:]
+        by_reason: dict[str, int] = {}
+        for r in rejects:
+            reason = r.split(":")[0].strip()
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+        return {"total": len(rejects), "by_reason": dict(sorted(by_reason.items(), key=lambda x: x[1], reverse=True))}
+
+    @mcp_tool(
+        description=(
+            "TITAN's own copy-trade ROI per tracked wallet — how profitable it has been to follow each wallet's signals. "
+            "Different from their Polymarket stats. wallet_names is a JSON-encoded list stored as a string."
+        ),
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def get_wallet_copy_roi(self) -> list[dict]:
+        import titan_db as _DB
+        return _DB.query_db(
+            "SELECT wallet_names, COUNT(*) as signals_followed, "
+            "SUM(CASE WHEN pnl_usdc > 0 THEN 1 ELSE 0 END) as wins, "
+            "ROUND(SUM(pnl_usdc), 2) as total_pnl, "
+            "ROUND(AVG(pnl_pct) * 100, 1) as avg_pct "
+            "FROM trade_history WHERE type='SELL' "
+            "GROUP BY wallet_names ORDER BY total_pnl DESC LIMIT 30"
+        )
+
+    @mcp_tool(
+        description=(
+            "Lists all available knowledge-base documents in the docs/ folder. "
+            "Returns a list of {name, path, description} entries. "
+            "Call read_doc(path) to retrieve the content of any document."
+        ),
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def get_docs(self) -> list[dict]:
+        import pathlib
+        docs_dir = pathlib.Path(__file__).parent.parent / "docs"
+        _DESCRIPTIONS: dict[str, str] = {
+            "TITAN_AI_GUIDE.md":             "Entry point — what TITAN is, MCP connection, architecture, improvement ideas",
+            "TITAN_CONTEXT.md":              "Full architecture, module map, engine loop, all key parameters",
+            "TITAN_STRATEGIES.md":           "Strategy logic — entry/exit rules for recent_form, drift_discount, consensus_basket",
+            "TITAN_POLYMARKET_DATA_MODEL.md":"Data structures: WalletObservation, Market, Signal, Position, URL identity rules",
+            "MCP_REFERENCE.md":              "All MCP tools with inputs/outputs, SSE events, logging architecture",
+            "ANALYSIS_GUIDE.md":             "AI analysis workflow, diagnostic decision tree, safe parameter ranges, SQL queries",
+            "config/CONFIG_WALLETS.md":      "Wallet quality thresholds, elite classification, selector weights",
+            "config/CONFIG_SIGNALS.md":      "Signal gates, scoring constants, price/drift zones, strategy scoring formulas",
+            "config/CONFIG_STRATEGIES.md":   "Per-strategy parameters for all 3 builders + open_book",
+            "config/CONFIG_RISK.md":         "Stop-loss, profit target, Kelly formula, timing, position management",
+            "config/CONFIG_SIZING.md":       "Bankroll, bet caps, market quality filters, trade sourcing, cache TTLs",
+        }
+        result = []
+        for md in sorted(docs_dir.rglob("*.md")):
+            rel = md.relative_to(docs_dir).as_posix()
+            result.append({
+                "name":        md.name,
+                "path":        rel,
+                "description": _DESCRIPTIONS.get(rel, ""),
+            })
+        return result
+
+    @mcp_tool(
+        description=(
+            "Returns the full content of a knowledge-base document from the docs/ folder. "
+            "Use get_docs() first to discover available paths, then call read_doc(path) "
+            "with the relative path (e.g. 'TITAN_AI_GUIDE.md' or 'config/CONFIG_RISK.md')."
+        ),
+        input_schema={"path": {"type": "string", "description": "Relative path within docs/ e.g. 'TITAN_AI_GUIDE.md' or 'config/CONFIG_RISK.md'"}},
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def read_doc(self, path: str) -> str:
+        import pathlib
+        docs_dir = pathlib.Path(__file__).parent.parent / "docs"
+        target = (docs_dir / path).resolve()
+        if not str(target).startswith(str(docs_dir.resolve())):
+            raise ValueError(f"Path outside docs/: {path}")
+        if not target.exists():
+            raise FileNotFoundError(f"Doc not found: {path}")
+        return target.read_text(encoding="utf-8")
 
     @mcp_tool(
         description="Returns recent engine log lines.",
@@ -969,7 +1203,7 @@ class TitanAPI:
                 lines += [
                     f"  [{pos.tier}] {pos.title[:60]}",
                     f"    Outcome: {outcome}  Score: {pos.score:.0f}  HFT: {'YES' if pos.is_hft else 'NO'}",
-                    f"    Whale Entry: ${pos.avg_entry or entry:.4f}  Our Entry: ${entry:.4f}  "
+                    f"    Wallet Entry: ${pos.avg_entry or entry:.4f}  Our Entry: ${entry:.4f}  "
                     f"Now: ${cur:.4f}  P&L: {pnl_pct:+.1f}% (${pnl_abs:+.3f})",
                     f"    Bet: ${pos.bet:.2f}  Shares: {pos.shares:.2f}  "
                     f"Held: {held_min:.0f}min",
@@ -986,7 +1220,7 @@ class TitanAPI:
             lines += [
                 f"  #{i} [{s.tier}] Score:{s.score:.0f}  {s.title[:60]}",
                 f"     [{s.outcome}]  CurPrice: ${s.cur:.4f}  "
-                f"WhaleEntry: ${s.avg_entry:.4f}  Drift: {s.drift*100:+.1f}%",
+                f"WalletEntry: ${s.avg_entry:.4f}  Drift: {s.drift*100:+.1f}%",
                 f"     via: {', '.join(s.names[:5])}",
                 sep2,
             ]
@@ -1020,12 +1254,12 @@ class TitanAPI:
             typ  = t.type or "?"
             icon = "🛒" if typ == "BUY" else ("✅" if (t.pnl_usdc or 0) >= 0 else "❌")
             pnl_str = f"P&L ${(t.pnl_usdc or 0):+.4f} ({(t.pnl_pct or 0):+.1f}%)" if typ == "SELL" else ""
-            whale_str = ", ".join(t.wallet_names[:2]) or "?"
+            wallet_str = ", ".join(t.wallet_names[:2]) or "?"
             lines.append(
                 f"  {icon} {t.ts_str or '?'}  {typ:<4}  [{t.tier or '?'}]  "
                 f"{t.title[:36]}  [{t.outcome}]"
                 f"  Price:${t.price:.4f}  Bet:${t.bet:.2f}"
-                f"  {pnl_str}  via:{whale_str}"
+                f"  {pnl_str}  via:{wallet_str}"
             )
         if not recent_trades2:
             lines.append("  (no trades yet)")
