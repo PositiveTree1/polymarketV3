@@ -322,6 +322,18 @@ Main sources:
 
 These become `WalletObservation`.
 
+### Wallet display names
+
+Polymarket wallet addresses are the source of truth. Display names are best-effort metadata.
+
+Titan learns wallet names from these places:
+
+- Data API trade/activity payload fields such as `name`, `pseudonym`, `username`, `displayName`, or `profileName`
+- configured VIP notes/names
+- previously cached wallet profiles
+
+This is why some wallets show a friendly name and others show `0x...`: discovery sources such as leaderboard/address scans can return or store only the wallet address, and Titan may not have seen a recent payload containing the display name yet. During wallet profile refresh, Titan now attempts a lightweight name backfill from recent Polymarket trade/activity rows when the cached name is still an address/auto placeholder.
+
 ### B. Titan's own executed trades
 
 These are local `TradeRecord` rows in `trade_history`.
@@ -494,4 +506,3 @@ The clean mental model is:
 - `MarketCache` is Titan's central source of truth for `Market`
 - `event.slug` is the canonical frontend URL identity
 - `asset` is the strongest technical key for recovering a market and its parent event
-

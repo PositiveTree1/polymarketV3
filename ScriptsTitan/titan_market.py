@@ -814,15 +814,14 @@ def _poll_wallet_trades(wallet: str, limit: int, min_cash: float,
     })
     if not data or not isinstance(data, list):
         return []
+    prof    = S.env().wallet_cache.get(wallet, {})
+    name    = prof.get("name") or wallet[:14] + "…"
     if len(data) >= limit:
         if wallet not in _poll_limit_warned:
             _poll_limit_warned.add(wallet)
-            S._log(f"⚠ Poll limit hit for {wallet[:14]}… ({len(data)}/{limit}) — trades may be truncated", "WARN")
+            S._log(f"⚠ Poll limit hit for {name} ({len(data)}/{limit}) — trades may be truncated", "WARN")
     else:
         _poll_limit_warned.discard(wallet)
-
-    prof    = S.env().wallet_cache.get(wallet, {})
-    name    = prof.get("name", wallet[:10] + "…")
     results : list[WalletObservation] = []
     for t in data:
         whaletrade : WalletObservation | None = _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, source, is_elite)

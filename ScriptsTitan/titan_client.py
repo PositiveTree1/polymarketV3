@@ -9,6 +9,7 @@ import json
 import threading
 import time
 import urllib.request
+import urllib.error
 from collections.abc import Mapping
 from collections import defaultdict
 from datetime import datetime
@@ -67,6 +68,7 @@ class TitanClient:
         self._last_event_id: int = 0
 
         self._ready = threading.Event()
+        self._server_offline = False
         _print(f"Connecting to {self._base_url}")
         threading.Thread(target=self._init_async, daemon=True, name="titan-init").start()
 
@@ -119,13 +121,22 @@ class TitanClient:
             headers=self._headers(),
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            if not self._sid:
-                self._sid = resp.headers.get("MCP-Session-Id")
-            payload = json.loads(resp.read())
-            if not isinstance(payload, dict):
-                raise RuntimeError(f"Invalid JSON-RPC response type: {type(payload).__name__}")
-            return payload
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if not self._sid:
+                    self._sid = resp.headers.get("MCP-Session-Id")
+                payload = json.loads(resp.read())
+                if not isinstance(payload, dict):
+                    raise RuntimeError(f"Invalid JSON-RPC response type: {type(payload).__name__}")
+                if self._server_offline:
+                    self._server_offline = False
+                    _print(f"Server reconnected ({self._base_url})")
+                return payload
+        except urllib.error.URLError as e:
+            if not self._server_offline:
+                self._server_offline = True
+                _log(f"Server unreachable ({self._base_url}): {e.reason}", "ERR")
+            raise
 
     def _call_tool(self, name: str, arguments: dict | None = None) -> object:
         response = self._post({

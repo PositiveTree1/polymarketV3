@@ -190,7 +190,7 @@ Current wallet roster with tier flags and performance metrics.
 Inputs:
 ```
 search   str   Filter by wallet name or address prefix (case-insensitive). Use this when asking about a specific wallet.
-tier     str   Filter by tier: elite | verified | watchable
+tier     str   Filter by tier: elite | verified | watchable | vip
 ```
 
 Without filters returns the full roster. **Always pass `search=` when asking about a specific wallet by name** — much faster than loading the full list.
@@ -203,6 +203,7 @@ elite         bool    Elite tier
 verified      bool    Verified tier
 watchable     bool    Watchable tier
 hft           bool    HFT bot flag
+vip           bool    Configured VIP wallet flag
 score         float   Composite wallet score (0–1)
 win_rate      float   Historical win rate
 total_pnl     float   Lifetime PnL ($)
@@ -466,7 +467,8 @@ While connected to `GET /mcp` (SSE stream), the server pushes:
 | `titan/cycle_complete` | `{signals, wallets, rejects, trades}` | After each 15s cycle |
 | `titan/position_open` | Position object | When a trade is entered |
 | `titan/position_close` | `{pos, pnl_usdc, pnl_pct}` | When a position is closed |
-| `notifications/resources/updated` | `{uri}` | After cycle (snapshot + logs updated) |
+| `titan/config_updated` | `{domain, group, patch, reeval, refresh}` | After wallet selector/quality/elite config changes |
+| `notifications/resources/updated` | `{uri}` | After cycle, and after wallet config changes for affected resources |
 
 ---
 

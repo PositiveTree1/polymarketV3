@@ -31,6 +31,7 @@ v10 ADDITIONS:
 
 import time
 import math
+from collections.abc import Mapping
 from typing import TypedDict
 import titan_state as S
 import titan_config as C
@@ -109,6 +110,7 @@ class WalletProfile(TypedDict):
     watchable:          bool
     elite:              bool
     hft:                bool
+    vip:                bool
     sports_bot:         bool
 
     # ── recent form ───────────────────────────────────────────────────────────
@@ -116,9 +118,68 @@ class WalletProfile(TypedDict):
     recent_pnl_7d:      float | None
     recent_ts:          float
 
+    # ── leaderboard ───────────────────────────────────────────────────────────
+    lb_rank:            int | None
+    lb_vol:             float | None
+
     # ── debug ─────────────────────────────────────────────────────────────────
     detail:             str
     fail_reasons:       list[str]
+
+
+def _is_auto_wallet_name(name: str) -> bool:
+    n = name.strip()
+    if not n:
+        return True
+    if n.lower().startswith("0x"):
+        return True
+    if n.endswith("\u2026"):
+        return True
+    parts = n.split("-")
+    if len(parts) != 2:
+        return False
+    a, b = parts
+    return a and b and a[0].isupper() and b[0].isupper() and a.isalpha() and b.isalpha()
+
+
+def _payload_rows(data: object) -> list[Mapping[str, object]]:
+    rows_raw: object = data
+    if isinstance(data, Mapping):
+        rows_raw = data.get("data") or data.get("items") or data.get("results") or []
+    if not isinstance(rows_raw, list):
+        return []
+    return [row for row in rows_raw if isinstance(row, Mapping)]
+
+
+def _name_from_payload(row: Mapping[str, object]) -> str:
+    for key in ("name", "pseudonym", "username", "displayName", "profileName"):
+        raw = row.get(key)
+        if isinstance(raw, str):
+            candidate = raw.strip()
+            if candidate and not _is_auto_wallet_name(candidate):
+                return candidate
+    user_raw = row.get("user")
+    if isinstance(user_raw, Mapping):
+        return _name_from_payload(user_raw)
+    return ""
+
+
+def resolve_wallet_display_name(wallet: str) -> str:
+    endpoints = [
+        (f"{C.DATA_API}/trades", {"user": wallet, "limit": 10}),
+        (f"{C.DATA_API}/activity", {"user": wallet, "limit": 20}),
+    ]
+    for url, params in endpoints:
+        try:
+            data = S.safe_get(url, params, retries=1, timeout=8, quiet=True)
+        except Exception as exc:
+            S._log(f"Wallet name lookup failed for {wallet[:12]}... via {url}: {exc}", "WARN")
+            continue
+        for row in _payload_rows(data):
+            name = _name_from_payload(row)
+            if name:
+                return name
+    return ""
 
 
 def wilson_lower_bound(wins: int, total: int, z: float = 1.96) -> float:
@@ -344,9 +405,10 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
 
     v10: Also computes recent_pnl_30d and recent_pnl_7d for Recent Form strategy.
     """
+    _limit = C.ACTIVITY_LIMIT or 500
     redeems = S.safe_get(f"{C.DATA_API}/activity", {
         "user": wallet, "type": "REDEEM",
-        "limit": ACTIVITY_LIMIT, "sortBy": "TIMESTAMP", "sortDirection": "DESC",
+        "limit": _limit, "sortBy": "TIMESTAMP", "sortDirection": "DESC",
     }) or []
     if isinstance(redeems, dict):
         redeems = redeems.get("data", [])
@@ -363,7 +425,7 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
 
     trades_raw = S.safe_get(f"{C.DATA_API}/activity", {
         "user": wallet, "type": "TRADE", "side": "BUY",
-        "limit": ACTIVITY_LIMIT, "sortBy": "TIMESTAMP", "sortDirection": "DESC",
+        "limit": _limit, "sortBy": "TIMESTAMP", "sortDirection": "DESC",
     }) or []
     if isinstance(trades_raw, dict):
         trades_raw = trades_raw.get("data", [])
@@ -528,21 +590,25 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
 def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
     wallet = wallet.lower()
     now_t  = time.time()
+    is_vip = wallet in {addr.lower() for addr in C.VIP_WALLETS}
+    vip_name = C.VIP_WALLET_NAMES.get(wallet, "")
     cached = S.env().wallet_cache.get(wallet)
-    if cached and (now_t - cached.get("ts", 0)) < WALLET_TTL:
+    if cached and (now_t - (cached.get("ts") or 0)) < WALLET_TTL:
         return cached
 
-    existing_name = (cached or {}).get("name") or ""
+    existing_name    = (cached or {}).get("name") or ""
+    existing_is_real = bool(existing_name) and not _is_auto_wallet_name(existing_name)
+    keep_name        = existing_name if existing_is_real else vip_name
 
-    def _is_auto_name(n):
-        parts = n.split("-")
-        if len(parts) != 2:
-            return False
-        a, b = parts
-        return a and b and a[0].isupper() and b[0].isupper() and a.isalpha() and b.isalpha()
+    lb_data = S.safe_get(f"{C.DATA_API}/v1/leaderboard", {"user": wallet, "timePeriod": "ALL"})
+    lb_row  = lb_data[0] if lb_data and isinstance(lb_data, list) else None
+    if lb_row and not keep_name:
+        lb_name = str(lb_row.get("userName") or "").strip()
+        if lb_name and not _is_auto_wallet_name(lb_name):
+            keep_name = lb_name
 
-    existing_is_real = existing_name and not existing_name.endswith("…") and not _is_auto_name(existing_name)
-    keep_name = existing_name if existing_is_real else ""
+    if not keep_name:
+        keep_name = resolve_wallet_display_name(wallet)
 
     pos_data = S.safe_get(f"{C.DATA_API}/positions", {
         "user": wallet, "limit": 500,
@@ -555,13 +621,14 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
         "total_pnl": 0.0, "pnl_pct": 0.0, "avg_pos_size": 0.0,
         "avg_profit": 0.0, "avg_bet": 0.0, "trades_per_hour": 0.0,
         "recent_pnl_30d": None, "recent_pnl_7d": None, "recent_ts": 0.0,
-        "verified": False, "watchable": False, "elite": False, "hft": False, "sports_bot": False,
+        "verified": False, "watchable": False, "elite": False, "hft": False, "vip": is_vip, "sports_bot": False,
         "name": keep_name or (wallet[:10] + "…"), "ts": now_t,
+        "lb_rank": None, "lb_vol": None,
         "detail": "No data", "wr_source": "none",
         "fail_reasons": ["no_data"],
     }
 
-    if not pos_data or not isinstance(pos_data, list):
+    if pos_data is None or not isinstance(pos_data, list):
         if cached:
             cached["ts"] = now_t - WALLET_TTL + 60
             S.env().wallet_cache[wallet] = cached
@@ -575,6 +642,18 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
     pnl    = sum(float(p.get("cashPnl")      or 0) for p in pos_data)
     pct    = pnl / init * 100 if init > 0 else 0
     avg_sz = init / n_pos if n_pos > 0 else 0
+
+    lb_rank: int | None = None
+    lb_vol:  float | None = None
+    if lb_row:
+        if lb_row.get("pnl") is not None:
+            pnl = float(lb_row["pnl"])
+        try:
+            lb_rank = int(lb_row["rank"]) if lb_row.get("rank") is not None else None
+        except (ValueError, TypeError):
+            lb_rank = None
+        if lb_row.get("vol") is not None:
+            lb_vol = float(lb_row["vol"])
 
     wr_data    = fetch_real_winrate(wallet)
     wr         = wr_data["win_rate"]
@@ -619,10 +698,7 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
         from titan_selector import PerformanceSelector
         hft_detected      = sel.is_hft(tph, avg_bet, n_res) if isinstance(sel, PerformanceSelector) else False
         sports_bot_detected = False
-        if existing_is_real or (existing_name and _is_auto_name(existing_name)):
-            _check_name = existing_name
-        else:
-            _check_name = wallet[:10] + "…"
+        _check_name = keep_name or existing_name or (wallet[:10] + "…")
         if isinstance(sel, PerformanceSelector):
             sports_bot_detected = sel.is_sports_bot(_check_name, tph)
     else:
@@ -644,7 +720,9 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
 
     if existing_is_real:
         final_name = existing_name
-    elif existing_name and _is_auto_name(existing_name):
+    elif keep_name:
+        final_name = keep_name
+    elif existing_name and _is_auto_wallet_name(existing_name):
         final_name = existing_name
     else:
         final_name = wallet[:10] + "…"
@@ -662,6 +740,7 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
         "trades_per_hour": round(tph, 2),
         "alpha_per_trade": round(apt, 2),
         "hft": hft_detected,
+        "vip": is_vip,
         "sports_bot": sports_bot_detected,
         "verified": verified, "watchable": watchable, "elite": elite,
         "name": final_name, "ts": now_t, "wr_source": wr_src,
@@ -669,6 +748,7 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
         "recent_pnl_30d": round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
         "recent_pnl_7d":  round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
         "recent_ts": now_t,
+        "lb_rank": lb_rank, "lb_vol": lb_vol,
         "detail": (
             f"Score:{score:.2f} WR:{wr*100:.0f}% WilsonLB:{wb*100:.0f}% "
             f"Res:{n_res} Port:${cur:,.0f} PnL:${pnl:+,.0f}({pct:+.1f}%) "
@@ -689,7 +769,7 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
         )
 
     _TRACKED = ("elite", "verified", "watchable", "score", "win_rate", "wilson_lb",
-                "total_pnl", "name", "hft", "sports_bot", "recent_pnl_30d", "recent_pnl_7d")
+                "total_pnl", "name", "hft", "vip", "sports_bot", "recent_pnl_30d", "recent_pnl_7d")
     _changed = cached is None or any(result.get(k) != cached.get(k) for k in _TRACKED)
     S.env().wallet_cache[wallet] = result
     if watchable and _changed:

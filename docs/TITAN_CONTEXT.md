@@ -186,6 +186,8 @@ Tiers are boolean flags on `WalletProfile` stored in `_shared_wallet_cache`. The
 | `watchable` | Being monitored, not yet confirmed (replaces old Watchlist concept) |
 | `hft` | High trades-per-hour (≥100 TPH), different signal path |
 
+`WATCH` in the UI means `watchable=True`. It is a monitoring status: the wallet passed basic quality gates and stays in the tracked roster, but it is not yet trusted like a `VERIFIED` or `ELITE` wallet. Answer general questions about WATCH as "on the radar, lower confidence, monitored for future evidence"; only ask for a wallet name/address when the user asks why a specific wallet has WATCH status.
+
 Wallet score is based on: win rate, Wilson lower bound, total PnL, avg bet size, portfolio size, resolved bets count.
 
 ---

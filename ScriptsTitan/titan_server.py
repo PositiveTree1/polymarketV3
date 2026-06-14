@@ -562,11 +562,26 @@ def _wire_events(api: TitanAPI) -> None:
             _sessions.broadcast({"jsonrpc": "2.0", "method": method, "params": _to_serializable(payload)})
         return _cb
 
+    def _on_config_updated(payload: dict) -> None:
+        serializable = _to_serializable(payload)
+        _sessions.broadcast({
+            "jsonrpc": "2.0",
+            "method": "titan/config_updated",
+            "params": serializable,
+        })
+        for uri in ("titan://config", "titan://wallets", "titan://snapshot"):
+            _sessions.broadcast({
+                "jsonrpc": "2.0",
+                "method": "notifications/resources/updated",
+                "params": {"uri": uri},
+            })
+
     api.subscribe("notifications/message", _on_log)
     api.subscribe("titan/cycle_complete",  _on_cycle)
     api.subscribe("titan/heartbeat",       _notify("titan/heartbeat"))
     api.subscribe("titan/position_open",   _on_position("titan/position_open"))
     api.subscribe("titan/position_close",  _on_position("titan/position_close"))
+    api.subscribe("titan/config_updated",  _on_config_updated)
 
 
 # ── server entry ──────────────────────────────────────────────────────────────

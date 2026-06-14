@@ -46,6 +46,7 @@ class TrackedWalletDict(TypedDict):
     watchable:          bool
     elite:              bool
     hft:                bool
+    vip:                bool
     sports_bot:         bool
     # recent form
     recent_pnl_30d:     float | None

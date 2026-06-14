@@ -60,7 +60,7 @@ MIN_ENTRY_PRICE: float = 0.20;  MAX_ENTRY_PRICE: float = 0.72
 IDEAL_PRICE_MIN: float = 0.25;  IDEAL_PRICE_MAX: float = 0.65
 PROFIT_TARGET_ENABLED: bool = True
 VERBOSE_HTTP: bool = False
-VIP_WALLETS: list = [];  PRIORITY_WALLETS: list = [];  SEED_WATCHLIST: list = []
+VIP_WALLETS: list = [];  VIP_WALLET_NAMES: dict[str, str] = {};  PRIORITY_WALLETS: list = [];  SEED_WATCHLIST: list = []
 DATA_API: str = "";  GAMMA_API: str = "";  HEADERS: dict = {}
 STATE_FILE: str = "";  STATE_DB: str = ""
 
@@ -227,11 +227,22 @@ def reload():
                 out.append(str(item).lower())
         return out
 
+    def _wallet_names(lst):
+        out = {}
+        for item in lst:
+            if isinstance(item, dict):
+                addr = str(item["address"]).lower()
+                note = str(item.get("name") or item.get("note") or "").strip()
+                if note:
+                    out[addr] = note.split()[0]
+        return out
+
     vip_raw  = flat.get("vip_wallets", [])
     pri_raw  = flat.get("priority_wallets", [])
     seed_raw = flat.get("seed_watchlist", [])
 
     g["VIP_WALLETS"]      = _addrs(vip_raw)
+    g["VIP_WALLET_NAMES"] = _wallet_names(vip_raw)
     g["PRIORITY_WALLETS"] = _addrs(pri_raw)
     g["SEED_WATCHLIST"]   = list(dict.fromkeys(
         [a.lower() for a in (_addrs(seed_raw) + g["VIP_WALLETS"] + g["PRIORITY_WALLETS"])]

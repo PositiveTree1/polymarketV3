@@ -26,6 +26,31 @@ A wallet flagged `hft=True` is a separate classification — it trades too fast 
 
 ---
 
+## What `WATCH` Means
+
+`WATCH` is the first tracked-wallet status. It means TITAN has found a wallet worth monitoring, but the wallet is not yet trusted enough to be treated as a strong copy-trading source.
+
+A `WATCH` wallet:
+
+1. Passed the basic watchable quality gates, such as minimum win rate, Wilson lower-bound confidence, resolved-bet count, and non-negative PnL.
+2. Is kept in the tracked wallet roster and refreshed periodically.
+3. Can be shown in the UI and diagnostics so its behavior can be observed over time.
+4. Is below `VERIFIED` or `ELITE`, so its signals should carry less trust and usually need stronger confirmation from better wallets.
+
+Think of `WATCH` as "on the radar". It is not a ban, and it is not a high-conviction endorsement. It is a candidate wallet that has enough evidence to keep monitoring, but not enough evidence to rely on alone.
+
+Tier meaning:
+
+| Status | Meaning |
+|---|---|
+| `WATCH` / `watchable=True` | Monitor this wallet; early candidate, lower confidence |
+| `VERIFIED` / `verified=True` | Trusted enough to contribute copy-trade signals |
+| `ELITE` / `elite=True` | Highest-quality wallet; receives strongest weight and can drive elite strategies |
+
+When answering "what is WATCH status?" in general, do not ask for a specific wallet. Only ask for a wallet name/address if the user wants to know why one specific wallet is WATCH instead of VERIFIED or ELITE.
+
+---
+
 ## Group: `wallet_quality`
 
 Controls who enters the watchable and verified tiers.

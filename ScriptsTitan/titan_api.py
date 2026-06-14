@@ -204,26 +204,34 @@ class TitanAPI:
         description=(
             "Returns tracked wallets with performance metrics. "
             "Pass 'search' to filter by name or address prefix (case-insensitive) — use this when asking about a specific wallet. "
-            "Pass 'tier' to filter by elite | verified | watchable. "
+            "Pass 'tier' to filter by elite | verified | watchable | vip. "
             "Without filters returns the full roster."
         ),
         input_schema={
             "search": {"type": "string", "description": "Filter by wallet name or address prefix (case-insensitive)"},
-            "tier":   {"type": "string", "description": "Filter by tier: elite | verified | watchable"},
+            "tier":   {"type": "string", "description": "Filter by tier: elite | verified | watchable | vip"},
         },
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
     def get_tracked_wallets(self, search: str = "", tier: str = "") -> list[TrackedWalletDict]:
         import titan_state as _TS
+        from titan_config import VIP_WALLETS, VIP_WALLET_NAMES
+        vip_wallets = {addr.lower() for addr in VIP_WALLETS}
         results = []
         search_lower = search.lower()
         for w, p in _TS.env().wallet_cache.items():
-            if search_lower and search_lower not in (p.get("name") or "").lower() and not w.lower().startswith(search_lower):
+            vip_name = VIP_WALLET_NAMES.get(w.lower(), "")
+            current_name = str(p.get("name") or "")
+            display_name = vip_name if vip_name and (
+                not current_name or current_name.startswith("0x") or current_name.endswith("…")
+            ) else current_name
+            if search_lower and search_lower not in display_name.lower() and not w.lower().startswith(search_lower):
                 continue
             if tier == "elite"     and not p.get("elite"):     continue
             if tier == "verified"  and not p.get("verified"):  continue
             if tier == "watchable" and not p.get("watchable"): continue
-            results.append({"wallet": w, **p})
+            if tier == "vip"       and w.lower() not in vip_wallets: continue
+            results.append({"wallet": w, **p, "name": display_name, "vip": w.lower() in vip_wallets})
         return results
 
     @mcp_tool(
@@ -584,7 +592,8 @@ class TitanAPI:
             if not dry_run:
                 target.update(patch)
                 self._write_cfg(cfg, f"wallets/wallet_selector/{active} {patch}")
-                TitanAPI._reeval_wallets_impl()
+                reeval = TitanAPI._reeval_wallets_impl()
+                self._emit_config_updated("wallet_selector", patch, reeval)
             return {"ok": True, "errors": [], "applied": patch}
         errors = self._patch_group(cfg, group, patch)
         if errors:
@@ -592,8 +601,18 @@ class TitanAPI:
         if not dry_run:
             self._write_cfg(cfg, f"wallets/{group} {patch}")
             if group in _REEVAL_GROUPS:
-                TitanAPI._reeval_wallets_impl()
+                reeval = TitanAPI._reeval_wallets_impl()
+                self._emit_config_updated(group, patch, reeval)
         return {"ok": True, "errors": [], "applied": patch}
+
+    def _emit_config_updated(self, group: str, patch: dict, reeval: dict) -> None:
+        self._emit("titan/config_updated", {
+            "domain": "wallets",
+            "group": group,
+            "patch": patch,
+            "reeval": reeval,
+            "refresh": ["config", "wallets", "snapshot"],
+        })
 
     @mcp_tool(
         description=(
@@ -628,6 +647,8 @@ class TitanAPI:
 
         updates: list[tuple[int, str]] = []
         profile_updates: list[tuple[str, str]] = []
+        vip_wallets = {wallet.lower() for wallet in _C.VIP_WALLETS}
+        vip_names = _C.VIP_WALLET_NAMES
 
         for addr, old_watchable, profile_json in rows:
             try:
@@ -663,7 +684,14 @@ class TitanAPI:
             prof["verified"]     = verified
             prof["watchable"]    = bool(watchable or verified)
             prof["elite"]        = elite
+            prof["vip"]          = addr.lower() in vip_wallets
+            vip_name = vip_names.get(addr.lower(), "")
+            current_name = str(prof.get("name") or "")
+            if vip_name and (not current_name or current_name.startswith("0x") or current_name.endswith("…")):
+                prof["name"] = vip_name
             prof["fail_reasons"] = fail_reasons
+            if addr in _S.env().wallet_cache:
+                _S.env().wallet_cache[addr] = prof
             updates.append((new_watchable, addr))
             profile_updates.append((_json.dumps(prof), addr))
 

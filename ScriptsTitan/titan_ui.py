@@ -899,11 +899,12 @@ def run_ui(api: TitanBackend) -> None:
         verified = bool(whale.get("verified"))
         elite = bool(whale.get("elite"))
         hft = bool(whale.get("hft"))
+        vip = bool(whale.get("vip"))
         icon = "🔥" if elite else ("✅" if verified else "👁")
 
         hf = tk.Frame(win, bg="#0a0a20", pady=8)
         hf.pack(fill="x", padx=8, pady=(8, 0))
-        tk.Label(hf, text=f"{icon} {whale_name}{' ⚡HFT' if hft else ''}",
+        tk.Label(hf, text=f"{icon} {whale_name}{' ⭐VIP' if vip else ''}{' ⚡HFT' if hft else ''}",
                  fg="#00aaff" if verified or elite else "#aaaaaa", bg="#0a0a20",
                  font=bold11, wraplength=730, justify="left").pack(anchor="w", padx=12)
         tk.Label(hf, text=f"Wallet: {wallet}",
@@ -931,7 +932,9 @@ def run_ui(api: TitanBackend) -> None:
             ("7d PnL", f"${(whale['recent_pnl_7d'] or 0.0):+,.0f}", "#88ccff"),
             ("30d PnL", f"${(whale['recent_pnl_30d'] or 0.0):+,.0f}", "#88ccff"),
             ("Status", "ELITE" if elite else ("VERIFIED" if verified else "WATCH / REJECT"), "#ff8844"),
-            ("Type", "HFT" if hft else "STANDARD", "#aaaacc"),
+            ("Type", "VIP HFT" if vip and hft else ("VIP" if vip else ("HFT" if hft else "STANDARD")), "#aaaacc"),
+            ("LB Rank", f"#{whale['lb_rank']:,}" if whale.get("lb_rank") else "—", "#aaaacc"),
+            ("Volume", f"${cast(float, whale['lb_vol']):,.0f}" if whale.get("lb_vol") else "—", "#88ccff"),
         ]
         for i, (lbl, val, col) in enumerate(stats_data):
             sf2.columnconfigure(i % 4, weight=1)
@@ -943,6 +946,7 @@ def run_ui(api: TitanBackend) -> None:
         detail_lines = [
             f"  Verified: {'yes' if verified else 'no'}",
             f"  Elite: {'yes' if elite else 'no'}",
+            f"  VIP: {'yes' if vip else 'no'}",
             f"  HFT: {'yes' if hft else 'no'}",
             f"  Watchable: {'yes' if bool(whale.get('watchable')) else 'no'}",
         ]
@@ -1388,17 +1392,17 @@ def run_ui(api: TitanBackend) -> None:
     wh_header.pack(fill="x", padx=4, pady=(4,0))
     tk.Label(wh_header, text="WALLET ROSTER", fg="#00ff88", bg="#0d0d1a", font=bold_hd).pack(side="left", padx=8)
     wh_filter_var = tk.StringVar(value="ALL")
-    for val, label in [("ALL","All"),("ELITE","🔥 Elite"),("VER","✅ Verified"),("HFT","⚡ HFT")]:
+    for val, label in [("ALL","All"),("ELITE","🔥 Elite"),("VER","✅ Verified"),("HFT","⚡ HFT"),("VIP","⭐ VIP")]:
         tk.Radiobutton(wh_header, text=label, variable=wh_filter_var, value=val,
                        bg="#0d0d1a", fg="#aaaaaa", selectcolor="#0d0d1a",
                        activebackground="#0d0d1a", font=mono,
                        command=lambda: _pending_update.__setitem__(0, True)
                        ).pack(side="left", padx=4)
     
-    wh_cols = ("Name","Wallet","Score","WinRate","WilsonLB","Res","Portfolio","PnL","AvgBet","TPH","Status","HFT")
+    wh_cols = ("Name","Wallet","Score","WinRate","WilsonLB","Res","Portfolio","PnL","AvgBet","TPH","Status","HFT","VIP")
     wh_tree = ttk.Treeview(tab_wallets, columns=wh_cols, show="headings")
     ww = {"Name":130,"Wallet":180,"Score":58,"WinRate":65,"WilsonLB":72,
-          "Res":50,"Portfolio":100,"PnL":90,"AvgBet":78,"TPH":55,"Status":80,"HFT":40}
+          "Res":50,"Portfolio":100,"PnL":90,"AvgBet":78,"TPH":55,"Status":80,"HFT":40,"VIP":40}
     for c in wh_cols:
         wh_tree.heading(c, text=c)
         wh_tree.column(c, width=ww[c], anchor="center")
@@ -3272,7 +3276,19 @@ def run_ui(api: TitanBackend) -> None:
     
         wh_tree.delete(*wh_tree.get_children())
         _whale_tree_items.clear()
-        for w, p in sorted(all_wallets.items(), key=lambda x: x[1].get("score", 0), reverse=True):
+        def _wallet_sort_key(item: tuple[str, dict[str, object]]) -> tuple[int, float]:
+            p = item[1]
+            if p.get("elite"):
+                tier_rank = 0
+            elif p.get("verified"):
+                tier_rank = 1
+            elif p.get("watchable"):
+                tier_rank = 2
+            else:
+                tier_rank = 3
+            return (tier_rank, -float(p.get("score", 0)))
+
+        for w, p in sorted(all_wallets.items(), key=_wallet_sort_key):
             if p.get("total_pnl", 0) < 0 and not p.get("elite"):
                 continue
             if p.get("score", 0) <= 0.10 and not p.get("watchable"):
@@ -3280,16 +3296,26 @@ def run_ui(api: TitanBackend) -> None:
             if filt == "ELITE" and not p.get("elite"):    continue
             if filt == "VER"   and not p.get("verified"): continue
             if filt == "HFT"   and not p.get("hft"):      continue
+            if filt == "VIP"   and not p.get("vip"):      continue
     
-            if p.get("elite"):             tag = "ELITE"
-            elif p.get("verified"):        tag = "VER"
-            elif p.get("score", 0) >= 0.4: tag = "PAR"
-            else:                          tag = "REJ"
+            if p.get("elite"):             
+                tag = "ELITE"
+                status = "🔥 ELITE" 
+            elif p.get("verified"):
+                tag = "VER"
+                status = "✅ VER"
+            elif p.get("score", 0) >= 0.4:
+                tag = "PAR"
+                status = "👁 PAR"
+            else: 
+                tag = "REJ"
+                status = "❌ REJ"
     
             in_watch = bool(p.get("watchable"))
-            status = ("🔥 ELITE"  if p.get("elite") else
-                      "✅ VER"    if p.get("verified") else
-                      "👁 WATCH"  if in_watch else "❌")
+            #status = ("🔥 ELITE"  if p.get("elite") else
+            #           "✅ VER"    if p.get("verified") else
+            #           "👁 WATCH"  if in_watch else "❌")
+
             item_id = wh_tree.insert("", "end", values=(
                 p.get("name", w[:10]+"…"),
                 w[:26]+"…",
@@ -3303,6 +3329,7 @@ def run_ui(api: TitanBackend) -> None:
                 f"{p.get('trades_per_hour',0):.1f}",
                 status,
                 "⚡" if p.get("hft") else "",
+                "⭐" if p.get("vip") else "",
             ), tags=(tag,))
             _whale_tree_items[str(item_id)] = (w, cast(dict[str, object], p))
 
@@ -3470,6 +3497,22 @@ def run_ui(api: TitanBackend) -> None:
             
         _last_trades  = trades
         _pending_update[0] = True
+
+    def on_config_updated_cb(payload: dict) -> None:
+        if payload.get("domain") != "wallets":
+            return
+        group = str(payload.get("group") or "")
+        if group not in {"wallet_selector", "wallet_quality", "elite_thresholds"}:
+            return
+
+        def _reload_selector_tab() -> None:
+            try:
+                _sel_load()
+                _sel_status_var.set(f"  Reloaded from MCP update: {group}")
+            except Exception as e:
+                _log_ui_error("selector live reload", e, "WARN")
+
+        root.after(0, _reload_selector_tab)
     
     
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -3517,6 +3560,7 @@ def run_ui(api: TitanBackend) -> None:
             log(f"[_ui_apply crash] {e}\n{traceback.format_exc()[:400]}", "ERR")
 
     def _ui_apply_inner(data: dict):
+        nonlocal _last_wallets
         pnl     = data.get("pnl", {})
         logs    = data.get("logs", "")
         pos     = data.get("pos", {})
@@ -3538,15 +3582,20 @@ def run_ui(api: TitanBackend) -> None:
             log(f"[render_signals error] {_e}", "ERR")
 
         sig_var.set(f"Sigs: {len(signal_rows)}")
+        if wallets:
+            _last_wallets = wallets
+        roster_wallets = wallets or _last_wallets
+        n_ver = sum(1 for p in roster_wallets.values() if p.get("verified"))
+        n_elite = sum(1 for p in roster_wallets.values() if p.get("elite"))
+        ver_var.set(f"Ver: {n_ver}")
+        elite_var.set(f"Elite: {n_elite}")
 
         if _pending_update[0]:
             _pending_update[0] = False
             _cycle_num[0] += 1
-            _wallets_from_cycle = _last_wallets
+            _wallets_from_cycle = roster_wallets
             rejects = _last_rejects
             trades  = _last_trades
-            n_ver   = sum(1 for p in _wallets_from_cycle.values() if p.get("verified"))
-            n_elite = sum(1 for p in wallets.values() if p.get("elite"))
             for fn in (
                 lambda: render_alerts(signals, _wallets_from_cycle),
                 lambda: render_analysis(signals, trades, _wallets_from_cycle),
@@ -3556,14 +3605,12 @@ def run_ui(api: TitanBackend) -> None:
                     fn()
                 except Exception as e:
                     _log_ui_error("secondary renderer", e)
-            ver_var.set(f"Ver: {n_ver}")
-            elite_var.set(f"Elite: {n_elite}")
 
         try: render_open_positions()
         except Exception as _e: log(f"[render_open_positions error] {_e}", "ERR")
         try: refresh_pnl_tab()
         except Exception as _e: _log_ui_error("refresh_pnl_tab error", _e)
-        try: render_wallets(_last_wallets)
+        try: render_wallets(roster_wallets)
         except Exception as _e: log(f"[render_wallets error] {_e}", "ERR")
 
         cycle_var.set(f"Cycle: {_cycle_num[0]}")
@@ -3694,6 +3741,7 @@ def run_ui(api: TitanBackend) -> None:
         api.subscribe("titan/position_open",   lambda p: on_position_open_cb(p))
         api.subscribe("titan/position_close",  lambda p: on_position_close_cb(p["pos"], p["pnl_usdc"], p["pnl_pct"]))
         api.subscribe("titan/cycle_complete",  lambda p: on_cycle_complete_cb(p["signals"], p["wallets"], p["rejects"], p["trades"]))
+        api.subscribe("titan/config_updated",  on_config_updated_cb)
         root.after(1000, ui_refresh)
         status_var.set("🟢 LIVE — Follow The wallet | HFT Spike + Conviction")
 

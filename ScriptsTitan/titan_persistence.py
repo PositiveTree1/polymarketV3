@@ -61,6 +61,7 @@ def load_state():
     if pruned:
         S._log(f"🗑 Pruned {pruned} non-watchable wallet stubs from DB", "INFO")
     _load_wallets_from_db()
+    _refresh_elite_ver_wallets()
     ri = _load_trading_state()
     wl = S.get_watchlist()
     line = (
@@ -203,20 +204,53 @@ def _rebuild_equity_from_trades(env):
 
 
 def _make_stub(addr: str, detail: str) -> "WalletProfile":
+    from titan_config import VIP_WALLETS
+    is_vip = addr.lower() in {wallet.lower() for wallet in VIP_WALLETS}
     return cast(WalletProfile, {  # type: ignore[arg-type]
         "score": 0.10, "win_rate": 0.0, "wilson_lb": 0.0, "alpha_per_trade": 0.0,
         "n_resolved": 0, "n_pos": 0, "total_value": 0.0,
         "total_pnl": 0.0, "pnl_pct": 0.0, "avg_pos_size": 0.0,
         "avg_profit": 0.0, "avg_bet": 0.0, "trades_per_hour": 0.0,
         "recent_pnl_30d": None, "recent_pnl_7d": None, "recent_ts": 0.0,
-        "verified": False, "watchable": True, "elite": False, "hft": False, "sports_bot": False,
+        "verified": False, "watchable": True, "elite": False, "hft": False, "vip": is_vip, "sports_bot": False,
         "name": addr[:10] + "…", "ts": 0.0,
+        "lb_rank": None, "lb_vol": None,
         "detail": detail, "wr_source": "none", "fail_reasons": [],
     })
 
 
+def _refresh_elite_ver_wallets() -> None:
+    from titan_wallet import get_compute_and_store_wallet
+    import time
+    targets = [
+        (addr, p) for addr, p in S.env().wallet_cache.items()
+        if p.get("elite") or p.get("verified")
+    ]
+    if not targets:
+        return
+    total = len(targets)
+    def _startup(msg: str) -> None:
+        print(f"[STARTUP] {msg}", flush=True)
+        S._log(f"[STARTUP] {msg}", "INFO")
+
+    _startup(f"Refreshing {total} ELITE/VER wallets from Polymarket…")
+    for i, (addr, p) in enumerate(targets, 1):
+        tier = "ELITE" if p.get("elite") else "VER"
+        name = p.get("name") or addr[:14] + "…"
+        _startup(f"  {i}/{total} {tier} {name}")
+        try:
+            get_compute_and_store_wallet(addr)
+            time.sleep(0.5)
+        except Exception as e:
+            import traceback
+            S._log(f"⚠ Refresh failed for {addr[:14]}…: {e}\n{traceback.format_exc()}", "WARN")
+    _startup(f"ELITE/VER refresh done — server ready")
+    save_wallet_roster()
+
+
 def _load_wallets_from_db() -> None:
-    from titan_config import SEED_WATCHLIST
+    from titan_config import SEED_WATCHLIST, VIP_WALLETS, VIP_WALLET_NAMES
+    vip_wallets = {wallet.lower() for wallet in VIP_WALLETS}
     try:
         profiles = DB.load_watchable_wallets(MAX_WATCHLIST_SIZE)
         with_profile = 0
@@ -225,6 +259,13 @@ def _load_wallets_from_db() -> None:
             if addr in S.env().wallet_cache:
                 continue
             if profile is not None:
+                profile["vip"] = addr.lower() in vip_wallets
+                vip_name = VIP_WALLET_NAMES.get(addr.lower(), "")
+                current_name = str(profile.get("name") or "")
+                if vip_name and (not current_name or current_name.startswith("0x") or current_name.endswith("…")):
+                    profile["name"] = vip_name
+                if profile.get("elite") or profile.get("verified") or profile.get("lb_rank") is None:
+                    profile["ts"] = 0.0
                 e = "🔥ELITE" if profile.get("elite") else ("✅VER" if profile.get("verified") else "👁WATCH")
                 S._log(f"📂 LOAD {addr[:14]}… {e} elite={profile.get('elite')} verified={profile.get('verified')} watchable={profile.get('watchable')}", "DIAG")
                 S.env().wallet_cache[addr] = cast(WalletProfile, profile)
