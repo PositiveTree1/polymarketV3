@@ -346,17 +346,329 @@ class TitanAPI:
         return _DB.load_trade_history()
 
     @mcp_tool(
-        description="Returns the current live engine configuration.",
+        description=(
+            "Returns the full raw titan_config.json. "
+            "Prefer the domain-specific get_config_* tools for AI analysis — "
+            "they include descriptions for each parameter."
+        ),
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
     def get_config(self) -> dict:
         import titan_config as _C
-        import json, os
+        import json
         try:
             with open(_C.get_config_file(), encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             return {}
+
+    # ── domain config readers ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _read_cfg() -> dict:
+        import titan_config as _C, json
+        with open(_C.get_config_file(), encoding="utf-8") as f:
+            return json.load(f)
+
+    @staticmethod
+    def _write_cfg(cfg: dict, patch_summary: str = "") -> None:
+        import titan_config as _C, json, titan_state as _S
+        with open(_C.get_config_file(), "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        _C.reload()
+        _S._log(f"Config updated: {patch_summary}", "INFO")
+
+    @staticmethod
+    def _flat_group(cfg: dict, group: str) -> dict:
+        g = cfg.get(group, {})
+        out: dict = {}
+        for k, v in g.items():
+            if k.startswith("_"):
+                continue
+            if isinstance(v, dict) and "value" in v:
+                out[k] = {"value": v["value"], "description": v.get("_description", "")}
+            elif not isinstance(v, dict):
+                out[k] = {"value": v, "description": ""}
+        return out
+
+    @mcp_tool(
+        description=(
+            "Returns wallet selection and elite classification thresholds. "
+            "wallet_quality: watch/verify win-rate floors, min resolved bets, min PnL per trade. "
+            "elite_thresholds: ELITE_MIN_PNL=$40k, ELITE_MIN_PORT=$80k, ELITE_MIN_SCORE=0.72, ELITE_MIN_RESOLVED=20. "
+            "elite_polling: ELITE_POLL_LIMIT, ELITE_POLL_MIN_CASH=$50, ELITE_TRADE_MIN_FRACTION=3%. "
+            "wallet_selector: scoring weights (wilson=0.3, pnl_pct=0.25, portfolio=0.15), discovery settings, HFT/sports bot TPH thresholds."
+        ),
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def get_config_wallets(self) -> dict:
+        cfg = self._read_cfg()
+        ws  = cfg.get("wallet_selector", {})
+        active = ws.get("active_selector", "performance")
+        return {
+            "wallet_quality":   self._flat_group(cfg, "wallet_quality"),
+            "elite_thresholds": self._flat_group(cfg, "elite_thresholds"),
+            "elite_polling":    self._flat_group(cfg, "elite_polling"),
+            "wallet_selector":  ws.get("selectors", {}).get(active, {}),
+        }
+
+    @mcp_tool(
+        description=(
+            "Returns signal quality gates and scoring constants. "
+            "signal_quality: MAX_SIGNAL_AGE_H=0.25 (15min), MIN_SCORE=55, MIN_CONFLUENCE=2. "
+            "drift_gates: MAX_DRIFT=5%, MIN_DRIFT=-8%, MAX_ENTRY_SLIPPAGE=3%, STALE_LOSER thresholds. "
+            "price_zone_gates: MIN_ENTRY_PRICE=0.20, MAX_ENTRY_PRICE=0.72, IDEAL zone 0.25-0.65. "
+            "strategy_scoring: confluence_pts array, recency hot/warm thresholds, price zone bonuses, exit penalties."
+        ),
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def get_config_signals(self) -> dict:
+        cfg = self._read_cfg()
+        return {
+            "signal_quality":   self._flat_group(cfg, "signal_quality"),
+            "drift_gates":      self._flat_group(cfg, "drift_gates"),
+            "price_zone_gates": self._flat_group(cfg, "price_zone_gates"),
+            "strategy_scoring": {k: v for k, v in cfg.get("strategy_scoring", {}).items() if not k.startswith("_")},
+        }
+
+    @mcp_tool(
+        description=(
+            "Returns per-strategy configuration for all signal builders. "
+            "recent_form: copy recent winners — max_tph=20, min_score=42, age<=45min, price 0.18-0.78, max 4 positions, no stop-loss. "
+            "drift_discount: discounted entry 4-12% below whale — age<=6h, price 0.20-0.72, max 3 positions, no stop-loss. "
+            "consensus_basket: volume play — min_elite=1, min_score=50, price 0.20-0.72, max 5 positions, stop-loss=-35%. "
+            "open_book: disabled — needs 3+ elites holding same outcome. "
+            "Also returns active_strategies list, tradeable_tiers, allowed_market_types, signal_builders registry."
+        ),
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def get_config_strategies(self) -> dict:
+        cfg   = self._read_cfg()
+        strat = cfg.get("strategy", {})
+        return {
+            "active_strategies":    strat.get("ACTIVE_STRATEGIES", []),
+            "tradeable_tiers":      strat.get("TRADEABLE_TIERS_LIST", []),
+            "allowed_market_types": strat.get("ALLOWED_MARKET_TYPES", []),
+            "min_elite_confluence": strat.get("MIN_ELITE_CONFLUENCE"),
+            "block_sports":         strat.get("BLOCK_SPORTS"),
+            "recent_form":          {k: v for k, v in cfg.get("strategy_recent_form", {}).items()     if not k.startswith("_")},
+            "drift_discount":       {k: v for k, v in cfg.get("strategy_drift_discount", {}).items()  if not k.startswith("_")},
+            "consensus_basket":     {k: v for k, v in cfg.get("strategy_consensus_basket", {}).items() if not k.startswith("_")},
+            "open_book":            {k: v for k, v in cfg.get("strategy_open_book", {}).items()        if not k.startswith("_")},
+            "signal_builders":      cfg.get("signal_builders", {}),
+        }
+
+    @mcp_tool(
+        description=(
+            "Returns position management and risk parameters. "
+            "position_management: MAX_OPEN_POSITIONS=5, PROFIT_TARGET_PCT=40%, STOP_LOSS_PCT=-30%, "
+            "STOP_LOSS_ENABLED=true, WHALE_EXIT_SELL=true, MAX_POSITIONS_PER_EVENT=1, MAX_POSITIONS_PER_WHALE=2. "
+            "timing: MIN_HOLD_MINUTES=5, EXIT_COOLDOWN_SECONDS=600. "
+            "position_management_ext: whale_exit_min_sell_fraction=0.3. "
+            "strategy_kelly: score_mult, conf_mult_cap=1.75, tier_multipliers (CONVICTION=1.6, ALERT=1.2), adaptive_caps."
+        ),
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def get_config_risk(self) -> dict:
+        cfg = self._read_cfg()
+        return {
+            "position_management":     self._flat_group(cfg, "position_management"),
+            "timing":                  self._flat_group(cfg, "timing"),
+            "position_management_ext": {k: v for k, v in cfg.get("position_management_ext", {}).items() if not k.startswith("_")},
+            "strategy_kelly":          {k: v for k, v in cfg.get("strategy_kelly", {}).items()           if not k.startswith("_")},
+        }
+
+    @mcp_tool(
+        description=(
+            "Returns bankroll and bet sizing parameters. "
+            "bankroll_and_sizing: BANKROLL_START=$20, MIN_BET=$1, MAX_BET_ABS=$4, MAX_BET_PCT=18%, KELLY_FRACTION=0.2. "
+            "sizing: USE_PROPORTIONAL_SIZING=false. "
+            "market_quality: MIN_LIQUIDITY=$15k, MIN_VOLUME=$30k, MIN_HOURS_LEFT=4h. "
+            "fees: TAKER_FEE_RATE=0."
+        ),
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def get_config_sizing(self) -> dict:
+        cfg = self._read_cfg()
+        return {
+            "bankroll_and_sizing": self._flat_group(cfg, "bankroll_and_sizing"),
+            "sizing":              self._flat_group(cfg, "sizing"),
+            "market_quality":      self._flat_group(cfg, "market_quality"),
+            "fees":                self._flat_group(cfg, "fees"),
+        }
+
+    @mcp_tool(
+        description=(
+            "Returns trade sourcing, cache, and discovery parameters. "
+            "trade_sourcing: MIN_TRADE_CASH=$200, MAX_TRADES_FETCH=300, HOT_HOURS=1, WARM_HOURS=1, CYCLE_SECONDS=15. "
+            "discovery: DISCOVERY_INTERVAL_CYCLES=20. "
+            "cache: WALLET_TTL=600s, MARKET_TTL=30s, ACTIVITY_LIMIT=500. "
+            "vip_wallets: always-polled addresses (MEPP, 0x8dxd, Wickier, mr.ozi, nojnn, Clear-Corridor). "
+            "priority_wallets: extra-polled addresses (currently empty)."
+        ),
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def get_config_sourcing(self) -> dict:
+        cfg = self._read_cfg()
+        return {
+            "trade_sourcing":   self._flat_group(cfg, "trade_sourcing"),
+            "discovery":        self._flat_group(cfg, "discovery"),
+            "cache":            self._flat_group(cfg, "cache"),
+            "vip_wallets":      cfg.get("vip_wallets", {}).get("wallets", []),
+            "priority_wallets": cfg.get("priority_wallets", {}).get("wallets", []),
+        }
+
+    # ── domain config writers ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _patch_group(cfg: dict, group: str, patch: dict) -> list[str]:
+        g = cfg.setdefault(group, {})
+        errors: list[str] = []
+        for k, v in patch.items():
+            if k.startswith("_"):
+                errors.append(f"key {k!r} is reserved")
+                continue
+            if k not in g:
+                errors.append(f"unknown key {k!r} in group {group!r}")
+                continue
+            entry = g[k]
+            if isinstance(entry, dict) and "value" in entry:
+                g[k] = {**entry, "value": v}
+            else:
+                g[k] = v
+        return errors
+
+    @mcp_tool(
+        description=(
+            "Update wallet selection and elite classification thresholds. "
+            "group: wallet_quality | elite_thresholds | elite_polling. "
+            "patch: {key: new_value} — only existing keys accepted. "
+            "dry_run=true previews without saving. Returns {ok, errors, applied}."
+        ),
+        input_schema={
+            "group": {"type": "string", "description": "wallet_quality | elite_thresholds | elite_polling"},
+            "patch": {"type": "object", "description": "Key/value pairs to update"},
+            "dry_run": {"type": "boolean", "description": "Validate only, do not save"},
+        },
+        annotations={"readOnlyHint": False, "destructiveHint": False},
+    )
+    def update_config_wallets(self, group: str, patch: dict, dry_run: bool = False) -> dict:
+        allowed = {"wallet_quality", "elite_thresholds", "elite_polling"}
+        if group not in allowed:
+            return {"ok": False, "errors": [f"group must be one of {sorted(allowed)}"], "applied": {}}
+        cfg = self._read_cfg()
+        errors = self._patch_group(cfg, group, patch)
+        if errors:
+            return {"ok": False, "errors": errors, "applied": {}}
+        if not dry_run:
+            self._write_cfg(cfg, f"wallets/{group} {patch}")
+        return {"ok": True, "errors": [], "applied": patch}
+
+    @mcp_tool(
+        description=(
+            "Update signal quality gates. "
+            "group: signal_quality | drift_gates | price_zone_gates. "
+            "patch: {key: new_value} — only existing keys accepted. "
+            "dry_run=true previews without saving. Returns {ok, errors, applied}."
+        ),
+        input_schema={
+            "group": {"type": "string", "description": "signal_quality | drift_gates | price_zone_gates"},
+            "patch": {"type": "object", "description": "Key/value pairs to update"},
+            "dry_run": {"type": "boolean", "description": "Validate only, do not save"},
+        },
+        annotations={"readOnlyHint": False, "destructiveHint": False},
+    )
+    def update_config_signals(self, group: str, patch: dict, dry_run: bool = False) -> dict:
+        allowed = {"signal_quality", "drift_gates", "price_zone_gates"}
+        if group not in allowed:
+            return {"ok": False, "errors": [f"group must be one of {sorted(allowed)}"], "applied": {}}
+        cfg = self._read_cfg()
+        errors = self._patch_group(cfg, group, patch)
+        if errors:
+            return {"ok": False, "errors": errors, "applied": {}}
+        if not dry_run:
+            self._write_cfg(cfg, f"signals/{group} {patch}")
+        return {"ok": True, "errors": [], "applied": patch}
+
+    @mcp_tool(
+        description=(
+            "Update per-strategy configuration. "
+            "strategy: recent_form | drift_discount | consensus_basket | open_book. "
+            "patch: {key: new_value} applied directly to that strategy block. "
+            "dry_run=true previews without saving. Returns {ok, errors, applied}."
+        ),
+        input_schema={
+            "strategy": {"type": "string", "description": "recent_form | drift_discount | consensus_basket | open_book"},
+            "patch": {"type": "object", "description": "Key/value pairs to update in the strategy block"},
+            "dry_run": {"type": "boolean", "description": "Validate only, do not save"},
+        },
+        annotations={"readOnlyHint": False, "destructiveHint": False},
+    )
+    def update_config_strategies(self, strategy: str, patch: dict, dry_run: bool = False) -> dict:
+        allowed = {"recent_form", "drift_discount", "consensus_basket", "open_book"}
+        if strategy not in allowed:
+            return {"ok": False, "errors": [f"strategy must be one of {sorted(allowed)}"], "applied": {}}
+        cfg   = self._read_cfg()
+        block = cfg.setdefault(f"strategy_{strategy}", {})
+        errors = [f"key {k!r} is reserved" for k in patch if k.startswith("_")]
+        if errors:
+            return {"ok": False, "errors": errors, "applied": {}}
+        if not dry_run:
+            block.update(patch)
+            self._write_cfg(cfg, f"strategy/{strategy} {patch}")
+        return {"ok": True, "errors": [], "applied": patch}
+
+    @mcp_tool(
+        description=(
+            "Update position management and risk parameters. "
+            "group: position_management | timing. "
+            "patch: {key: new_value} — only existing keys accepted. "
+            "dry_run=true previews without saving. Returns {ok, errors, applied}."
+        ),
+        input_schema={
+            "group": {"type": "string", "description": "position_management | timing"},
+            "patch": {"type": "object", "description": "Key/value pairs to update"},
+            "dry_run": {"type": "boolean", "description": "Validate only, do not save"},
+        },
+        annotations={"readOnlyHint": False, "destructiveHint": False},
+    )
+    def update_config_risk(self, group: str, patch: dict, dry_run: bool = False) -> dict:
+        allowed = {"position_management", "timing"}
+        if group not in allowed:
+            return {"ok": False, "errors": [f"group must be one of {sorted(allowed)}"], "applied": {}}
+        cfg = self._read_cfg()
+        errors = self._patch_group(cfg, group, patch)
+        if errors:
+            return {"ok": False, "errors": errors, "applied": {}}
+        if not dry_run:
+            self._write_cfg(cfg, f"risk/{group} {patch}")
+        return {"ok": True, "errors": [], "applied": patch}
+
+    @mcp_tool(
+        description=(
+            "Update bankroll and bet sizing parameters. "
+            "group: bankroll_and_sizing | sizing | market_quality. "
+            "patch: {key: new_value} — only existing keys accepted. "
+            "dry_run=true previews without saving. Returns {ok, errors, applied}."
+        ),
+        input_schema={
+            "group": {"type": "string", "description": "bankroll_and_sizing | sizing | market_quality"},
+            "patch": {"type": "object", "description": "Key/value pairs to update"},
+            "dry_run": {"type": "boolean", "description": "Validate only, do not save"},
+        },
+        annotations={"readOnlyHint": False, "destructiveHint": False},
+    )
+    def update_config_sizing(self, group: str, patch: dict, dry_run: bool = False) -> dict:
+        allowed = {"bankroll_and_sizing", "sizing", "market_quality"}
+        if group not in allowed:
+            return {"ok": False, "errors": [f"group must be one of {sorted(allowed)}"], "applied": {}}
+        cfg = self._read_cfg()
+        errors = self._patch_group(cfg, group, patch)
+        if errors:
+            return {"ok": False, "errors": errors, "applied": {}}
+        if not dry_run:
+            self._write_cfg(cfg, f"sizing/{group} {patch}")
+        return {"ok": True, "errors": [], "applied": patch}
 
     @mcp_tool(
         description="Returns recent engine log lines.",
@@ -393,42 +705,6 @@ class TitanAPI:
     def resume(self) -> None:
         import titan_state as _TS
         _TS._log("▶ TitanAPI: resume requested (not yet wired to engine flag)", "WARN")
-
-    @mcp_tool(
-        description=(
-            "Patches the live engine configuration with scalar values only. "
-            "Only existing top-level keys may be updated — unknown keys are rejected. "
-            "Set dry_run=true to preview the merged result without writing. "
-            "Returns {ok, merged, errors}."
-        ),
-        input_schema={
-            "patch": {"type": "object", "description": "Key/value pairs to merge (scalars only)"},
-            "dry_run": {"type": "boolean", "description": "If true, validate and return merged config without saving (default false)"},
-        },
-        annotations={"readOnlyHint": False, "destructiveHint": False},
-    )
-    def update_config(self, patch: dict, dry_run: bool = False) -> dict:
-        import titan_config as _C
-        import json
-        cfg_path = _C.get_config_file()
-        with open(cfg_path, encoding="utf-8") as f:
-            current = json.load(f)
-
-        errors: list[str] = []
-        for k, v in patch.items():
-            if k not in current:
-                errors.append(f"unknown key: {k!r}")
-            elif isinstance(v, (dict, list)):
-                errors.append(f"nested values not allowed for key {k!r}")
-        if errors:
-            return {"ok": False, "merged": None, "errors": errors}
-
-        merged = {**current, **patch}
-        if not dry_run:
-            with open(cfg_path, "w", encoding="utf-8") as f:
-                json.dump(merged, f, indent=2)
-            _C.reload()
-        return {"ok": True, "merged": merged, "errors": []}
 
     # ── event bus ─────────────────────────────────────────────────────────────
 

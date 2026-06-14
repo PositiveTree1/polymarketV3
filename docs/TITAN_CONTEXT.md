@@ -3,6 +3,8 @@
 > Use this file to bootstrap a new AI session without re-explaining the project.
 > Entry point: `run_titan.py` | Version: v10 Multi-Strategy | Mode: Single Wallet (paper trading)
 > Single-wallet instance: `_wallet = WalletEnv()` in `titan_state.py`. Shared cache: `_shared_wallet_cache` (assigned to `_wallet.wallet_cache`). No separate watchlist object — "watchable" is a boolean flag on `WalletProfile`; `get_watchlist()` filters the cache.
+>
+> **AI connecting via MCP? Start here instead: [TITAN_AI_GUIDE.md](TITAN_AI_GUIDE.md)**
 
 ---
 
@@ -125,7 +127,7 @@ TITAN can run as an MCP server so external tools or another TITAN process can in
 
 ### MCP tools, resources, and prompts
 
-The server derives its tool list from `TitanAPI` methods decorated with `@mcp_tool`. That means adding a new API method and decorating it is usually enough to publish a new MCP tool.
+The server derives its tool list from `TitanAPI` methods decorated with `@mcp_tool`. That means adding a new API method and decorating it is usually enough to publish a new MCP tool. Currently **30 tools** are exposed.
 
 Built-in MCP resources currently include:
 
@@ -134,7 +136,10 @@ Built-in MCP resources currently include:
 - `titan://logs` — recent log tail
 - `titan://wallets` — tracked wallet roster
 
-The server also exposes prompt templates such as `titan_analysis`, `titan_signal_review`, and `titan_whale_brief`.
+The server also exposes prompt templates: `titan_analysis`, `titan_signal_review`, `titan_whale_brief`.
+
+**Full tool reference:** [MCP_REFERENCE.md](MCP_REFERENCE.md)
+**Analysis workflow:** [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md)
 
 ### Client/server runtime modes
 
@@ -318,19 +323,27 @@ The bot also sends notifications on: boot, buy, sell, errors.
 | Parameter | Default | Meaning |
 |---|---|---|
 | `BANKROLL_START` | $20.00 | Starting paper bankroll |
-| `MIN_SCORE` | 50 | Signal score threshold to display |
-| `ALERT_SCORE` | 68 | Score threshold to auto-trade |
-| `MIN_ELITE_CONFLUENCE` | 2 | Minimum elite wallets needed for a signal |
-| `PROFIT_TARGET_PCT` | 0.20 | +20% auto-exit |
-| `STOP_LOSS_PCT` | −0.30 | −30% hard stop |
-| `STOP_LOSS_ENABLED` | true | Toggle stop loss |
-| `WALLET_EXIT_SELL` | true | Mirror wallet exits |
+| `MIN_SCORE` | 55 | Signal score threshold to display |
+| `ALERT_SCORE` | 70 | Score threshold to auto-trade |
+| `MIN_ELITE_CONFLUENCE` | 2 | Minimum elite wallets needed for CONVICTION tier |
+| `PROFIT_TARGET_PCT` | 0.40 | +40% auto-exit |
+| `STOP_LOSS_PCT` | −0.30 | −30% hard stop (per-strategy overrides apply) |
+| `STOP_LOSS_ENABLED` | true | Toggle stop loss — must stay true |
+| `WHALE_EXIT_SELL` | true | Mirror wallet exits |
 | `MIN_ENTRY_PRICE` | 0.20 | Min price to enter (20¢) |
 | `MAX_ENTRY_PRICE` | 0.72 | Max price to enter (72¢) |
-| `EXIT_COOLDOWN_SECONDS` | varies | Cooldown before re-entry on same market |
-| `MAX_OPEN_POSITIONS` | varies | Hard cap on simultaneous open positions |
+| `EXIT_COOLDOWN_SECONDS` | 600 | 10-minute cooldown before re-entry on same market |
+| `MAX_OPEN_POSITIONS` | 5 | Hard cap on simultaneous open positions |
+| `MAX_SIGNAL_AGE_H` | 0.25 | Signal age limit — 15 minutes |
 
 Config is hot-reloaded — changes take effect on the next engine cycle without restarting.
+
+**Detailed parameter reference:** [config/](config/) — one file per domain:
+- [CONFIG_WALLETS.md](config/CONFIG_WALLETS.md) — wallet quality, elite thresholds, selector
+- [CONFIG_SIGNALS.md](config/CONFIG_SIGNALS.md) — signal gates, scoring constants
+- [CONFIG_STRATEGIES.md](config/CONFIG_STRATEGIES.md) — per-strategy params
+- [CONFIG_RISK.md](config/CONFIG_RISK.md) — position management, stop-loss, Kelly
+- [CONFIG_SIZING.md](config/CONFIG_SIZING.md) — bankroll, bet caps, market quality
 
 ---
 
