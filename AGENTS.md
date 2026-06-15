@@ -14,3 +14,4 @@
 - If changing signatures, update all callers and tests.
 - Only change the minimum and don't touch code that is no directly related to the request
 - no silent fail or exception - we log all is
+- Do not remove any non-ASCII in the code

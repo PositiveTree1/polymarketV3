@@ -186,6 +186,43 @@ To add a VIP wallet, edit `vip_wallets.wallets` in `titan_config.json` directly 
 
 ---
 
+## Wallet Profile Fields Reference
+
+These are the fields available on every tracked wallet profile, as returned by `get_tracked_wallets`.
+
+| Field | Type | Description |
+|---|---|---|
+| `wallet` | str | Raw on-chain address (0x…) |
+| `name` | str | Human-readable name; derived from Polymarket profile, VIP config, or truncated address |
+| `score` | float (0–1) | Composite selector score — see scoring formula above |
+| `win_rate` | float (0–1) | Fraction of resolved trades that were profitable (wins / n_resolved) |
+| `wilson_lb` | float (0–1) | Wilson lower bound at 95% confidence — statistically conservative win-rate estimate |
+| `wr_source` | str | How win_rate was derived: `"resolved"` (from closed trades), `"open_positions_proxy"` (estimated from open positions when resolved data is sparse), or `"none"` (insufficient data) |
+| `n_resolved` | int | Number of closed (resolved) trades used in the win-rate calculation |
+| `total_pnl` | float ($) | Lifetime cumulative profit/loss in USD |
+| `pnl_pct` | float (%) | Lifetime PnL as a percentage of initial capital |
+| `total_value` | float ($) | Current portfolio value in USD |
+| `avg_bet` | float ($) | Average size of a single bet in USD |
+| `avg_profit` | float ($) | Average dollar profit per resolved trade |
+| `alpha_per_trade` | float ($) | total_pnl / n_resolved — average net edge per trade, sign-aware |
+| `trades_per_hour` | float | Trading frequency (TPH) over the observation window |
+| `n_pos` | int | Number of currently open positions |
+| `recent_pnl_30d` | float ($) \| None | Rolling 30-day PnL; refreshed every 6 h for verified+ wallets |
+| `recent_pnl_7d` | float ($) \| None | Rolling 7-day PnL; refreshed every 6 h for verified+ wallets |
+| `lb_rank` | int \| None | Polymarket leaderboard rank (None if not on leaderboard) |
+| `lb_vol` | float ($) \| None | Polymarket leaderboard volume (None if not on leaderboard) |
+| `watchable` | bool | Passed the basic quality gates — on the radar |
+| `verified` | bool | Trusted enough to contribute copy-trade signals |
+| `elite` | bool | Highest-quality wallet; drives elite-only strategies |
+| `hft` | bool | Classified as a high-frequency trader (TPH ≥ `hft_tph_threshold`) — excluded from copy signals |
+| `sports_bot` | bool | Classified as a sports market-making bot — excluded from copy signals |
+| `vip` | bool | Manually configured VIP wallet — polled every cycle regardless of rotation |
+| `fail_reasons` | list[str] | Human-readable list of gates the wallet did not pass (e.g. `"WR 45%<53%"`) |
+| `detail` | str | One-line formatted summary used in diagnostics and the UI detail popup |
+| `ts` | float | Unix timestamp of the last full profile refresh |
+
+---
+
 ## Quick Diagnostics
 
 ```

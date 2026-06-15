@@ -13,6 +13,8 @@ from titan_prices import PricesCacheSrv
 from titan_config import STATE_FILE, STATE_DB, BANKROLL_START, MAX_WATCHLIST_SIZE
 from titan_wallet import WalletProfile
 
+_STARTUP_ELITE_VER_REFRESH_MAX_AGE_S = 2 * 24 * 3600
+
 
 def save_state():
     try:
@@ -50,7 +52,7 @@ def save_wallet_roster_async():
     threading.Thread(target=save_wallet_roster, daemon=True).start()
 
 
-def load_state():
+def load_state() -> None:
     DB.init_db(STATE_DB)
     S.market_cache.load_all_from_db(force=True)
     srv = PricesCacheSrv()
@@ -61,7 +63,6 @@ def load_state():
     if pruned:
         S._log(f"🗑 Pruned {pruned} non-watchable wallet stubs from DB", "INFO")
     _load_wallets_from_db()
-    _refresh_elite_ver_wallets()
     ri = _load_trading_state()
     wl = S.get_watchlist()
     line = (
@@ -212,6 +213,8 @@ def _make_stub(addr: str, detail: str) -> "WalletProfile":
         "total_pnl": 0.0, "pnl_pct": 0.0, "avg_pos_size": 0.0,
         "avg_profit": 0.0, "avg_bet": 0.0, "trades_per_hour": 0.0,
         "recent_pnl_30d": None, "recent_pnl_7d": None, "recent_ts": 0.0,
+        "loaded_trade_count": 0, "trade_load_limited": False,
+        "first_loaded_trade_ts": None, "last_loaded_trade_ts": None,
         "verified": False, "watchable": True, "elite": False, "hft": False, "vip": is_vip, "sports_bot": False,
         "name": addr[:10] + "…", "ts": 0.0,
         "lb_rank": None, "lb_vol": None,
@@ -222,29 +225,66 @@ def _make_stub(addr: str, detail: str) -> "WalletProfile":
 def _refresh_elite_ver_wallets() -> None:
     from titan_wallet import get_compute_and_store_wallet
     import time
-    targets = [
-        (addr, p) for addr, p in S.env().wallet_cache.items()
-        if p.get("elite") or p.get("verified")
-    ]
-    if not targets:
-        return
-    total = len(targets)
+    stale_before = time.time() - _STARTUP_ELITE_VER_REFRESH_MAX_AGE_S
+    
+    def _tier_label(profile: "WalletProfile") -> str:
+        if profile.get("elite"):
+            return "ELITE"
+        if profile.get("verified"):
+            return "VER"
+        if profile.get("watchable"):
+            return "PAR"
+        return "REJ"
+
     def _startup(msg: str) -> None:
         print(f"[STARTUP] {msg}", flush=True)
         S._log(f"[STARTUP] {msg}", "INFO")
 
-    _startup(f"Refreshing {total} ELITE/VER wallets from Polymarket…")
+    def _fmt_date(ts: object) -> str:
+        if not isinstance(ts, (int, float)) or float(ts) <= 0.0:
+            return "?"
+        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d")
+
+    targets = [
+        (addr, p) for addr, p in S.env().wallet_cache.items()
+        if (p.get("elite") or p.get("verified"))
+        and float(p.get("ts") or 0.0) <= stale_before
+    ]
+    elite_ver_total = sum(
+        1 for p in S.env().wallet_cache.values()
+        if p.get("elite") or p.get("verified")
+    )
+    fresh_count = elite_ver_total - len(targets)
+    if not targets:
+        _startup(f"ELITE/VER startup refresh summary: fresh={fresh_count} refresh=0 total={elite_ver_total}")
+        _startup("Skipping ELITE/VER refresh at startup - no wallet older than 2 days")
+        return
+    total = len(targets)
+    _startup(f"ELITE/VER startup refresh summary: fresh={fresh_count} refresh={total} total={elite_ver_total}")
+    _startup(f"Refreshing {total} stale ELITE/VER wallets from Polymarket...")
     for i, (addr, p) in enumerate(targets, 1):
-        tier = "ELITE" if p.get("elite") else "VER"
-        name = p.get("name") or addr[:14] + "…"
-        _startup(f"  {i}/{total} {tier} {name}")
+        tier_before = _tier_label(p)
+        name = p.get("name") or addr[:14] + "..."
         try:
-            get_compute_and_store_wallet(addr)
+            refreshed = get_compute_and_store_wallet(addr)
+            if refreshed.get("watchable") or refreshed.get("verified"):
+                DB.upsert_wallet_profile(addr, refreshed)
+            tier_after = _tier_label(refreshed)
+            tier_change = f" {tier_before}=>{tier_after}" if tier_before != tier_after else f" {tier_after}"
+            loaded_trade_count = int(refreshed.get("loaded_trade_count", 0))
+            trade_load_limited = bool(refreshed.get("trade_load_limited", False))
+            trade_count_text = f"{loaded_trade_count}{'*' if trade_load_limited else ''}"
+            first_trade_text = _fmt_date(refreshed.get("first_loaded_trade_ts"))
+            last_trade_text = _fmt_date(refreshed.get("last_loaded_trade_ts"))
+            _startup(
+                f"  {i}/{total}{tier_change} {name} "
+                f"trades={trade_count_text} range={first_trade_text}->{last_trade_text}"
+            )
             time.sleep(0.5)
         except Exception as e:
             import traceback
-            S._log(f"⚠ Refresh failed for {addr[:14]}…: {e}\n{traceback.format_exc()}", "WARN")
-    _startup(f"ELITE/VER refresh done — server ready")
+            S._log(f"Refresh failed for {addr[:14]}...: {e}\n{traceback.format_exc()}", "WARN")
+    _startup("ELITE/VER refresh done - server ready")
     save_wallet_roster()
 
 
@@ -260,11 +300,16 @@ def _load_wallets_from_db() -> None:
                 continue
             if profile is not None:
                 profile["vip"] = addr.lower() in vip_wallets
+                profile.setdefault("loaded_trade_count", 0)
+                profile.setdefault("trade_load_limited", False)
+                profile.setdefault("first_loaded_trade_ts", None)
+                profile.setdefault("last_loaded_trade_ts", None)
                 vip_name = VIP_WALLET_NAMES.get(addr.lower(), "")
                 current_name = str(profile.get("name") or "")
                 if vip_name and (not current_name or current_name.startswith("0x") or current_name.endswith("…")):
                     profile["name"] = vip_name
-                if profile.get("elite") or profile.get("verified") or profile.get("lb_rank") is None:
+                cached_ts = profile.get("ts")
+                if not isinstance(cached_ts, (int, float)) or float(cached_ts) < 0.0:
                     profile["ts"] = 0.0
                 e = "🔥ELITE" if profile.get("elite") else ("✅VER" if profile.get("verified") else "👁WATCH")
                 S._log(f"📂 LOAD {addr[:14]}… {e} elite={profile.get('elite')} verified={profile.get('verified')} watchable={profile.get('watchable')}", "DIAG")

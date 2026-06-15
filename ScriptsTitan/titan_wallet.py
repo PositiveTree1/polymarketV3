@@ -72,6 +72,10 @@ class WinRateData(TypedDict):
     wins:               int
     losses:             int
     total:              int
+    loaded_trade_count: int
+    trade_load_limited: bool
+    first_loaded_trade_ts: float | None
+    last_loaded_trade_ts:  float | None
     win_rate:           float
     wilson_lb:          float
     source:             str
@@ -86,6 +90,10 @@ class WalletProfile(TypedDict):
     # ── identity ──────────────────────────────────────────────────────────────
     name:               str
     ts:                 float
+    loaded_trade_count: int
+    trade_load_limited: bool
+    first_loaded_trade_ts: float | None
+    last_loaded_trade_ts:  float | None
 
     # ── scoring ───────────────────────────────────────────────────────────────
     score:              float
@@ -429,6 +437,15 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
     }) or []
     if isinstance(trades_raw, dict):
         trades_raw = trades_raw.get("data", [])
+    loaded_trade_count = len(trades_raw)
+    trade_load_limited = loaded_trade_count >= _limit
+    loaded_trade_ts = [
+        float(t.get("timestamp") or 0.0)
+        for t in trades_raw
+        if float(t.get("timestamp") or 0.0) > 0.0
+    ]
+    first_loaded_trade_ts = min(loaded_trade_ts) if loaded_trade_ts else None
+    last_loaded_trade_ts = max(loaded_trade_ts) if loaded_trade_ts else None
 
     # Estimate trades_per_hour from timestamp spread
     trades_per_hour = 0.0
@@ -529,6 +546,10 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
         avg_profit = round(total_redeem_value / wins, 2) if wins > 0 else -1
         return {
             "wins": wins, "losses": n_open, "total": total,
+            "loaded_trade_count": loaded_trade_count,
+            "trade_load_limited": trade_load_limited,
+            "first_loaded_trade_ts": first_loaded_trade_ts,
+            "last_loaded_trade_ts": last_loaded_trade_ts,
             "win_rate": round(wr, 4), "wilson_lb": round(wb, 4),
             "source": "redeem_window_fallback",
             "avg_profit": avg_profit, "avg_bet": round(avg_bet, 2),
@@ -562,7 +583,12 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
                 avg_bet = sum(open_costs) / len(open_costs)
         return {
             "wins": open_wins, "losses": n_open - open_wins,
-            "total": n_open, "win_rate": wr_open,
+            "total": n_open,
+            "loaded_trade_count": loaded_trade_count,
+            "trade_load_limited": trade_load_limited,
+            "first_loaded_trade_ts": first_loaded_trade_ts,
+            "last_loaded_trade_ts": last_loaded_trade_ts,
+            "win_rate": wr_open,
             "wilson_lb": wb * 0.5, "source": "open_positions_proxy",
             "avg_profit": avg_profit, "avg_bet": round(avg_bet, 2),
             "trades_per_hour": round(trades_per_hour, 2),
@@ -574,6 +600,10 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
     wb = wilson_lower_bound(wins, total)
     return {
         "wins": wins, "losses": losses, "total": total,
+        "loaded_trade_count": loaded_trade_count,
+        "trade_load_limited": trade_load_limited,
+        "first_loaded_trade_ts": first_loaded_trade_ts,
+        "last_loaded_trade_ts": last_loaded_trade_ts,
         "win_rate": round(wr, 4), "wilson_lb": round(wb, 4),
         "source": "resolved_history",
         "avg_profit": avg_profit,
@@ -621,6 +651,8 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
         "total_pnl": 0.0, "pnl_pct": 0.0, "avg_pos_size": 0.0,
         "avg_profit": 0.0, "avg_bet": 0.0, "trades_per_hour": 0.0,
         "recent_pnl_30d": None, "recent_pnl_7d": None, "recent_ts": 0.0,
+        "loaded_trade_count": 0, "trade_load_limited": False,
+        "first_loaded_trade_ts": None, "last_loaded_trade_ts": None,
         "verified": False, "watchable": False, "elite": False, "hft": False, "vip": is_vip, "sports_bot": False,
         "name": keep_name or (wallet[:10] + "…"), "ts": now_t,
         "lb_rank": None, "lb_vol": None,
@@ -663,6 +695,10 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
     avg_profit = wr_data.get("avg_profit", 0)
     avg_bet    = wr_data.get("avg_bet", 0)
     tph        = wr_data.get("trades_per_hour", 0)
+    loaded_trade_count = int(wr_data.get("loaded_trade_count", 0))
+    trade_load_limited = bool(wr_data.get("trade_load_limited", False))
+    first_loaded_trade_ts = wr_data.get("first_loaded_trade_ts")
+    last_loaded_trade_ts = wr_data.get("last_loaded_trade_ts")
     # v10: store recent-form fields with their own TTL
     recent_pnl_30d = wr_data.get("recent_pnl_30d", None)
     recent_pnl_7d  = wr_data.get("recent_pnl_7d", None)
@@ -743,6 +779,10 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
         "vip": is_vip,
         "sports_bot": sports_bot_detected,
         "verified": verified, "watchable": watchable, "elite": elite,
+        "loaded_trade_count": loaded_trade_count,
+        "trade_load_limited": trade_load_limited,
+        "first_loaded_trade_ts": float(first_loaded_trade_ts) if first_loaded_trade_ts is not None else None,
+        "last_loaded_trade_ts": float(last_loaded_trade_ts) if last_loaded_trade_ts is not None else None,
         "name": final_name, "ts": now_t, "wr_source": wr_src,
         "fail_reasons": fail_reasons,
         "recent_pnl_30d": round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
@@ -769,7 +809,8 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
         )
 
     _TRACKED = ("elite", "verified", "watchable", "score", "win_rate", "wilson_lb",
-                "total_pnl", "name", "hft", "vip", "sports_bot", "recent_pnl_30d", "recent_pnl_7d")
+                "total_pnl", "name", "hft", "vip", "sports_bot", "recent_pnl_30d", "recent_pnl_7d",
+                "loaded_trade_count", "trade_load_limited", "first_loaded_trade_ts", "last_loaded_trade_ts", "ts")
     _changed = cached is None or any(result.get(k) != cached.get(k) for k in _TRACKED)
     S.env().wallet_cache[wallet] = result
     if watchable and _changed:

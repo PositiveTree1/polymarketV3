@@ -25,6 +25,10 @@ class TrackedWalletDict(TypedDict):
     wallet:             str
     name:               str
     ts:                 float
+    loaded_trade_count: int
+    trade_load_limited: bool
+    first_loaded_trade_ts: float | None
+    last_loaded_trade_ts:  float | None
     # scoring
     score:              float
     win_rate:           float

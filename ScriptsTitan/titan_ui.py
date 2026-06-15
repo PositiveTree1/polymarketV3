@@ -1399,9 +1399,9 @@ def run_ui(api: TitanBackend) -> None:
                        command=lambda: _pending_update.__setitem__(0, True)
                        ).pack(side="left", padx=4)
     
-    wh_cols = ("Name","Wallet","Score","WinRate","WilsonLB","Res","Portfolio","PnL","AvgBet","TPH","Status","HFT","VIP")
+    wh_cols = ("Name","Score","WinRate","WilsonLB","Res","Portfolio","Rank","Volume","PnL","AvgBet","TPH","Status","HFT","VIP")
     wh_tree = ttk.Treeview(tab_wallets, columns=wh_cols, show="headings")
-    ww = {"Name":130,"Wallet":180,"Score":58,"WinRate":65,"WilsonLB":72,
+    ww = {"Name":130,"Rank":50,"Volume":90,"Score":58,"WinRate":65,"WilsonLB":72,
           "Res":50,"Portfolio":100,"PnL":90,"AvgBet":78,"TPH":55,"Status":80,"HFT":40,"VIP":40}
     for c in wh_cols:
         wh_tree.heading(c, text=c)
@@ -1494,6 +1494,11 @@ def run_ui(api: TitanBackend) -> None:
             pass
 
     def _log_ui_error(context: str, error: BaseException, level: str = "ERR") -> None:
+        import urllib.error as _ue
+        if isinstance(error, (_ue.URLError, ConnectionRefusedError, OSError)):
+            from titan_client import TitanClient
+            if isinstance(api, TitanClient) and api._server_offline:
+                return
         tb = error.__traceback__
         if tb is not None:
             last_frame = traceback.extract_tb(tb)[-1]
@@ -3316,9 +3321,12 @@ def run_ui(api: TitanBackend) -> None:
             #           "✅ VER"    if p.get("verified") else
             #           "👁 WATCH"  if in_watch else "❌")
 
+            lb_rank = p.get("lb_rank")
+            lb_vol  = p.get("lb_vol")
             item_id = wh_tree.insert("", "end", values=(
                 p.get("name", w[:10]+"…"),
-                w[:26]+"…",
+                f"#{lb_rank:,}" if lb_rank is not None else "—",
+                f"${lb_vol:,.0f}" if lb_vol is not None else "—",
                 f"{p.get('score',0):.2f}",
                 f"{p.get('win_rate',0)*100:.0f}%",
                 f"{p.get('wilson_lb',0)*100:.0f}%",
@@ -3530,9 +3538,9 @@ def run_ui(api: TitanBackend) -> None:
         try:
             data: dict = {}
             try: data["pnl"]      = api.get_pnl_summary()
-            except Exception as e: data["pnl"] = {}; log(f"[fetch pnl] {e}", "ERR")
+            except Exception as e: data["pnl"] = {}; root.after(0, lambda err=e: _log_ui_error("fetch pnl", err))
             try: data["logs"]     = api.get_logs(lines=600)
-            except Exception as e: data["logs"] = ""; log(f"[fetch logs] {e}", "ERR")
+            except Exception as e: data["logs"] = ""; root.after(0, lambda err=e: _log_ui_error("fetch logs", err))
             try: data["pos"]      = _open_positions()
             except Exception as e: data["pos"] = []; log(f"[fetch pos] {e}", "ERR")
             try: data["wallets"]  = _wallet_cache()

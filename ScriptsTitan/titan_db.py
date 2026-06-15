@@ -487,7 +487,7 @@ def upsert_wallet_profile(addr: str, profile: "WalletProfile") -> None:
         return
     now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     watchable = 1 if profile.get("watchable") or profile.get("verified") else 0
-    blob = json.dumps({k: v for k, v in profile.items() if k != "ts"})
+    blob = json.dumps(profile)
     with _connect() as cx:
         cx.execute(
             """

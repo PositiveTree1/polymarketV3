@@ -38,6 +38,27 @@ from titan_signals import build_signals, check_wallet_exist, _adaptive_bet_caps
 from titan_trader  import auto_trade
 
 _HFT_FAST_CYCLE = 3  # seconds between HFT polls
+_startup_wallet_refresh_done = threading.Event()
+
+
+def _run_startup_wallet_refresh() -> None:
+    from titan_persistence import _refresh_elite_ver_wallets
+
+    try:
+        _refresh_elite_ver_wallets()
+    except Exception as e:
+        import traceback
+        _log(f"Startup wallet refresh failed: {e}\n{traceback.format_exc()[:2000]}", "ERR")
+    finally:
+        _startup_wallet_refresh_done.set()
+
+
+def _wait_for_startup_wallet_refresh(loop_name: str) -> None:
+    if _startup_wallet_refresh_done.is_set():
+        return
+    _log(f"{loop_name} waiting for startup wallet refresh to finish", "INFO")
+    while not _startup_wallet_refresh_done.wait(timeout=10):
+        _log(f"{loop_name} still waiting for startup wallet refresh", "INFO")
 
 
 def _rescore_watchlist():
@@ -265,6 +286,7 @@ def _heartbeat_loop():
 
 def run_loop():
     C.reload()
+    _wait_for_startup_wallet_refresh("Main loop")
     while True:
         try:
             C.reload()
@@ -295,6 +317,7 @@ def _hft_fast_loop():
     Runs every 3 seconds. Polls only HFT wallets looking for outsized spike trades.
     """
     _log("⚡ HFT fast loop started (3s cycle)", "INFO")
+    _wait_for_startup_wallet_refresh("HFT fast loop")
     _log("⚡ HFT fast loop waiting 45s for wallet_cache to populate…", "INFO")
     time.sleep(45)
     _log("⚡ HFT fast loop active", "INFO")
@@ -332,6 +355,7 @@ def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycl
     S.on_cycle_complete = cycle_cb
     S.on_heartbeat      = heartbeat_cb
 
+    _startup_wallet_refresh_done.clear()
     load_state()
     C.reload()
 
@@ -398,9 +422,11 @@ def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycl
     except Exception as _e:
         _log(f"⚠ WS resolution monitor failed to start: {_e}", "WARN")
 
+    t_refresh = threading.Thread(target=_run_startup_wallet_refresh, daemon=True)
     t_main = threading.Thread(target=run_loop, daemon=True)
     t_hft  = threading.Thread(target=_hft_fast_loop, daemon=True)
     t_hb   = threading.Thread(target=_heartbeat_loop, daemon=True)
+    t_refresh.start()
     t_main.start()
     t_hft.start()
     t_hb.start()

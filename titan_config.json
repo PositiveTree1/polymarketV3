@@ -227,7 +227,7 @@
       "_description": "Slightly raised."
     },
     "MIN_WIN_RATE_VER": {
-      "value": 0.52,
+      "value": 0.54,
       "_description": "Slightly raised."
     },
     "MIN_RESOLVED_BETS": {
@@ -243,11 +243,11 @@
       "_description": "Unchanged."
     },
     "WILSON_MIN_VER": {
-      "value": 0.3,
+      "value": 0.33,
       "_description": "Unchanged."
     },
     "MIN_AVG_PROFIT_PER_TRADE": {
-      "value": 0.1,
+      "value": 0.2,
       "_description": "Raised \u00e2\u20ac\u201d want wallets who actually profit per trade."
     },
     "MIN_AVG_BET_SIZE": {
@@ -258,15 +258,15 @@
   "elite_thresholds": {
     "_group": "Elite Thresholds",
     "ELITE_MIN_PNL": {
-      "value": 25000,
+      "value": 30000,
       "_description": "Keep at $40k. Ensures proven track record."
     },
     "ELITE_MIN_PORT": {
-      "value": 50000,
+      "value": 60000,
       "_description": "Slightly relaxed from 90k to catch some good wallets."
     },
     "ELITE_MIN_SCORE": {
-      "value": 0.62,
+      "value": 0.66,
       "_description": "Slightly raised."
     },
     "ELITE_MIN_RESOLVED": {
@@ -686,14 +686,14 @@
         "wilson_min_watch": 0,
         "min_resolved_bets": 0,
         "min_pnl": 0.0,
-        "min_win_rate_ver": 0.52,
-        "wilson_min_ver": 0.3,
-        "min_avg_profit": 0.1,
+        "min_win_rate_ver": 0.54,
+        "wilson_min_ver": 0.33,
+        "min_avg_profit": 0.2,
         "min_avg_bet": 10.0,
-        "min_portfolio_or_pnl": 100.0,
-        "elite_min_pnl": 25000,
-        "elite_min_portfolio": 50000,
-        "elite_min_score": 0.62,
+        "min_portfolio_or_pnl": 150.0,
+        "elite_min_pnl": 30000,
+        "elite_min_portfolio": 60000,
+        "elite_min_score": 0.66,
         "elite_min_resolved": 20,
         "elite_alpha_per_trade": 1.0,
         "weight_wilson": 0.3,
