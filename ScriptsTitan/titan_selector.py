@@ -178,6 +178,7 @@ class PerformanceSelectorParams(SelectorParams):
     weight_alpha: float = 0.10
 
     # HFT / bot filters
+    hft_enabled: bool = True
     hft_tph_threshold: float = 50.0
     sports_bot_tph_threshold: float = 100.0
 
@@ -244,6 +245,10 @@ class PerformanceSelector(WalletSelector):
 
         fail_reasons: list[str] = []
 
+        hft_detected = tph >= p.hft_tph_threshold or (avg_bet > 0 and avg_bet < 50 and n_res > 100)
+        if hft_detected and not p.hft_enabled:
+            return False, False, False, ["HFT_DISABLED"]
+
         watchable = (
             wr    >= p.min_win_rate_watch and
             wb    >= p.wilson_min_watch   and
@@ -254,8 +259,6 @@ class PerformanceSelector(WalletSelector):
         if wb    < p.wilson_min_watch:   fail_reasons.append(f"WilsonLB {wb*100:.0f}%<{p.wilson_min_watch*100:.0f}%")
         if n_res < p.min_resolved_bets:  fail_reasons.append(f"Resolved {n_res}<{p.min_resolved_bets}")
         if pnl   < p.min_pnl:           fail_reasons.append(f"PnL ${pnl:+,.0f}")
-
-        hft_detected = tph >= p.hft_tph_threshold or (avg_bet > 0 and avg_bet < 50 and n_res > 100)
         if hft_detected:
             roi_ok  = True
             port_ok = cur >= p.min_portfolio_or_pnl or pnl >= p.min_portfolio_or_pnl

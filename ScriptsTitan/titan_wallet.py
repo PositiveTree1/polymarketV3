@@ -33,11 +33,30 @@ import time
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import IntEnum
 from typing import TypedDict, Any
 import titan_state as S
 import titan_config as C
 from titan_config import *
 import titan_db as DB
+
+
+class WalletTier(IntEnum):
+    REJECTED = 0
+    WATCH    = 1
+    VERIFIED = 2
+    ELITE    = 3
+
+    def display(self) -> str:
+        return {
+            WalletTier.ELITE:    "🔥ELITE",
+            WalletTier.VERIFIED: "✅VER",
+            WalletTier.WATCH:    "👁WATCH",
+            WalletTier.REJECTED: "❌REJ",
+        }[self]
+    
+    def __str__(self) -> str:
+        return self.display()
 
 
 @dataclass
@@ -139,11 +158,79 @@ class Wallet:
             return False
         return self.recent_pnl_30d >= min_pnl_30d and self.recent_pnl_7d >= min_pnl_7d
 
-    def tier(self) -> str:
-        if self.elite:     return "🔥ELITE"
-        if self.verified:  return "✅VER"
-        if self.watchable: return "👁WATCH"
-        return "❌REJ"
+    def tier(self) -> WalletTier:
+        if self.elite:     return WalletTier.ELITE
+        if self.verified:  return WalletTier.VERIFIED
+        if self.watchable: return WalletTier.WATCH
+        return WalletTier.REJECTED
+
+    def tag(self) -> str:
+        return self.tier().display() + (" ⚡HFT" if self.hft else "")
+        
+    def reclassify(self, sel) -> "Wallet":
+        from dataclasses import replace as _replace
+        avg_profit = self.avg_profit
+        avg_profit_estimated = False
+        if avg_profit <= 0 and self.n_resolved >= 10 and self.total_pnl > 0:
+            avg_profit = round((self.total_pnl * 0.5) / self.n_resolved, 2)
+            avg_profit_estimated = True
+        apt = self.loaded_trade_pnl / self.n_resolved if self.n_resolved > 0 else 0.0
+        w = _replace(
+            self,
+            avg_profit=avg_profit,
+            alpha_per_trade=round(apt, 2),
+        ) if avg_profit != self.avg_profit or round(apt, 2) != self.alpha_per_trade else self
+        score, watchable, verified, elite, hft, sports_bot, fail_reasons = w.apply_selector(sel)
+        est_tag    = "~" if avg_profit_estimated else ""
+        hft_tag    = " ⚡HFT" if hft else ""
+        sports_tag = " 🏈SPORTS" if sports_bot else ""
+        rf_tag     = f" RF30d:${self.recent_pnl_30d:+.0f}" if self.recent_pnl_30d is not None else ""
+        tier_disp  = (WalletTier.ELITE if elite else WalletTier.VERIFIED if verified else WalletTier.WATCH if watchable else WalletTier.REJECTED).display()
+        return _replace(
+            self,
+            score=round(score, 5),
+            avg_profit=avg_profit,
+            alpha_per_trade=round(apt, 2),
+            verified=verified,
+            watchable=watchable,
+            elite=elite,
+            hft=hft,
+            sports_bot=sports_bot,
+            fail_reasons=fail_reasons,
+            detail=(
+                f"Score:{score:.2f} WR:{self.win_rate*100:.0f}% WilsonLB:{self.wilson_lb*100:.0f}% "
+                f"Res:{self.n_resolved} Port:${self.total_value:,.0f} PnL:${self.total_pnl:+,.0f}({self.pnl_pct:+.1f}%) "
+                f"AvgProfit:{est_tag}${avg_profit:.1f} AvgBet:${self.avg_bet:.0f} "
+                f"AlphaPT:${apt:.1f} TPH:{self.trades_per_hour:.1f} [{self.wr_source}] "
+                f"{tier_disp}{hft_tag}{sports_tag}{rf_tag}"
+            ),
+        )
+
+    def apply_selector(self, sel) -> "tuple[float, bool, bool, bool, bool, bool, list[str]]":
+        """Returns (score, watchable, verified, elite, hft, sports_bot, fail_reasons)."""
+        from titan_selector import PerformanceSelector
+        if sel is not None:
+            score = sel.score(self)
+            watchable, verified, elite, fail_reasons = sel.is_selected(self, score)
+            hft        = sel.is_hft(self.trades_per_hour, self.avg_bet, self.n_resolved) if isinstance(sel, PerformanceSelector) else False
+            sports_bot = sel.is_sports_bot(self.name, self.trades_per_hour) if isinstance(sel, PerformanceSelector) else False
+        else:
+            wb = self.wilson_lb
+            score = (
+                0.30 * wb +
+                0.25 * min(1.0, max(0, self.pnl_pct / 30)) +
+                0.15 * min(1.0, self.total_value / 25_000) +
+                0.10 * min(1.0, self.n_resolved / 20) +
+                0.10 * min(1.0, self.n_pos / 10) +
+                0.10 * min(1.0, max(0, self.avg_profit) / 50)
+            )
+            fail_reasons = []
+            watchable    = self.win_rate >= 0.53 and wb >= 0.45 and self.n_resolved >= 10 and self.total_pnl >= 0
+            verified     = watchable and self.win_rate >= 0.56 and wb >= 0.49
+            elite        = False
+            hft          = C.HFT_ENABLED and self.trades_per_hour >= HFT_MIN_TRADES_PER_HOUR
+            sports_bot   = False
+        return score, watchable, verified, elite, hft, sports_bot, fail_reasons
 
     def to_wire(self) -> dict[str, Any]:
         """Produce the API wire dict (TrackedWalletDict shape). Only call at JSON boundary."""
@@ -322,6 +409,7 @@ class WinRateData(TypedDict):
     recent_pnl_7d:      float
 
 
+
 def _is_auto_wallet_name(name: str) -> bool:
     n = name.strip()
     if not n:
@@ -389,9 +477,13 @@ def wilson_lower_bound(wins: int, total: int, z: float = 1.96) -> float:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  WHALE PERFORMANCE TRACKER
+#  WALLET PERFORMANCE TRACKER
 # ─────────────────────────────────────────────────────────────────────────────
 _whale_performance: dict[str, WhalePerformanceRecord] = {}
+
+# Set while reclassify_all() is running so _rescore_watchlist() yields immediately.
+import threading as _threading
+_reclassify_in_progress = _threading.Event()
 
 
 def record_whale_trade_performance(wallet_addrs: list[str], pnl_usdc: float, won: bool) -> None:
@@ -421,13 +513,7 @@ def record_whale_trade_performance(wallet_addrs: list[str], pnl_usdc: float, won
         rec["recent_trades"] = [(ts, p) for ts, p in rec["recent_trades"] if ts >= week_ago]
 
 
-def get_whale_performance(wallet: str) -> WhalePerformanceRecord:
-    """Get copy-trading performance record for a whale."""
-    _empty: WhalePerformanceRecord = {"wins": 0, "losses": 0, "total_pnl": 0.0, "n_trades": 0, "recent_trades": []}
-    return _whale_performance.get(wallet.lower(), _empty)
-
-
-def get_whale_weekly_pnl(wallet: str) -> float:
+def get_wallet_weekly_pnl(wallet: str) -> float:
     """Return the 7-day rolling PnL for a whale from our copy-trades."""
     rec = _whale_performance.get(wallet.lower())
     if not rec:
@@ -718,8 +804,35 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  SELECTOR SCORING — single place that applies selector logic to a Wallet
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  WALLET SCORING
 # ─────────────────────────────────────────────────────────────────────────────
+def _log_wallet_change(before: Wallet | None, after: Wallet, fail_reasons: list[str], name: str, addr: str) -> None:
+    tier_before = before.tier() if before is not None else None
+    tier_after  = after.tier()
+    hft_changed = (before.hft if before is not None else False) != after.hft
+    if tier_before == tier_after and not hft_changed:
+        return
+    tag_before  = before.tag() if before is not None else "NEW"
+    tag_after   = after.tag()
+    stats_str   = f"PnL=${after.total_pnl:+,.0f} Port=${after.total_value:,.0f} Score={after.score:.2f} WR={after.win_rate*100:.0f}% Res={after.n_resolved}"
+    reasons_str = ", ".join(fail_reasons) if fail_reasons else ""
+    if tier_before != tier_after:
+        promoted = tier_after > tier_before if tier_before is not None else True
+        if promoted:
+            msg, level = f"⬆ {tag_before}→{tag_after} {name} ({addr[:12]}…) | {stats_str}", "INFO"
+        else:
+            msg, level = f"⬇ {tag_before}→{tag_after} {name} ({addr[:12]}…) | {reasons_str} | {stats_str}", "WARN"
+    else:
+        msg, level = f"~ {tag_before}→{tag_after} {name} ({addr[:12]}…) | {stats_str}", "INFO"
+    print(f"[WALLET] {msg}", flush=True)
+    S._log(msg, level)
+
+
 def get_compute_and_store_wallet(wallet: str) -> Wallet:
     wallet = wallet.lower()
     now_t  = time.time()
@@ -801,55 +914,6 @@ def get_compute_and_store_wallet(wallet: str) -> Wallet:
     recent_pnl_30d     = wr_data["recent_pnl_30d"]
     recent_pnl_7d      = wr_data["recent_pnl_7d"]
 
-    avg_profit_estimated = False
-    if avg_profit <= 0 and n_res >= 10 and pnl > 0:
-        avg_profit = round((pnl * 0.5) / n_res, 2)
-        avg_profit_estimated = True
-
-    apt = loaded_trade_pnl / n_res if n_res > 0 else 0.0
-
-    import titan_config as _C
-    sel = _C.get_active_selector()
-
-    if sel is not None:
-        from titan_selector import PerformanceSelector
-        _draft = Wallet(
-            addr=wallet, name="", ts=now_t,
-            loaded_trade_count=loaded_trade_count, trade_load_limited=trade_load_limited,
-            loaded_trade_pnl=loaded_trade_pnl,
-            first_loaded_trade_ts=float(first_loaded_trade_ts) if first_loaded_trade_ts is not None else None,
-            last_loaded_trade_ts=float(last_loaded_trade_ts) if last_loaded_trade_ts is not None else None,
-            score=0.0, win_rate=wr, wilson_lb=wb, alpha_per_trade=round(apt, 2), wr_source=wr_src,
-            n_resolved=n_res, n_pos=n_pos, total_value=cur, total_pnl=pnl, pnl_pct=pct,
-            avg_pos_size=avg_sz, avg_profit=avg_profit, avg_bet=avg_bet, trades_per_hour=round(tph, 2),
-            verified=False, watchable=False, elite=False, hft=False, vip=is_vip, sports_bot=False,
-            recent_pnl_30d=round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
-            recent_pnl_7d=round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
-            recent_ts=now_t, lb_rank=lb_rank, lb_vol=lb_vol, detail="", fail_reasons=[],
-        )
-        score = sel.score(_draft)
-        watchable, verified, elite, fail_reasons = sel.is_selected(_draft, score)
-        hft_detected       = sel.is_hft(tph, avg_bet, n_res) if isinstance(sel, PerformanceSelector) else False
-        sports_bot_detected = False
-        _check_name = keep_name or existing_name or (wallet[:10] + "…")
-        if isinstance(sel, PerformanceSelector):
-            sports_bot_detected = sel.is_sports_bot(_check_name, tph)
-    else:
-        score = (
-            0.30 * wb +
-            0.25 * min(1.0, max(0, pct / 30)) +
-            0.15 * min(1.0, cur / 25_000) +
-            0.10 * min(1.0, n_res / 20) +
-            0.10 * min(1.0, n_pos / 10) +
-            0.10 * min(1.0, max(0, avg_profit) / 50)
-        )
-        fail_reasons: list[str] = []
-        watchable = wr >= 0.53 and wb >= 0.45 and n_res >= 10 and pnl >= 0
-        verified  = watchable and wr >= 0.56 and wb >= 0.49
-        elite     = False
-        hft_detected       = tph >= HFT_MIN_TRADES_PER_HOUR
-        sports_bot_detected = False
-
     if existing_is_real:
         final_name = existing_name
     elif keep_name:
@@ -859,69 +923,24 @@ def get_compute_and_store_wallet(wallet: str) -> Wallet:
     else:
         final_name = wallet[:10] + "…"
 
-    est_tag    = "~" if avg_profit_estimated else ""
-    hft_tag    = "⚡HFT" if hft_detected else ""
-    sports_tag = "🏈SPORTS" if sports_bot_detected else ""
-    rf_tag     = f" RF30d:${recent_pnl_30d:+.0f}" if recent_pnl_30d is not None else ""
-
-    result = Wallet(
-        addr=wallet,
-        name=final_name,
-        ts=now_t,
-        loaded_trade_count=loaded_trade_count,
-        trade_load_limited=trade_load_limited,
+    sel = C.get_active_selector()
+    _draft = Wallet(
+        addr=wallet, name=final_name, ts=now_t,
+        loaded_trade_count=loaded_trade_count, trade_load_limited=trade_load_limited,
         loaded_trade_pnl=loaded_trade_pnl,
         first_loaded_trade_ts=float(first_loaded_trade_ts) if first_loaded_trade_ts is not None else None,
         last_loaded_trade_ts=float(last_loaded_trade_ts) if last_loaded_trade_ts is not None else None,
-        score=round(score, 5),
-        win_rate=wr,
-        wilson_lb=wb,
-        alpha_per_trade=round(apt, 2),
-        wr_source=wr_src,
-        n_resolved=n_res,
-        n_pos=n_pos,
-        total_value=cur,
-        total_pnl=pnl,
-        pnl_pct=pct,
-        avg_pos_size=avg_sz,
-        avg_profit=avg_profit,
-        avg_bet=avg_bet,
-        trades_per_hour=round(tph, 2),
-        verified=verified,
-        watchable=watchable,
-        elite=elite,
-        hft=hft_detected,
-        vip=is_vip,
-        sports_bot=sports_bot_detected,
+        score=0.0, win_rate=wr, wilson_lb=wb, alpha_per_trade=0.0, wr_source=wr_src,
+        n_resolved=n_res, n_pos=n_pos, total_value=cur, total_pnl=pnl, pnl_pct=pct,
+        avg_pos_size=avg_sz, avg_profit=avg_profit, avg_bet=avg_bet, trades_per_hour=round(tph, 2),
+        verified=False, watchable=False, elite=False, hft=False, vip=is_vip, sports_bot=False,
         recent_pnl_30d=round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
         recent_pnl_7d=round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
-        recent_ts=now_t,
-        lb_rank=lb_rank,
-        lb_vol=lb_vol,
-        fail_reasons=fail_reasons,
-        detail=(
-            f"Score:{score:.2f} WR:{wr*100:.0f}% WilsonLB:{wb*100:.0f}% "
-            f"Res:{n_res} Port:${cur:,.0f} PnL:${pnl:+,.0f}({pct:+.1f}%) "
-            f"AvgProfit:{est_tag}${avg_profit:.1f} AvgBet:${avg_bet:.0f} "
-            f"AlphaPT:${apt:.1f} TPH:{tph:.1f} [{wr_src}] "
-            f"{'🔥ELITE' if elite else '✅VER' if verified else '👁WATCH' if watchable else '❌'}"
-            f"{hft_tag}{sports_tag}{rf_tag}"
-        ),
+        recent_ts=now_t, lb_rank=lb_rank, lb_vol=lb_vol, detail="", fail_reasons=[],
     )
+    result = _draft.reclassify(sel)
 
-    tier_before = cached.tier() if cached is not None else "NEW"
-    tier_after  = result.tier()
-    if tier_before != tier_after:
-        reasons_str = ", ".join(fail_reasons) if fail_reasons else ""
-        stats_str = f"PnL=${pnl:+,.0f} Port=${cur:,.0f} Score={score:.2f} WR={wr*100:.0f}% Res={n_res}"
-        if tier_after in ("🔥ELITE", "✅VER", "👁WATCH"):
-            msg   = f"⬆ {tier_before}→{tier_after} {final_name} ({wallet[:12]}…) | {stats_str}"
-            level = "INFO"
-        else:
-            msg   = f"⬇ {tier_before}→{tier_after} {final_name} ({wallet[:12]}…) | {reasons_str} | {stats_str}"
-            level = "WARN"
-        print(f"[WALLET] {msg}", flush=True)
-        S._log(msg, level)
+    _log_wallet_change(cached, result, result.fail_reasons, final_name, wallet)
 
     _changed = cached is None or any(
         getattr(result, k) != getattr(cached, k)
@@ -930,9 +949,9 @@ def get_compute_and_store_wallet(wallet: str) -> Wallet:
                   "loaded_trade_count", "trade_load_limited", "first_loaded_trade_ts", "last_loaded_trade_ts", "ts")
     )
     S.env().wallet_cache[wallet] = result
-    if watchable and _changed:
+    if result.watchable and _changed:
         DB.upsert_wallet_profile(wallet, result.to_db_dict())
-    elif not watchable and cached is not None and cached.watchable:
+    elif not result.watchable and cached is not None and cached.watchable:
         DB.clear_wallet_profile(wallet)
     return result
 
@@ -995,85 +1014,30 @@ class WalletsCacheSrv(WalletsCache):
     def reclassify_all(self) -> int:
         """Re-run selector scoring on every cached wallet. No Poly API calls. Returns count updated."""
         import titan_config as _C
-        from dataclasses import replace as _replace
+        import titan_state as _S
+        _S.log_important(f"♻ reclassify_all called — {len(self._data)} wallets, HFT_ENABLED={_C.HFT_ENABLED}")
+        _reclassify_in_progress.set()
+        try:
+            return self._reclassify_all_inner(_C)
+        finally:
+            _reclassify_in_progress.clear()
 
+    def _reclassify_all_inner(self, _C) -> int:
         sel = _C.get_active_selector()
         updated = 0
         for addr, w in list(self._data.items()):
-            apt        = w.loaded_trade_pnl / w.n_resolved if w.n_resolved > 0 else 0.0
-            avg_profit = w.avg_profit
-            avg_profit_estimated = False
-            if avg_profit <= 0 and w.n_resolved >= 10 and w.total_pnl > 0:
-                avg_profit = round((w.total_pnl * 0.5) / w.n_resolved, 2)
-                avg_profit_estimated = True
-
-            if sel is not None:
-                from titan_selector import PerformanceSelector
-                score = sel.score(w)
-                watchable, verified, elite, fail_reasons = sel.is_selected(w, score)
-                hft_detected        = sel.is_hft(w.trades_per_hour, w.avg_bet, w.n_resolved) if isinstance(sel, PerformanceSelector) else False
-                sports_bot_detected = sel.is_sports_bot(w.name, w.trades_per_hour) if isinstance(sel, PerformanceSelector) else False
-            else:
-                wb  = w.wilson_lb
-                score = (
-                    0.30 * wb +
-                    0.25 * min(1.0, max(0, w.pnl_pct / 30)) +
-                    0.15 * min(1.0, w.total_value / 25_000) +
-                    0.10 * min(1.0, w.n_resolved / 20) +
-                    0.10 * min(1.0, w.n_pos / 10) +
-                    0.10 * min(1.0, max(0, avg_profit) / 50)
-                )
-                fail_reasons        = []
-                watchable           = w.win_rate >= 0.53 and wb >= 0.45 and w.n_resolved >= 10 and w.total_pnl >= 0
-                verified            = watchable and w.win_rate >= 0.56 and wb >= 0.49
-                elite               = False
-                hft_detected        = w.trades_per_hour >= HFT_MIN_TRADES_PER_HOUR
-                sports_bot_detected = False
-
-            est_tag    = "~" if avg_profit_estimated else ""
-            hft_tag    = "⚡HFT" if hft_detected else ""
-            sports_tag = "🏈SPORTS" if sports_bot_detected else ""
-            rf_tag     = f" RF30d:${w.recent_pnl_30d:+.0f}" if w.recent_pnl_30d is not None else ""
-
-            result = _replace(
-                w,
-                score=round(score, 5),
-                avg_profit=avg_profit,
-                alpha_per_trade=round(apt, 2),
-                verified=verified,
-                watchable=watchable,
-                elite=elite,
-                hft=hft_detected,
-                sports_bot=sports_bot_detected,
-                fail_reasons=fail_reasons,
-                detail=(
-                    f"Score:{score:.2f} WR:{w.win_rate*100:.0f}% WilsonLB:{w.wilson_lb*100:.0f}% "
-                    f"Res:{w.n_resolved} Port:${w.total_value:,.0f} PnL:${w.total_pnl:+,.0f}({w.pnl_pct:+.1f}%) "
-                    f"AvgProfit:{est_tag}${avg_profit:.1f} AvgBet:${w.avg_bet:.0f} "
-                    f"AlphaPT:${apt:.1f} TPH:{w.trades_per_hour:.1f} [{w.wr_source}] "
-                    f"{'🔥ELITE' if elite else '✅VER' if verified else '👁WATCH' if watchable else '❌'}"
-                    f"{hft_tag}{sports_tag}{rf_tag}"
-                ),
-            )
-
-            tier_before = w.tier()
-            tier_after  = result.tier()
-            if tier_before != tier_after:
-                reasons_str = ", ".join(fail_reasons) if fail_reasons else ""
-                stats_str   = f"PnL=${w.total_pnl:+,.0f} Port=${w.total_value:,.0f} Score={score:.2f} WR={w.win_rate*100:.0f}% Res={w.n_resolved}"
-                if tier_after in ("🔥ELITE", "✅VER", "👁WATCH"):
-                    S._log(f"⬆ {tier_before}→{tier_after} {w.name} ({addr[:12]}…) | {stats_str}", "INFO")
-                else:
-                    S._log(f"⬇ {tier_before}→{tier_after} {w.name} ({addr[:12]}…) | {reasons_str} | {stats_str}", "WARN")
+            result = w.reclassify(sel)
+            if w.tier() != result.tier() or w.hft != result.hft:
+                _log_wallet_change(w, result, result.fail_reasons, w.name, addr)
+                updated += 1
 
             self._data[addr] = result
             if result.watchable:
                 DB.upsert_wallet_profile(addr, result.to_db_dict())
             elif not result.watchable and w.watchable:
                 DB.clear_wallet_profile(addr)
-            updated += 1
 
-        S._log(f"🎯 Selector reclassified {updated} wallets", "INFO")
+        S.log_important(f"🎯 reclassify_all done: {updated} wallet(s) changed out of {len(self._data)}")
         return updated
 
     def refresh_recent_form(self) -> None:
@@ -1134,7 +1098,7 @@ def discover_new_wallets() -> None:
         prof = get_compute_and_store_wallet(w)
         if prof.verified:
             discovered += 1
-            tag = "🔥ELITE" if prof.elite else ("⚡HFT" if prof.hft else "✅VER")
+            tag = prof.tag()
             S._log(
                 f"🆕 {tag} {w[:14]}… "
                 f"Score:{prof.score:.2f} WR:{prof.win_rate*100:.0f}% "
@@ -1186,7 +1150,7 @@ def scan_top_market_holders() -> None:
             if prof.watchable:
                 added += 1
                 if prof.verified:
-                    tag = "🔥ELITE" if prof.elite else ("⚡HFT" if prof.hft else "✅VER")
+                    tag = prof.tag()
                     S._log(f"🆕 {tag} from market scan: {w[:14]}…", "INFO")
             time.sleep(0.12)
         S._log(f"🔍 Market scan done — {added} added", "DATA")

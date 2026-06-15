@@ -74,6 +74,8 @@ strategy_scoring: dict = {}
 strategy_kelly: dict = {}
 position_management_ext: dict = {}
 
+HFT_ENABLED: bool = True
+
 # Wallet selector config
 wallet_selector: dict = {}
 
@@ -198,10 +200,13 @@ def reload():
     _sel_id     = ws_cfg.get("active_selector", "performance")
     _sel_params = (ws_cfg.get("selectors") or {}).get(_sel_id, {})
     try:
-        from titan_selector import build_selector as _build_selector
-        g["_active_selector"] = _build_selector(_sel_id, _sel_params)
+        from titan_selector import build_selector as _build_selector, PerformanceSelector as _PS
+        _sel = _build_selector(_sel_id, _sel_params)
+        g["_active_selector"] = _sel
+        g["HFT_ENABLED"] = _sel.p.hft_enabled if isinstance(_sel, _PS) else True
     except Exception:
         g["_active_selector"] = None
+        g["HFT_ENABLED"] = bool(_sel_params.get("hft_enabled", True))
 
     # Signal builders — build active instances from config
     sb_cfg = flat.get("signal_builders", {})

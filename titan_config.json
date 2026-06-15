@@ -678,9 +678,9 @@
                 "discovery_leaderboard_category": "OVERALL",
                 "discovery_leaderboard_order_by": "PNL",
                 "leaderboard_periods": [
-                    "['[\"[\\'ALL\\'\"'",
-                    "'\"\\'MONTH\\'\"'",
-                    "'\"\\'WEEK\\']\"]']"
+                    "['ALL'",
+                    "'MONTH'",
+                    "'WEEK']"
                 ],
                 "min_win_rate_watch": 0.53,
                 "wilson_min_watch": 0.0,
@@ -702,6 +702,7 @@
                 "weight_trade_count": 0.1,
                 "weight_open_positions": 0.1,
                 "weight_alpha": 0.1,
+                "hft_enabled": false,
                 "hft_tph_threshold": 50.0,
                 "sports_bot_tph_threshold": 100.0
             }

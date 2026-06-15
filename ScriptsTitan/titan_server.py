@@ -535,19 +535,14 @@ def _wire_events(api: TitanAPI) -> None:
         })
 
     def _on_cycle(payload: dict) -> None:
-        import dataclasses
-        def _ser(obj):
-            return dataclasses.asdict(obj) if dataclasses.is_dataclass(obj) and not isinstance(obj, type) else obj
-        trades_serial  = [_ser(t) for t in payload.get("trades", [])]
-        signals_serial = [_ser(s) for s in payload.get("signals", [])]
         _sessions.broadcast({
             "jsonrpc": "2.0",
             "method": "titan/cycle_complete",
             "params": {
-                "signals": signals_serial,
-                "wallets": payload.get("wallets", []),
+                "signals": _to_serializable(payload.get("signals", [])),
+                "wallets": _to_serializable(payload.get("wallets", [])),
                 "rejects": payload.get("rejects", []),
-                "trades": trades_serial,
+                "trades":  _to_serializable(payload.get("trades", [])),
                 "cycle": None,
                 "elapsed_ms": None,
             },

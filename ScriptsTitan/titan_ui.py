@@ -27,6 +27,7 @@ import os
 import webbrowser
 from pathlib import Path
 from titan_ui_charts import PnLChart, PositionChart, ChartMarker, init_chart_fonts
+from titan_wallet import WalletTier
 
 if TYPE_CHECKING:
     from titan_signals import Signal
@@ -195,7 +196,7 @@ def run_ui(api: TitanBackend) -> None:
         except Exception as e:
             _log_ui_error("open positions cache", e)
             return []
-    def _wallet_cache() -> dict:
+    def _wallet_cache() -> "dict[str, Wallet]":
         try:
             return {w.addr: w for w in api.get_tracked_wallets()}
         except Exception as e:
@@ -223,7 +224,7 @@ def run_ui(api: TitanBackend) -> None:
     hdr1.pack(fill="x")
 
     app_title_var    = tk.StringVar(value="🐳 TITAN — Tracked Wallet Mirror Engine")
-    app_subtitle_var = tk.StringVar(value="v10 CONVICTION-ONLY | 2+ Elites | 20-72¢ Zone | -30% Stop | ENGINE ACTIVE")
+    app_subtitle_var = tk.StringVar(value="Follow The Wallet | ⚡ HFT: ON | v10 CONVICTION-ONLY | 2+ Elites | 20-72¢ Zone | -30% Stop | ENGINE ACTIVE")
 
     tk.Label(hdr1, textvariable=app_title_var,
              fg="#00ff88", bg="#0a0a1a", font=title_f).pack(side="left", padx=12)
@@ -950,10 +951,12 @@ def run_ui(api: TitanBackend) -> None:
             ("Volume",   f"${whale.lb_vol:,.0f}" if whale.lb_vol else "—",                    "#88ccff"),
         ]
 
+        trade_count_str = f"{whale.loaded_trade_count}{'*' if whale.trade_load_limited else ''}"
         loaded_cells = [
             ("Win Rate",    f"{whale.win_rate * 100:.0f}%",                                    "#00ff88"),
             ("Wilson LB",   f"{whale.wilson_lb * 100:.0f}%",                                   "#88ccff"),
             ("Resolved",    f"{whale.n_resolved}",                                              "#aaaacc"),
+            ("Loaded",      trade_count_str, "#ff8844" if whale.trade_load_limited else "#aaaacc"),
             ("TPH",         f"{whale.trades_per_hour:.1f}",                                     "#aaaacc"),
             ("Avg Bet",     f"${whale.avg_bet:,.0f}",                                           "#ffaa44"),
             ("Avg Profit",  f"${avg_profit:+.1f}", "#00ff88" if avg_profit >= 0 else "#ff5555"),
@@ -1438,10 +1441,10 @@ def run_ui(api: TitanBackend) -> None:
     for c in wh_cols:
         wh_tree.heading(c, text=c)
         wh_tree.column(c, width=ww[c], anchor="center")
-    wh_tree.tag_configure("ELITE", foreground="#00ff55", background="#001500")
-    wh_tree.tag_configure("VER",   foreground="#ffdd00", background="#181400")
-    wh_tree.tag_configure("PAR",   foreground="#55aaff", background="#000d1a")
-    wh_tree.tag_configure("REJ",   foreground="#554444", background="#0c0c18")
+    wh_tree.tag_configure(WalletTier.ELITE.name,    foreground="#00ff55", background="#001500")
+    wh_tree.tag_configure(WalletTier.VERIFIED.name, foreground="#ffdd00", background="#181400")
+    wh_tree.tag_configure(WalletTier.WATCH.name,    foreground="#55aaff", background="#000d1a")
+    wh_tree.tag_configure(WalletTier.REJECTED.name, foreground="#554444", background="#0c0c18")
     wh_vsb = tk.Scrollbar(tab_wallets, command=wh_tree.yview)
     wh_tree.configure(yscrollcommand=wh_vsb.set)
     wh_vsb.pack(side="right", fill="y")
@@ -1820,6 +1823,26 @@ def run_ui(api: TitanBackend) -> None:
     tab_selector = tk.Frame(nb, bg="#080810")
 
     _sel_status_var = tk.StringVar(value="")
+    _hft_enabled_var = tk.StringVar(value="ON")
+
+    def _current_hft_enabled() -> bool:
+        raw_value = _sel_fields.get("hft_enabled").get().strip().lower() if "hft_enabled" in _sel_fields else ""
+        return raw_value in {"1", "true", "yes", "on"}
+
+    def _refresh_hft_status_ui() -> None:
+        hft_on = _current_hft_enabled()
+        _hft_enabled_var.set("ON" if hft_on else "OFF")
+        app_subtitle_var.set(
+            "Follow The Wallet"
+            f" | ⚡ HFT: {_hft_enabled_var.get()}"
+            " | v10 CONVICTION-ONLY | 2+ Elites | 20-72¢ Zone | -30% Stop | ENGINE ACTIVE"
+        )
+        status_var.set(f"🟢 LIVE — Follow The Wallet | ⚡ HFT: {_hft_enabled_var.get()}")
+        _live_subtitle_var.set(
+            "Follow The Wallet"
+            f" | ⚡ HFT: {_hft_enabled_var.get()}"
+            " | BUY when wallet buys, SELL when wallet sells | connecting..."
+        )
 
     def _sel_load():
         """Read wallet_selector section from config JSON and populate widgets."""
@@ -1831,9 +1854,14 @@ def run_ui(api: TitanBackend) -> None:
             active = ws.get("active_selector", "performance")
             _sel_var.set(active)
             params = (ws.get("selectors") or {}).get(active, {})
+            _list_keys_load = {"leaderboard_periods"}
             for key, var in _sel_fields.items():
                 val = params.get(key, "")
-                var.set("" if val == "" else str(val))
+                if key in _list_keys_load and isinstance(val, list):
+                    var.set(", ".join(str(v) for v in val))
+                else:
+                    var.set("" if val == "" else str(val))
+            _refresh_hft_status_ui()
             _sel_status_var.set(f"  Loaded · active: {active}")
         except Exception as e:
             _sel_status_var.set(f"  ❌ Load failed: {e}")
@@ -1861,7 +1889,7 @@ def run_ui(api: TitanBackend) -> None:
                 "elite_min_resolved",
             }
             _list_keys = {"leaderboard_periods"}
-            _bool_keys = {"discovery_use_large_trades", "discovery_use_leaderboard"}
+            _bool_keys = {"discovery_use_large_trades", "discovery_use_leaderboard", "hft_enabled"}
             for key, var in _sel_fields.items():
                 raw_val = var.get().strip()
                 if not raw_val:
@@ -1880,6 +1908,7 @@ def run_ui(api: TitanBackend) -> None:
             with open(cfg_path, "w", encoding="utf-8") as _f:
                 _j.dump(_raw, _f, indent=4)
             _tc.reload()
+            _refresh_hft_status_ui()
             _sel_status_var.set(f"  ⏳ Reclassifying wallets…")
             log("🎯 Wallet selector config saved — reclassifying…", "INFO")
             def _reclassify():
@@ -1934,6 +1963,11 @@ def run_ui(api: TitanBackend) -> None:
 
     _PARAM_META: list[tuple[str, str, str, str]] = [
         # (field_key, label, section_header_or_"", description)
+        ("",                          "",                                "── Bot filters ──",     ""),
+        ("hft_enabled",               "HFT wallets enabled",            "",
+         "Master switch for HFT wallet classification and the HFT fast loop. "
+         "false → all wallets are classified normally (never tagged HFT), HFT spike trading stops immediately, "
+         "and the HFT fast loop thread exits. true → normal HFT detection and polling resumes."),
         ("",                          "",                                "── Discovery ──",       ""),
         ("discovery_use_large_trades","Use large trade feed",           "",
          "Calls the Polymarket trades API each cycle and collects wallets behind every large buy above min_trade_cash_discovery. "
@@ -2031,7 +2065,6 @@ def run_ui(api: TitanBackend) -> None:
         ("weight_alpha",              "Weight: Alpha/trade",            "",
          "Share driven by average profit per resolved trade, normalised against $50/trade. "
          "Directly rewards dollar edge per bet. Combined with weight_wilson this creates a score that values both consistency and magnitude of edge."),
-        ("",                          "",                                "── Bot filters ──",     ""),
         ("hft_tph_threshold",         "HFT trades/hour threshold",      "",
          "Wallets exceeding this trades-per-hour rate are tagged HFT (high-frequency trader). "
          "HFT is also triggered if avg_bet < $50 with more than 100 resolved bets. "
@@ -2053,6 +2086,8 @@ def run_ui(api: TitanBackend) -> None:
             continue
         var = tk.StringVar()
         _sel_fields[field_key] = var
+        if field_key == "hft_enabled":
+            var.trace_add("write", lambda *_args: _refresh_hft_status_ui())
         tk.Label(sel_inner, text=label, fg="#aaaacc", bg="#080810",
                  font=mono, anchor="w", width=30).grid(
             row=row_idx, column=0, sticky="w", padx=(24, 8), pady=2)
@@ -3332,15 +3367,6 @@ def run_ui(api: TitanBackend) -> None:
             if filt == "HFT"   and not p.hft:          continue
             if filt == "VIP"   and not p.vip:          continue
 
-            if p.elite:
-                tag = "ELITE"; status = "🔥 ELITE"
-            elif p.verified:
-                tag = "VER";   status = "✅ VER"
-            elif p.score >= 0.4:
-                tag = "PAR";   status = "👁 PAR"
-            else:
-                tag = "REJ";   status = "❌ REJ"
-
             item_id = wh_tree.insert("", "end", values=(
                 p.name or w[:10]+"…",
                 f"{p.score:.2f}",
@@ -3353,10 +3379,10 @@ def run_ui(api: TitanBackend) -> None:
                 f"${p.total_pnl:+,.0f}",
                 f"${p.avg_bet:,.0f}",
                 f"{p.trades_per_hour:.1f}",
-                status,
-                "⚡" if p.hft else "",
+                p.tier().display(),
+                "⚡ HFT" if p.hft else "",
                 "⭐" if p.vip else "",
-            ), tags=(tag,))
+            ), tags=(p.tier().name,))
             _whale_tree_items[str(item_id)] = (w, p)
 
     def _on_whale_double_click(event: tk.Event[tk.Misc]) -> None:
@@ -3651,7 +3677,7 @@ def run_ui(api: TitanBackend) -> None:
         if bk_start:
             sl_on = _cfg.get("STOP_LOSS_ENABLED", True)
             _live_subtitle_var.set(
-                f"Follow The tracked wallet: BUY when wallet buys, SELL when wallet sells | "
+                f"Follow The Wallet | ⚡ HFT: {_hft_enabled_var.get()} | BUY when wallet buys, SELL when wallet sells | "
                 f"Bankroll ${bk_start:.2f} | StopLoss: {'ON' if sl_on else 'OFF (wallet-exit only)'}"
             )
         n_open = len(pos)
@@ -3764,12 +3790,16 @@ def run_ui(api: TitanBackend) -> None:
     def on_boot_complete():
         threading.Thread(target=fast_price_updater, daemon=True).start()
         api.subscribe("notifications/message", lambda p: on_log_cb(p.get("msg") or p.get("data", ""), p.get("level", "INFO")))
-        api.subscribe("titan/position_open",   lambda p: on_position_open_cb(p))
-        api.subscribe("titan/position_close",  lambda p: on_position_close_cb(p["pos"], p["pnl_usdc"], p["pnl_pct"]))
+        def _pos_from_payload(p) -> "Position":
+            from titan_position import Position
+            return Position.from_dict(p) if isinstance(p, dict) else p
+
+        api.subscribe("titan/position_open",   lambda p: on_position_open_cb(_pos_from_payload(p)))
+        api.subscribe("titan/position_close",  lambda p: on_position_close_cb(_pos_from_payload(p["pos"]), p["pnl_usdc"], p["pnl_pct"]))
         api.subscribe("titan/cycle_complete",  lambda p: on_cycle_complete_cb(p["signals"], p["wallets"], p["rejects"], p["trades"]))
         api.subscribe("titan/config_updated",  on_config_updated_cb)
         root.after(1000, ui_refresh)
-        status_var.set("🟢 LIVE — Follow The wallet | HFT Spike + Conviction")
+        _refresh_hft_status_ui()
 
         # ── Attach AI panel ───────────────────────────────────────────────────────
         if AIPanel is not None:

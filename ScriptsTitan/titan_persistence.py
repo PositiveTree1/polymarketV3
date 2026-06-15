@@ -281,8 +281,7 @@ def _load_wallets_from_db() -> None:
                     wallet.name = vip_name
                 if wallet.ts < 0.0:
                     wallet.ts = 0.0
-                e = "🔥ELITE" if wallet.elite else ("✅VER" if wallet.verified else "👁WATCH")
-                S._log(f"📂 LOAD {addr[:14]}… {e} elite={wallet.elite} verified={wallet.verified} watchable={wallet.watchable}", "DIAG")
+                S._log(f"📂 LOAD {addr[:14]}… {wallet.tier()} elite={wallet.elite} verified={wallet.verified} watchable={wallet.watchable}", "DIAG")
                 S.env().wallet_cache[addr] = wallet
                 with_profile += 1
             else:

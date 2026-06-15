@@ -73,13 +73,17 @@ def _rescore_watchlist():
     if not to_score:
         return
     _log(f"♻ Re-scoring {len(to_score)} wallets…", "DATA")
+    from titan_wallet import _reclassify_in_progress as _rip
     for w in to_score:
+        if _rip.is_set():
+            _log("♻ Re-score interrupted — reclassify_all in progress", "DATA")
+            return
         try:
             get_compute_and_store_wallet(w)
             time.sleep(0.15)
         except Exception as e:
             _log(f"Re-score failed for {w}: {e}", "ERR")
-    new_elite = sum(1 for w in S.env().wallet_cache if S.env().wallet_cache[w].get("elite"))
+    new_elite = sum(1 for profile in S.env().wallet_cache.values() if profile.elite)
     _log(f"♻ Re-score done | {new_elite} elite total", "DATA")
     save_wallet_roster_async()
 
@@ -313,38 +317,51 @@ def run_loop():
 
 # ── HFT Fast Loop ─────────────────────────────────────────────────────────────
 def _hft_fast_loop():
-    """
-    Runs every 3 seconds. Polls only HFT wallets looking for outsized spike trades.
-    """
-    _log("⚡ HFT fast loop started (3s cycle)", "INFO")
+    """Runs every 3s until HFT_ENABLED turns False, then exits."""
+    S.log_important("⚡ HFT fast loop started (3s cycle)")
     _wait_for_startup_wallet_refresh("HFT fast loop")
-    _log("⚡ HFT fast loop waiting 45s for wallet_cache to populate…", "INFO")
-    time.sleep(45)
-    _log("⚡ HFT fast loop active", "INFO")
-
     _no_hft_warned = False
-    while True:
+    while C.HFT_ENABLED:
         try:
             hft_count = sum(
-                1 for addr, prof in S.env().wallet_cache.items()
+                1 for prof in S.env().wallet_cache.values()
                 if prof.is_hft()
             )
             if hft_count == 0:
                 if not _no_hft_warned:
                     _log("⚡ HFT fast loop: no HFT wallets yet — waiting for discovery", "WARN")
                     _no_hft_warned = True
-                time.sleep(_HFT_FAST_CYCLE)
-                continue
-            _no_hft_warned = False
-
-            spike_trades = fetch_hft_spike_trades()
-            if spike_trades:
-                _log(f"⚡ HFT fast loop: processing {len(spike_trades)} spike(s)…", "DIAG")
-                C.reload()
-                analyse(spike_trades, is_hft_loop=True)
+            else:
+                _no_hft_warned = False
+                if not C.HFT_ENABLED:
+                    break
+                spike_trades = fetch_hft_spike_trades()
+                if spike_trades:
+                    _log(f"⚡ HFT fast loop: processing {len(spike_trades)} spike(s)…", "DIAG")
+                    analyse(spike_trades, is_hft_loop=True)
         except Exception as e:
             import traceback
             _log(f"HFT fast loop error: {e}\n{traceback.format_exc()[:300]}", "ERR")
+        for _ in range(_HFT_FAST_CYCLE * 10):
+            if not C.HFT_ENABLED:
+                break
+            time.sleep(0.1)
+    S.log_important("⚡ HFT fast loop stopped (hft_enabled=false)")
+
+
+def _hft_watchdog():
+    """Monitors HFT_ENABLED and starts/stops _hft_fast_loop thread accordingly."""
+    _running: threading.Thread | None = None
+    C.reload()
+    while True:
+        if C.HFT_ENABLED:
+            if _running is None or not _running.is_alive():
+                S.log_important("⚡ HFT watchdog: starting HFT fast loop")
+                _running = threading.Thread(target=_hft_fast_loop, daemon=True)
+                _running.start()
+        else:
+            if _running is not None and _running.is_alive():
+                S.log_important("⚡ HFT watchdog: waiting for HFT fast loop to stop…")
         time.sleep(_HFT_FAST_CYCLE)
 
 
@@ -358,6 +375,12 @@ def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycl
     _startup_wallet_refresh_done.clear()
     load_state()
     C.reload()
+
+    from titan_wallet import WalletsCacheSrv as _WCS
+    _cache = S.env().wallet_cache
+    if isinstance(_cache, _WCS):
+        n = _cache.reclassify_all()
+        _log(f"♻ Startup reclassification: {n} wallet(s) updated to match current config", "INFO")
 
     _log("🚀 TITAN v10 — Multi-Strategy tracked wallet Mirror Engine", "INFO")
 
@@ -424,7 +447,7 @@ def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycl
 
     t_refresh = threading.Thread(target=_run_startup_wallet_refresh, daemon=True)
     t_main = threading.Thread(target=run_loop, daemon=True)
-    t_hft  = threading.Thread(target=_hft_fast_loop, daemon=True)
+    t_hft  = threading.Thread(target=_hft_watchdog, daemon=True)
     t_hb   = threading.Thread(target=_heartbeat_loop, daemon=True)
     t_refresh.start()
     t_main.start()
@@ -473,16 +496,16 @@ def get_system_snapshot() -> str:
         )
     lines += ["", "[ELITE ROSTER]"]
     elites = sorted(
-        [(w, p) for w, p in S.env().wallet_cache.items() if p.get("elite")],
-        key=lambda x: x[1].get("total_pnl", 0), reverse=True
+        [(w, p) for w, p in S.env().wallet_cache.items() if p.elite],
+        key=lambda x: x[1].total_pnl, reverse=True
     )
     for w, p in elites[:15]:
-        hft = "⚡" if p.get("hft") else ""
-        rf_tag = f" RF30d:${p.get('recent_pnl_30d',0):+.0f}" if p.get("recent_pnl_30d") is not None else ""
+        hft = "⚡" if p.hft else ""
+        rf_tag = f" RF30d:${p.recent_pnl_30d:+.0f}" if p.recent_pnl_30d is not None else ""
         lines.append(
-            f"  {hft}{p.get('name', w[:10]+'…'):<22} "
-            f"Score:{p.get('score',0):.2f}  WR:{p.get('win_rate',0)*100:.0f}%  "
-            f"PnL:${p.get('total_pnl',0):+,.0f}  TPH:{p.get('trades_per_hour',0):.1f}{rf_tag}"
+            f"  {hft}{p.name or (w[:10]+'…'):<22} "
+            f"Score:{p.score:.2f}  WR:{p.win_rate*100:.0f}%  "
+            f"PnL:${p.total_pnl:+,.0f}  TPH:{p.trades_per_hour:.1f}{rf_tag}"
         )
     lines += ["", "[LAST 15 LOGS]"]
     meaningful = [l for l in S.env().SYSTEM_LOGS[-40:]

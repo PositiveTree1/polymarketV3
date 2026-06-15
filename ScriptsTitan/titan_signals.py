@@ -8,7 +8,7 @@ import titan_state as S
 import titan_config as C
 from titan_config import *
 from titan_market import get_market, get_outcome_price, get_outcome_price_by_trade, fetch_wallet_sells, mark_cid_verified, WalletObservation, Market
-from titan_wallet import Wallet, get_whale_weekly_pnl
+from titan_wallet import Wallet, get_wallet_weekly_pnl
 
 
 @dataclass
@@ -483,7 +483,7 @@ def score_signal(s: "Signal") -> dict:
     bd["exit_penalty"] = len(s.exits_same_side) * _sc.get("exit_penalty_per_wallet", -8)
 
     weekly_pnl_total = sum(
-        get_whale_weekly_pnl(w)
+        get_wallet_weekly_pnl(w)
         for w in s.elite_ver.keys()
     )
     if weekly_pnl_total < -1.0:

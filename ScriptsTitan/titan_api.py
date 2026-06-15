@@ -960,16 +960,17 @@ class TitanAPI:
         annotations={"readOnlyHint": False, "openWorldHint": False},
     )
     def apply_selector(self) -> int:
+        import titan_config as _C
         import titan_state as _TS
         from titan_wallet import WalletsCacheSrv
+        _C.reload()
         cache = _TS.env().wallet_cache
         if not isinstance(cache, WalletsCacheSrv):
             return 0
         n = cache.reclassify_all()
-        wallets = _TS.env().wallet_cache
         self._emit("titan/cycle_complete", {
             "signals": _TS.env().LAST_SIGNALS,
-            "wallets": wallets,
+            "wallets": dict(_TS.env().wallet_cache),
             "rejects": _TS.env().LAST_REJECTS,
             "trades":  [],
         })
@@ -1105,11 +1106,11 @@ class TitanAPI:
         if str(level).upper() in {"ERR", "ERROR", "CRITICAL"}:
             self._notify_telegram("notify_error", msg)
 
-    def _on_position_open(self, pos: dict) -> None:
+    def _on_position_open(self, pos) -> None:
         self._emit("titan/position_open", pos)
         self._notify_telegram("notify_buy", pos)
 
-    def _on_position_close(self, pos: dict, pnl_usdc: float, pnl_pct: float) -> None:
+    def _on_position_close(self, pos, pnl_usdc: float, pnl_pct: float) -> None:
         payload = {"pos": pos, "pnl_usdc": pnl_usdc, "pnl_pct": pnl_pct}
         self._emit("titan/position_close", payload)
         self._notify_telegram("notify_sell", pos, pnl_usdc, pnl_pct)
