@@ -477,17 +477,8 @@ def run_ui(api: TitanBackend) -> None:
     sig_vsb = tk.Scrollbar(tab_live, command=sig_tree.yview)
     sig_tree.configure(yscrollcommand=sig_vsb.set)
     sig_vsb.pack(side="right", fill="y")
-    sig_tree.pack(fill="x", padx=4, pady=(4,2))
+    sig_tree.pack(fill="both", expand=True, padx=4, pady=(4,2))
     _signal_tree_items: dict[str, Signal] = {}
-    
-    lf = tk.Frame(tab_live, bg="#080810")
-    lf.pack(fill="both", expand=True, padx=4)
-    sig_log = tk.Text(lf, bg="#060610", fg="#44ff44", font=mono,
-                      selectbackground="#1a2a4a", wrap="word")
-    sb_ = tk.Scrollbar(lf, command=sig_log.yview, bg="#0d0d1a")
-    sig_log.configure(yscrollcommand=sb_.set)
-    sb_.pack(side="right", fill="y")
-    sig_log.pack(fill="both", expand=True)
     
     _live_subtitle_var = tk.StringVar(value="Follow The Wallet: BUY when wallet buys, SELL when wallet sells | connecting...")
     tk.Label(tab_live, textvariable=_live_subtitle_var,
@@ -514,8 +505,6 @@ def run_ui(api: TitanBackend) -> None:
 
     tk.Button(sig_btn_bar, textvariable=_sig_hist_btn_var, bg="#1a1a00", fg="#ffcc44",
               font=mono_sm, command=_toggle_signal_history).pack(side="left", padx=4, pady=2)
-    tk.Button(sig_btn_bar, textvariable=_debug_btn_var, bg="#1a1320", fg="#d8b4ff",
-              font=mono_sm, command=_toggle_debug_mode).pack(side="left", padx=4, pady=2)
     tk.Label(sig_btn_bar, text="Current cycle or recent DB history", fg="#334455",
              bg="#080810", font=mono_sm).pack(side="left", padx=8)
     
@@ -1650,8 +1639,6 @@ def run_ui(api: TitanBackend) -> None:
         "SIG":   "#ffdd44",
         "ALERT": "#00ff55",
     }
-    for tag_name, color in LOG_COLORS.items():
-        sig_log.tag_configure(tag_name, foreground=color)
 
     def _is_scrolled_to_end(widget: tk.Text) -> bool:
         try:
@@ -1679,17 +1666,17 @@ def run_ui(api: TitanBackend) -> None:
         try:
             if level == "DEBUG" and not _debug_mode[0]:
                 return
-            sig_log.configure(state="normal")
-            was_at_end = _is_scrolled_to_end(sig_log)
+            live_log.configure(state="normal")
+            was_at_end = _is_scrolled_to_end(live_log)
             ts  = datetime.now().strftime("%H:%M:%S")
             tag = level if level in LOG_COLORS else "INFO"
-            sig_log.insert(tk.END, f"[{ts}] {msg}\n", tag)
-            line_count = int(sig_log.index("end-1c").split(".")[0])
+            live_log.insert(tk.END, f"[{ts}] {msg}\n", tag)
+            line_count = int(live_log.index("end-1c").split(".")[0])
             if line_count > 3000:
-                sig_log.delete("1.0", "600.0")
+                live_log.delete("1.0", "600.0")
             if was_at_end:
-                sig_log.see(tk.END)
-            sig_log.configure(state="disabled")
+                live_log.see(tk.END)
+            live_log.configure(state="disabled")
         except Exception:
             pass
 
@@ -1826,9 +1813,8 @@ def run_ui(api: TitanBackend) -> None:
              text="Copies everything: positions · signals · elites · trades · exits · raw logs.",
              fg="#445566", bg="#0d0d1a", font=mono_sm).pack(side="left")
     
-    log_paned = tk.PanedWindow(tab_log, orient=tk.HORIZONTAL, bg="#0d0d1a",
-                               sashwidth=4, sashrelief="flat")
-    log_paned.pack(fill="both", expand=True, padx=4, pady=4)
+    log_nb = ttk.Notebook(tab_log)
+    log_nb.pack(fill="both", expand=True, padx=4, pady=4)
 
     def _make_log_listbox(parent: tk.Frame, fg: str) -> tk.Listbox:
         vsb = ttk.Scrollbar(parent, orient="vertical")
@@ -1847,17 +1833,32 @@ def run_ui(api: TitanBackend) -> None:
         lb.pack(side="left", fill="both", expand=True)
         return lb
 
-    srv_frame = tk.Frame(log_paned, bg="#0d0d1a")
+    live_frame = tk.Frame(log_nb, bg="#0d0d1a")
+    live_hdr = tk.Frame(live_frame, bg="#0d0d1a")
+    live_hdr.pack(fill="x", padx=2, pady=(2,0))
+    tk.Label(live_hdr, text="LIVE", bg="#0d0d1a", fg="#445566", font=mono_sm,
+             anchor="w").pack(side="left")
+    live_log = tk.Text(live_frame, bg="#060610", fg="#44ff44", font=mono,
+                       selectbackground="#1a2a4a", wrap="word")
+    live_vsb = tk.Scrollbar(live_frame, command=live_log.yview, bg="#0d0d1a")
+    live_log.configure(yscrollcommand=live_vsb.set)
+    live_vsb.pack(side="right", fill="y")
+    live_log.pack(fill="both", expand=True)
+    for tag_name, color in LOG_COLORS.items():
+        live_log.tag_configure(tag_name, foreground=color)
+    log_nb.add(live_frame, text="Live")
+
+    srv_frame = tk.Frame(log_nb, bg="#0d0d1a")
     tk.Label(srv_frame, text="SERVER", bg="#0d0d1a", fg="#445566", font=mono_sm,
              anchor="w").pack(fill="x", padx=2)
     full_log = _make_log_listbox(srv_frame, "#66ffaa")
-    log_paned.add(srv_frame, stretch="always")
+    log_nb.add(srv_frame, text="Server")
 
-    cli_frame = tk.Frame(log_paned, bg="#0d0d1a")
+    cli_frame = tk.Frame(log_nb, bg="#0d0d1a")
     tk.Label(cli_frame, text="CLIENT", bg="#0d0d1a", fg="#445566", font=mono_sm,
              anchor="w").pack(fill="x", padx=2)
     client_log = _make_log_listbox(cli_frame, "#aaddff")
-    log_paned.add(cli_frame, stretch="always")
+    log_nb.add(cli_frame, text="Client")
 
     _CLIENT_LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "Logs", "titan_client.log")
     _client_log_mtime: list[float] = [0.0]
