@@ -223,6 +223,46 @@ def run_ui(api: TitanBackend) -> None:
             _log_ui_error("wallet cache", e)
             return {}
 
+    def _ensure_wallet_in_cache(wallet_addr: str) -> "Wallet | None":
+        wallet_key = wallet_addr.lower()
+        cached_wallet = _wallet_cache().get(wallet_key)
+        if cached_wallet is not None:
+            return cached_wallet
+        log(f"[wallet cache] wallet {wallet_key} missing locally; attempting recovery", "DEBUG")
+        try:
+            fetched_wallets = api.get_tracked_wallets(search=wallet_key)
+        except Exception as e:
+            _log_ui_error(f"fetch wallet {wallet_key}", e, "WARN")
+            return None
+        for fetched_wallet in fetched_wallets:
+            fetched_addr = str(fetched_wallet.addr).lower()
+            _wallet_cache()[fetched_addr] = fetched_wallet
+        if not fetched_wallets:
+            log(f"[wallet cache] recovery failed for {wallet_key}: backend returned no wallet match", "WARN")
+            return None
+        recovered_wallet = _wallet_cache().get(wallet_key)
+        if recovered_wallet is None:
+            log(f"[wallet cache] recovery failed for {wallet_key}: backend returned results but target wallet was not cached", "WARN")
+            return None
+        log(f"[wallet cache] recovered wallet {wallet_key} into local cache", "INFO")
+        return recovered_wallet
+
+    def _warm_position_wallet_cache(pos: Position) -> None:
+        seen_wallets: set[str] = set()
+        missing_wallets: list[str] = []
+        for wallet_addr in pos.elite_wallets + pos.tracked_wallets:
+            wallet_key = str(wallet_addr).lower()
+            if not wallet_key or wallet_key in seen_wallets:
+                continue
+            seen_wallets.add(wallet_key)
+            if _wallet_cache().get(wallet_key) is None:
+                missing_wallets.append(wallet_key)
+        if not missing_wallets:
+            return
+        log(f"[position detail] warming wallet cache for {len(missing_wallets)} wallet(s)", "DEBUG")
+        for wallet_addr in missing_wallets:
+            _ensure_wallet_in_cache(wallet_addr)
+
 
     root = tk.Tk()
 
@@ -514,6 +554,7 @@ def run_ui(api: TitanBackend) -> None:
     pos_tree.tag_configure("LOSS",    foreground="#ff5555", background="#1a0000")
     pos_tree.tag_configure("HOLD",    foreground="#ffaa00", background="#1a1400")
     pos_tree.tag_configure("NEUTRAL", foreground="#aaaaaa", background="#0c0c18")
+    pos_tree.tag_configure("DEAD",    foreground="#fff1f1", background="#7a0018")
     pos_tree.tag_configure("CLOSED_WIN",  foreground="#007733", background="#000f00")
     pos_tree.tag_configure("CLOSED_LOSS", foreground="#882222", background="#0f0000")
     
@@ -531,6 +572,7 @@ def run_ui(api: TitanBackend) -> None:
         win.configure(bg="#060615")
         win.geometry("820x760")
         win.resizable(True, True)
+        _warm_position_wallet_cache(pos)
 
         mono10  = font.Font(family="Courier", size=10)
         mono9   = font.Font(family="Courier", size=9)
@@ -544,14 +586,14 @@ def run_ui(api: TitanBackend) -> None:
         bet      = pos.bet
         pnl_pct  = (cur - entry) / max(entry, 0.001) * 100
         pnl_usd  = (cur - entry) * shares
-        end_ts   = pos.exit_ts
+        end_ts   = pos.exit_ts if pos.exit_ts > 0 else time.time()
         hold_min = (end_ts - pos.entry_ts) / 60 if pos.entry_ts else 0.0
         title    = pos.title
         outcome  = pos.outcome
         cid      = pos.cid
         slug     = pos.slug or pos.event_slug
-        entry_ts_text = pos.entry_dt.strftime("%Y-%m-%d %H:%M:%S") if pos.entry_dt else ""
-        exit_ts_text : str = pos.exit_dt.strftime("%Y-%m-%d %H:%M:%S") if pos.exit_dt else ""
+        entry_ts_text = pos.entry_dt.strftime("%Y-%m-%d %H:%M:%S") if pos.entry_ts > 0 else ""
+        exit_ts_text : str = pos.exit_dt.strftime("%Y-%m-%d %H:%M:%S") if pos.exit_ts > 0 else ""
         price_label = "Exit Price" if pos.exit_ts else "Current Price"
 
         # Header
@@ -561,14 +603,29 @@ def run_ui(api: TitanBackend) -> None:
         tier_icon = "💎" if pos.is_conviction else ("⚡" if pos.is_hft else "")
         tk.Label(hf, text=f"{tier_icon}[{pos.tier}]  {title}",
                  fg="#00aaff", bg="#0a0a20", font=bold11, wraplength=780, justify="left").pack(anchor="w", padx=12)
+        if pos.dead_wallets:
+            dead_wallet_names = [
+                (p.name if (p := _wallet_cache().get(str(wallet_addr).lower())) else None) or str(wallet_addr)[:16] + "…"
+                for wallet_addr in pos.dead_wallets[:2]
+            ]
+            dead_wallet_text = ", ".join(dead_wallet_names)
+            if len(pos.dead_wallets) > 2:
+                dead_wallet_text += f" +{len(pos.dead_wallets) - 2}"
+            tk.Label(hf, text=f"☠ DEAD WALLET  EXIT TRIGGER BLIND  {dead_wallet_text}",
+                     fg="#fff1f1", bg="#7a0018", font=font.Font(family="Courier", size=11, weight="bold"),
+                     padx=10, pady=4, wraplength=780, justify="left").pack(anchor="w", padx=12, pady=(0, 4))
+        tk.Label(hf, text=f"OUTCOME: {outcome or '—'}",
+                 fg="#fff4b0", bg="#4a2a00", font=font.Font(family="Courier", size=11, weight="bold"),
+                 padx=10, pady=4,
+                 wraplength=780, justify="left").pack(anchor="w", padx=12, pady=(4, 4))
         if entry_ts_text:
             tk.Label(hf, text=f"ENTRY TIME  {entry_ts_text}",
                      fg="#ffdd44", bg="#0a0a20", font=bold11, wraplength=780, justify="left").pack(anchor="w", padx=12, pady=(2,0))
 
-        if not exit_ts_text:
+        if exit_ts_text:
             tk.Label(hf, text=f"EXIT TIME   {exit_ts_text}",
                      fg="#ff8844", bg="#0a0a20", font=bold11, wraplength=780, justify="left").pack(anchor="w", padx=12, pady=(2,0))
-        tk.Label(hf, text=f"Side: {outcome}   Score: {pos.score:.0f}pts   CID: {cid[:30]}…",
+        tk.Label(hf, text=f"Score: {pos.score:.0f}pts   CID: {cid[:30]}…",
                  fg="#556677", bg="#0a0a20", font=mono9).pack(anchor="w", padx=12)
 
         # Stats grid
@@ -581,6 +638,14 @@ def run_ui(api: TitanBackend) -> None:
             tk.Label(f, text=label, fg="#445566", bg="#0d0d20", font=mono9, pady=2).pack()
             tk.Label(f, text=value, fg=color, bg="#0d0d20", font=bold9, pady=2).pack()
 
+        hold_label = f"{hold_min:.0f} min"
+        if hold_min >= 60:
+            total_minutes = max(int(hold_min), 0)
+            hold_days = total_minutes // (24 * 60)
+            hold_hours = (total_minutes % (24 * 60)) // 60
+            hold_minutes = total_minutes % 60
+            hold_label = f"{hold_days}:{hold_hours:02d}:{hold_minutes:02d}"
+
         stats_data = [
             ("Wallet Entry",   f"${w_entry:.4f}",      "#ffaa44"),
             ("Our Entry",     f"${entry:.4f}",         "#aaaaff"),
@@ -589,7 +654,7 @@ def run_ui(api: TitanBackend) -> None:
             ("P&L %",         f"{pnl_pct:+.2f}%",      pnl_color),
             ("Bet Size",      f"${bet:.2f}",           "#00aaff"),
             ("Shares",        f"{shares:.2f}",         "#aaaacc"),
-            ("Held",          f"{hold_min:.0f} min",   "#888888"),
+            ("Held",          hold_label,              "#888888"),
             ("Liq",           f"${pos.liq:,.0f}",      "#446688"),
             ("Score",         f"{pos.score:.0f}",      "#ffdd44"),
             ("Tier",          pos.tier,                "#ff8844"),
@@ -611,22 +676,68 @@ def run_ui(api: TitanBackend) -> None:
                 continue
             seen_wallets.add(wallet_key)
             elite_wallets.append(str(wallet_addr))
-        elite_names = pos.elite_names
+        wallet_cols = ("name", "cash", "wr", "pnl", "score")
+        wallet_tree = ttk.Treeview(wf, columns=wallet_cols, show="headings", height=3)
+        wallet_tree.heading("name", text="Name")
+        wallet_tree.heading("cash", text="Cash")
+        wallet_tree.heading("wr", text="WR")
+        wallet_tree.heading("pnl", text="PnL")
+        wallet_tree.heading("score", text="Score")
+        wallet_tree.column("name", width=250, anchor="w", stretch=True)
+        wallet_tree.column("cash", width=90, anchor="e", stretch=False)
+        wallet_tree.column("wr", width=70, anchor="e", stretch=False)
+        wallet_tree.column("pnl", width=90, anchor="e", stretch=False)
+        wallet_tree.column("score", width=70, anchor="e", stretch=False)
+        wallet_tree.pack(fill="x", padx=4, pady=(0,4))
+
+        wallet_names = pos.wallet_names
+        wallet_cash = pos.wallet_buy_cash
+        wallet_tree_addrs: list[str] = []
         for i, w_addr in enumerate(elite_wallets[:8]):
-            prof  = _wallet_cache().get(w_addr)
-            name  = (elite_names[i] if i < len(elite_names) else None) or (prof.name if prof else w_addr[:16]+"…")
-            hft_t = "⚡" if prof and prof.hft else ""
-            wr    = (prof.win_rate if prof else 0) * 100
-            pnl_w = prof.total_pnl if prof else 0
-            tk.Label(wf, text=f"  {hft_t}{name:<22} WR:{wr:.0f}%  PnL:${pnl_w:+,.0f}  Score:{prof.score if prof else 0:.2f}",
-                     fg="#00cc88", bg="#060615", font=mono9).pack(anchor="w", padx=12)
+            wallet_lookup = w_addr.lower()
+            prof = _wallet_cache().get(wallet_lookup)
+            if prof is not None and prof.dead:
+                name = prof.name or (w_addr[:16] + "…")
+            else:
+                name = (wallet_names[i] if i < len(wallet_names) else None) or (prof.name if prof else w_addr[:16] + "…")
+            wr = (prof.win_rate if prof else 0.0) * 100
+            pnl_w = prof.total_pnl if prof else 0.0
+            cash_value = wallet_cash.get(wallet_lookup, wallet_cash.get(w_addr, 0.0))
+            wallet_tree.insert(
+                "",
+                "end",
+                values=(
+                    f"{'☠ ' if prof and prof.dead else ''}{'⚡' if prof and prof.hft else ''}{name}",
+                    f"${cash_value:,.0f}",
+                    f"{wr:.0f}%",
+                    f"${pnl_w:+,.0f}",
+                    f"{prof.score if prof else 0.0:.2f}",
+                ),
+            )
+            wallet_tree_addrs.append(wallet_lookup)
+
+        def _open_selected_wallet(event: tk.Event[tk.Misc]) -> None:
+            item_id = wallet_tree.identify_row(event.y)
+            if not item_id:
+                return
+            idx = wallet_tree.index(item_id)
+            if idx >= len(wallet_tree_addrs):
+                return
+            addr = wallet_tree_addrs[idx]
+            prof = _ensure_wallet_in_cache(addr)
+            if prof is None:
+                log(f"[position detail] wallet recovery failed for {addr}", "WARN")
+                return
+            show_whale_detail(addr, prof)
+
+        wallet_tree.bind("<Double-1>", _open_selected_wallet)
     
         tf = tk.Frame(win, bg="#060615")
         tf.pack(fill="x", padx=8, pady=(6, 0))
         tk.Label(tf, text="TRADES", fg="#00ff88", bg="#060615", font=bold9).pack(anchor="w", padx=4, pady=(4,2))
 
         trade_cols = ("type", "time", "price", "shares", "bet", "pnl")
-        trade_tree = ttk.Treeview(tf, columns=trade_cols, show="headings", height=3)
+        trade_tree = ttk.Treeview(tf, columns=trade_cols, show="headings", height=2)
         trade_tree.heading("type", text="Type")
         trade_tree.heading("time", text="Time")
         trade_tree.heading("price", text="Price")
@@ -1494,6 +1605,7 @@ def run_ui(api: TitanBackend) -> None:
     for c in wh_cols:
         wh_tree.heading(c, text=c)
         wh_tree.column(c, width=ww[c], anchor="center")
+    wh_tree.tag_configure("DEAD_WALLET",           foreground="#fff1f1", background="#7a0018")
     wh_tree.tag_configure(WalletTier.ELITE.name,    foreground="#00ff55", background="#001500")
     wh_tree.tag_configure(WalletTier.VERIFIED.name, foreground="#ffdd00", background="#181400")
     wh_tree.tag_configure(WalletTier.WATCH.name,    foreground="#55aaff", background="#000d1a")
@@ -3467,10 +3579,16 @@ def run_ui(api: TitanBackend) -> None:
                     ws_str = "→ Holding"
                     tag    = "NEUTRAL"
 
-                elite_names = pos.elite_names or [
-                    (p.name if (p := _wallet_cache().get(w)) else None) or w[:10]+"…"
-                    for w in pos.elite_wallets[:3]
-                ]
+                elite_names: list[str] = []
+                for index, wallet_addr in enumerate(pos.elite_wallets[:3]):
+                    wallet_key = str(wallet_addr).lower()
+                    prof = _wallet_cache().get(wallet_key)
+                    if prof is not None and prof.dead:
+                        elite_names.append(prof.name or wallet_key[:10]+"…")
+                    elif index < len(pos.elite_names) and pos.elite_names[index]:
+                        elite_names.append(str(pos.elite_names[index]))
+                    else:
+                        elite_names.append((prof.name if prof else None) or wallet_key[:10]+"…")
                 whale_str = ", ".join(elite_names[:2])
                 if pos.n_confluence:
                     whale_str += f" +{pos.n_confluence}conf"
@@ -3481,6 +3599,10 @@ def run_ui(api: TitanBackend) -> None:
                 conv_tag  = "💎" if pos.is_conviction else ""
                 title_str = f"{conv_tag}{hft_tag}{pos.title}"
                 outcome_str = pos.outcome
+                if pos.dead_wallets:
+                    ws_str = "☠ DEAD WALLET - NO EXIT SIGNAL"
+                    tag = "DEAD"
+                    title_str = f"☠ {title_str}"
 
                 iid = pos_tree.insert("", "end", values=(
                     title_str[:48],
@@ -3516,20 +3638,22 @@ def run_ui(api: TitanBackend) -> None:
         _whale_tree_items.clear()
         def _wallet_sort_key(item: tuple[str, "Wallet"]) -> tuple[int, float]:
             p = item[1]
-            if p.elite:     tier_rank = 0
+            if p.dead:        tier_rank = -1
+            elif p.elite:     tier_rank = 0
             elif p.verified: tier_rank = 1
             elif p.watchable: tier_rank = 2
             else:            tier_rank = 3
             return (tier_rank, -p.score)
 
         for w, p in sorted(all_wallets.items(), key=_wallet_sort_key):
-            if p.total_pnl < 0 and not p.elite:      continue
-            if p.score <= 0.10 and not p.watchable:   continue
+            if p.total_pnl < 0 and not (p.dead or p.elite or p.watchable): continue
+            if p.score <= 0.10 and not (p.dead or p.watchable):   continue
             if filt == "ELITE" and not p.elite:        continue
             if filt == "VER"   and not p.verified:     continue
             if filt == "HFT"   and not p.hft:          continue
             if filt == "VIP"   and not p.vip:          continue
 
+            row_tag = "DEAD_WALLET" if p.dead else p.tier().name
             item_id = wh_tree.insert("", "end", values=(
                 p.name or w[:10]+"…",
                 f"{p.score:.2f}",
@@ -3542,10 +3666,10 @@ def run_ui(api: TitanBackend) -> None:
                 f"${p.total_pnl:+,.0f}",
                 f"${p.avg_bet:,.0f}",
                 f"{p.trades_per_hour:.1f}",
-                p.tier().display(),
+                "DEAD WALLET" if p.dead else p.tier().display(),
                 "⚡ HFT" if p.hft else "",
                 "⭐" if p.vip else "",
-            ), tags=(p.tier().name,))
+            ), tags=(row_tag,))
             _whale_tree_items[str(item_id)] = (w, p)
 
     def _on_whale_double_click(event: tk.Event[tk.Misc]) -> None:

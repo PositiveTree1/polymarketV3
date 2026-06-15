@@ -346,9 +346,14 @@ class TitanClient:
         result = self._call_tool("apply_selector")
         return int(result) if isinstance(result, (int, float)) else 0
 
-    def get_tracked_wallets(self) -> list["Wallet"]:
+    def get_tracked_wallets(self, search: str = "", tier: str = "") -> list["Wallet"]:
         from titan_wallet import Wallet as _Wallet
-        raw = self._call_tool("get_tracked_wallets")
+        params: dict[str, str] = {}
+        if search:
+            params["search"] = search
+        if tier:
+            params["tier"] = tier
+        raw = self._call_tool("get_tracked_wallets", params or None)
         if isinstance(raw, list):
             return [_Wallet.from_db(d["wallet"], d) if isinstance(d, dict) else d for d in raw]
         return []

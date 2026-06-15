@@ -297,6 +297,10 @@ class Position:
         return dict(self.buy_trade.wallet_buy_cash)
 
     @property
+    def dead_wallets(self) -> list[str]:
+        return list(self.buy_trade.dead_wallets)
+
+    @property
     def n_confluence(self) -> int:
         return int(self.buy_trade.n_confluence)
     

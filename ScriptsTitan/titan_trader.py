@@ -607,6 +607,7 @@ def auto_trade(signals: list[Signal], wallet_exits: dict) -> list[tuple[str, str
                 (p.name if (p := S.env().wallet_cache.get(w)) else None) or w[:10]+"…"
                 for w in pos.elite_wallets[:3]
             ],
+            dead_wallets=pos.dead_wallets,
             avg_entry=pos.avg_entry or pos.entry_price,
             market_url=pos.market_url,
             audit=exit_audit,
@@ -836,6 +837,7 @@ def auto_trade(signals: list[Signal], wallet_exits: dict) -> list[tuple[str, str
             stop_loss_pct=sig_stop_loss,
             elite_wallets=elite_wallet_addrs,
             wallet_names=elite_names,
+            dead_wallets=[],
             wallet_buy_cash=wallet_buy_cash,
             avg_entry=sig.avg_entry,
             score=sig.score,

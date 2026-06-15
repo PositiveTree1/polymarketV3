@@ -4,6 +4,7 @@ Saves: titan_state.json, titan_state.db
 """
 
 import os, json, threading, time
+from dataclasses import replace
 from datetime import datetime
 from typing import cast
 import titan_state as S
@@ -53,11 +54,16 @@ def save_wallet_roster_async():
 
 
 def load_state() -> None:
+    startup_t0 = time.perf_counter()
+    S.log_important("Startup recovery: begin | phase=state_load")
     DB.init_db(STATE_DB)
+    S.log_important("Startup recovery: db ready | phase=state_load")
     S.market_cache.load_all_from_db(force=True)
+    S.log_important(f"Startup recovery: market cache loaded | phase=state_load | markets={len(S.market_cache)}")
     prices_srv = PricesCacheSrv()
     prices_srv.init_db(STATE_DB)
     titan_prices.PRICES = prices_srv
+    S.log_important("Startup recovery: price cache ready | phase=state_load")
     wallets_srv = WalletsCacheSrv()
     S.env().wallet_cache = wallets_srv
     S._shared_wallet_cache = wallets_srv
@@ -65,7 +71,13 @@ def load_state() -> None:
     pruned = DB.purge_non_watchable(keep_seed=set(_SEEDS))
     if pruned:
         S._log(f"🗑 Pruned {pruned} non-watchable wallet stubs from DB", "INFO")
+    S.log_important("Startup recovery: loading wallet roster from DB | phase=state_load")
     _load_wallets_from_db()
+    S.log_important(
+        f"Startup recovery: wallet roster loaded | phase=state_load | wallets={len(S.env().wallet_cache)} "
+        f"watchable={len(S.get_watchlist())}"
+    )
+    S.log_important("Startup recovery: loading trading state | phase=state_load")
     ri = _load_trading_state()
     wl = S.get_watchlist()
     line = (
@@ -75,9 +87,11 @@ def load_state() -> None:
         f"equity_pts={ri['equity_points']} cooldowns={ri['cooldowns']}"
     )
     S.log_important(line)
+    S.log_important(f"Startup recovery: state_load complete | elapsed={time.perf_counter() - startup_t0:.2f}s")
 
 
 def _load_trading_state() -> dict[str, int]:
+    phase_t0 = time.perf_counter()
     recovery_info = {
         "watchlist": 0,
         "trades": 0,
@@ -112,15 +126,20 @@ def _load_trading_state() -> dict[str, int]:
         loaded_stats = DB.load_trade_stats()
         if loaded_stats is not None:
             env.trade_stats = cast(S.TradeStats, loaded_stats)
+            S.log_important("Startup recovery: trade stats restored from DB | phase=trading_state")
         else:
+            S.log_important("Startup recovery: rebuilding trade stats from trade history | phase=trading_state")
             _rebuild_trade_stats(env)
             DB.upsert_trade_stats(env.trade_stats)
 
         from titan_position import group_trades_by_position, build_position_from_trades
+        S.log_important("Startup recovery: loading trade history from DB | phase=trading_state")
         all_trades = DB.load_trade_history(limit=5000)
         recovery_info["trades"] = len(all_trades)
+        S.log_important(f"Startup recovery: trade history loaded | phase=trading_state | trades={len(all_trades)}")
         groups = group_trades_by_position(all_trades)
         env.open_positions = {}
+        S.log_important(f"Startup recovery: rebuilding open positions | phase=trading_state | groups={len(groups)}")
         for bucket_trades in groups.values():
             has_sell = any(t.type == "SELL" for t in bucket_trades)
             if has_sell:
@@ -134,6 +153,30 @@ def _load_trading_state() -> dict[str, int]:
         recovery_info["open_positions"] = n_pos
         recovery_info["closed_trades"] = env.trade_stats.sell_count
         recovery_info["cooldowns"] = len(env.cooldown_cids)
+        linked_position_wallets: list[str] = []
+        preferred_position_wallet_names: dict[str, str] = {}
+        for pos in env.open_positions.values():
+            linked_position_wallets.extend(pos.elite_wallets)
+            linked_position_wallets.extend(pos.tracked_wallets)
+            for index, wallet_addr in enumerate(pos.elite_wallets):
+                wallet_key = str(wallet_addr).lower()
+                if index < len(pos.wallet_names):
+                    preferred_position_wallet_names[wallet_key] = str(pos.wallet_names[index])
+        S.log_important(
+            f"Startup recovery: hydrating open-position wallets | phase=trading_state | "
+            f"positions={n_pos} linked_wallets={len(linked_position_wallets)}"
+        )
+        dead_position_wallets = ensure_linked_wallets_cached(
+            linked_position_wallets,
+            preferred_names=preferred_position_wallet_names,
+            reason="startup open positions",
+        )
+        dead_position_set = {wallet_addr.lower() for wallet_addr in dead_position_wallets}
+        for pos in env.open_positions.values():
+            pos.buy_trade.dead_wallets = [
+                wallet_addr for wallet_addr in pos.elite_wallets + pos.tracked_wallets
+                if str(wallet_addr).lower() in dead_position_set
+            ]
         if n_pos:
             S._log(f"📂 Rebuilt {n_pos} open position(s) from DB trades", "INFO")
         else:
@@ -146,6 +189,7 @@ def _load_trading_state() -> dict[str, int]:
             "INFO"
         )
 
+        S.log_important("Startup recovery: loading equity history | phase=trading_state")
         db_equity = DB.load_equity_history()
         if db_equity and len(db_equity) >= 2:
             env.equity_history = db_equity
@@ -168,6 +212,11 @@ def _load_trading_state() -> dict[str, int]:
             else:
                 _rebuild_equity_from_trades(env)
                 recovery_info["equity_points"] = len(env.equity_history)
+        S.log_important(
+            f"Startup recovery: trading_state complete | open_positions={n_pos} "
+            f"dead_wallets={len(dead_position_wallets)} equity_points={recovery_info['equity_points']} "
+            f"elapsed={time.perf_counter() - phase_t0:.2f}s"
+        )
 
     except Exception as e:
         S._log(f"⚠ State load failed ({e}) — fresh start", "WARN")
@@ -209,6 +258,104 @@ def _rebuild_equity_from_trades(env):
 
 def _make_stub(addr: str, detail: str) -> Wallet:
     return Wallet.make_stub(addr, detail)
+
+
+def _make_dead_wallet(addr: str, preferred_name: str, reason: str, base_wallet: Wallet | None = None) -> Wallet:
+    display_name = preferred_name.strip()
+    if not display_name:
+        if base_wallet is not None and base_wallet.name and not str(base_wallet.name).upper().startswith("DEAD WALLET"):
+            display_name = str(base_wallet.name)
+        else:
+            display_name = addr[:10] + "…"
+    dead_name = display_name if display_name.upper().startswith("DEAD WALLET") else f"DEAD WALLET {display_name}"
+    base = base_wallet if base_wallet is not None else Wallet.make_stub(addr, "dead_wallet", watchable=True)
+    dead_wallet = replace(
+        base,
+        name=dead_name,
+        ts=time.time(),
+        watchable=True,
+        verified=False,
+        elite=False,
+        dead=True,
+        detail=f"DEAD WALLET: {reason}",
+        fail_reasons=["dead_wallet"],
+    )
+    S.env().wallet_cache[addr] = dead_wallet
+    DB.upsert_wallet_profile(addr, dead_wallet.to_db_dict())
+    return dead_wallet
+
+
+def ensure_linked_wallets_cached(
+    wallet_addrs: list[str],
+    *,
+    preferred_names: dict[str, str] | None = None,
+    reason: str,
+) -> list[str]:
+    from titan_wallet import get_compute_and_store_wallet
+
+    stats = {
+        "requested": 0,
+        "recovered": 0,
+        "pinned_watchable": 0,
+        "dead": 0,
+        "failed": 0,
+    }
+    dead_wallets: list[str] = []
+    seen_wallets: set[str] = set()
+    for wallet_addr in wallet_addrs:
+        wallet_key = str(wallet_addr).lower().strip()
+        if not wallet_key or wallet_key in seen_wallets:
+            continue
+        seen_wallets.add(wallet_key)
+        preferred_name = ""
+        if preferred_names is not None:
+            preferred_name = str(preferred_names.get(wallet_key) or "")
+        cached_wallet = S.env().wallet_cache.get(wallet_key)
+        if cached_wallet is not None:
+            if cached_wallet.dead:
+                dead_wallets.append(wallet_key)
+                stats["dead"] += 1
+                continue
+            if not cached_wallet.watchable:
+                pinned_wallet = replace(cached_wallet, watchable=True)
+                S.env().wallet_cache[wallet_key] = pinned_wallet
+                DB.upsert_wallet_profile(wallet_key, pinned_wallet.to_db_dict())
+                stats["pinned_watchable"] += 1
+                S._log(f"[wallet recovery] {reason}: pinned cached wallet {wallet_key} as watchable", "INFO")
+            continue
+        stats["requested"] += 1
+        try:
+            wallet = get_compute_and_store_wallet(wallet_key)
+        except Exception as e:
+            S._log(f"[wallet recovery] {reason}: failed to hydrate {wallet_key}: {e}", "WARN")
+            _make_dead_wallet(wallet_key, preferred_name, reason)
+            dead_wallets.append(wallet_key)
+            stats["dead"] += 1
+            stats["failed"] += 1
+            continue
+        stats["recovered"] += 1
+        if wallet.dead:
+            dead_wallets.append(wallet_key)
+            stats["dead"] += 1
+            continue
+        if "no_data" in wallet.fail_reasons:
+            _make_dead_wallet(wallet_key, preferred_name, reason, wallet)
+            dead_wallets.append(wallet_key)
+            stats["dead"] += 1
+            continue
+        if not wallet.watchable:
+            pinned_wallet = replace(wallet, watchable=True)
+            S.env().wallet_cache[wallet_key] = pinned_wallet
+            DB.upsert_wallet_profile(wallet_key, pinned_wallet.to_db_dict())
+            stats["pinned_watchable"] += 1
+            S._log(f"[wallet recovery] {reason}: pinned {wallet_key} as watchable", "INFO")
+    if stats["requested"]:
+        S._log(
+            f"[wallet recovery] {reason}: requested={stats['requested']} recovered={stats['recovered']} "
+            f"pinned={stats['pinned_watchable']} dead={stats['dead']} failed={stats['failed']}",
+            "INFO",
+        )
+    return dead_wallets
 
 
 def _refresh_elite_ver_wallets() -> None:

@@ -96,6 +96,7 @@ class Wallet:
     hft:                bool
     vip:                bool
     sports_bot:         bool
+    dead:               bool
 
     # ── recent form ───────────────────────────────────────────────────────────
     recent_pnl_30d:     float | None
@@ -263,6 +264,7 @@ class Wallet:
             "hft":                  self.hft,
             "vip":                  self.vip,
             "sports_bot":           self.sports_bot,
+            "dead":                 self.dead,
             "recent_pnl_30d":       self.recent_pnl_30d,
             "recent_pnl_7d":        self.recent_pnl_7d,
             "recent_ts":            self.recent_ts,
@@ -310,6 +312,7 @@ class Wallet:
             hft=bool(d.get("hft") or False),
             vip=bool(d.get("vip") or False),
             sports_bot=bool(d.get("sports_bot") or False),
+            dead=bool(d.get("dead") or False),
             recent_pnl_30d=d.get("recent_pnl_30d"),
             recent_pnl_7d=d.get("recent_pnl_7d"),
             recent_ts=float(d.get("recent_ts") or 0.0),
@@ -351,6 +354,7 @@ class Wallet:
             hft=False,
             vip=is_vip,
             sports_bot=False,
+            dead=False,
             recent_pnl_30d=None,
             recent_pnl_7d=None,
             recent_ts=0.0,
@@ -933,7 +937,7 @@ def get_compute_and_store_wallet(wallet: str) -> Wallet:
         score=0.0, win_rate=wr, wilson_lb=wb, alpha_per_trade=0.0, wr_source=wr_src,
         n_resolved=n_res, n_pos=n_pos, total_value=cur, total_pnl=pnl, pnl_pct=pct,
         avg_pos_size=avg_sz, avg_profit=avg_profit, avg_bet=avg_bet, trades_per_hour=round(tph, 2),
-        verified=False, watchable=False, elite=False, hft=False, vip=is_vip, sports_bot=False,
+        verified=False, watchable=False, elite=False, hft=False, vip=is_vip, sports_bot=False, dead=False,
         recent_pnl_30d=round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
         recent_pnl_7d=round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
         recent_ts=now_t, lb_rank=lb_rank, lb_vol=lb_vol, detail="", fail_reasons=[],
@@ -945,7 +949,7 @@ def get_compute_and_store_wallet(wallet: str) -> Wallet:
     _changed = cached is None or any(
         getattr(result, k) != getattr(cached, k)
         for k in ("elite", "verified", "watchable", "score", "win_rate", "wilson_lb",
-                  "total_pnl", "name", "hft", "vip", "sports_bot", "recent_pnl_30d", "recent_pnl_7d",
+                  "total_pnl", "name", "hft", "vip", "sports_bot", "dead", "recent_pnl_30d", "recent_pnl_7d",
                   "loaded_trade_count", "trade_load_limited", "first_loaded_trade_ts", "last_loaded_trade_ts", "ts")
     )
     S.env().wallet_cache[wallet] = result

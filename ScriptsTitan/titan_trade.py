@@ -25,6 +25,7 @@ class TradeRecord:
     market_url:           str = ""
     elite_wallets:        list[str] = field(default_factory=list)
     wallet_names:         list[str] = field(default_factory=list)
+    dead_wallets:         list[str] = field(default_factory=list)
     wallet_buy_cash:       dict[str, float] = field(default_factory=dict)
     slug:                 str = ""
     event_slug:           str = ""
@@ -87,6 +88,7 @@ class TradeRecord:
             market_url=str(value.get("market_url") or ""),
             elite_wallets=[str(item) for item in value.get("elite_wallets", []) if isinstance(value.get("elite_wallets", []), list)],
             wallet_names=[str(item) for item in value.get("wallet_names", []) if isinstance(value.get("wallet_names", []), list)],
+            dead_wallets=[str(item) for item in value.get("dead_wallets", []) if isinstance(value.get("dead_wallets", []), list)],
             wallet_buy_cash=wallet_buy_cash,
             slug=str(value.get("slug") or ""),
             event_slug=str(value.get("event_slug") or ""),

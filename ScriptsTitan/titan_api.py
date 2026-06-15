@@ -71,7 +71,11 @@ class TitanAPI:
     def start(self) -> None:
         if self._running:
             return
+        import titan_state as _TS
+        startup_t0 = time.perf_counter()
+        _TS.log_important("Startup recovery: begin | phase=api_start")
         import titan_engine as _engine
+        _TS.log_important("Startup recovery: starting engine | phase=api_start")
         _engine.start(
             log_callback=self._on_log,
             position_open_cb=self._on_position_open,
@@ -81,7 +85,9 @@ class TitanAPI:
         )
         self._running = True
         self._start_time = time.time()
+        _TS.log_important("Startup recovery: restoring persisted signals/rejects | phase=api_start")
         self._load_persisted_signals_rejects()
+        _TS.log_important(f"Startup recovery: api_start complete | elapsed={time.perf_counter() - startup_t0:.2f}s")
         self._send_telegram_boot_status()
 
     def stop(self) -> None:
@@ -125,6 +131,7 @@ class TitanAPI:
     )
     def get_positions(self) -> list[Position]:
         import titan_state as _TS
+        from titan_persistence import ensure_linked_wallets_cached
         env = _TS.env()
         positions = sorted(
             env.open_positions.values(),
@@ -132,6 +139,29 @@ class TitanAPI:
             reverse=True,
         )
         for pos in positions:
+            preferred_wallet_names: dict[str, str] = {}
+            for index, wallet_addr in enumerate(pos.elite_wallets):
+                if index < len(pos.wallet_names):
+                    preferred_wallet_names[str(wallet_addr).lower()] = str(pos.wallet_names[index])
+            linked_wallets = pos.elite_wallets + pos.tracked_wallets
+            missing_wallets: list[str] = []
+            dead_wallets: list[str] = []
+            for wallet_addr in linked_wallets:
+                wallet_key = str(wallet_addr).lower()
+                cached_wallet = env.wallet_cache.get(wallet_key)
+                if cached_wallet is None:
+                    missing_wallets.append(wallet_key)
+                    continue
+                if cached_wallet.dead:
+                    dead_wallets.append(wallet_key)
+            if missing_wallets:
+                recovered_dead_wallets = ensure_linked_wallets_cached(
+                    missing_wallets,
+                    preferred_names=preferred_wallet_names,
+                    reason=f"get_positions {pos.cid}:{pos.outcome}",
+                )
+                dead_wallets.extend(recovered_dead_wallets)
+            pos.buy_trade.dead_wallets = list(dict.fromkeys(dead_wallets))
             pos.load_prices()
         return positions
 
@@ -1047,9 +1077,16 @@ class TitanAPI:
         try:
             import titan_db as DB
             import titan_state as _S
+            phase_t0 = time.perf_counter()
+            _S.log_important("Startup recovery: loading live signals from DB | phase=signal_restore")
             self._last_signals = DB.load_latest_signals(200)
+            _S.log_important(f"Startup recovery: live signals loaded | phase=signal_restore | signals={len(self._last_signals)}")
+            _S.log_important("Startup recovery: loading rejects from DB | phase=signal_restore")
             self._last_rejects = DB.load_latest_rejects(50)
-            msg = f"Startup recovery: signals={len(self._last_signals)} | rejects={len(self._last_rejects)}"
+            msg = (
+                f"Startup recovery: signals={len(self._last_signals)} | rejects={len(self._last_rejects)} | "
+                f"phase=signal_restore | elapsed={time.perf_counter() - phase_t0:.2f}s"
+            )
             _S.log_important(msg)
         except Exception as e:
             import traceback, titan_state as _S

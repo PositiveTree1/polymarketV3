@@ -195,6 +195,9 @@ tier     str   Filter by tier: elite | verified | watchable | vip
 
 Without filters returns the full roster. **Always pass `search=` when asking about a specific wallet by name** — much faster than loading the full list.
 
+Client/UI note:
+- Remote UI flows can call `get_tracked_wallets(search="<wallet address>")` to hydrate a missing wallet into the local cache before opening Wallet Detail from a position or signal popup.
+
 Returns: list of `TrackedWalletDict`
 ```
 wallet        str     Address

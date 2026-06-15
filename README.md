@@ -162,6 +162,20 @@ All settings live in the repo-root `titan_config.json`. You can edit it:
 
 ---
 
+### Position Detail popup
+
+Double-clicking a row in `POSITIONS` opens a detail popup with:
+
+- the same highlighted `OUTCOME` pill used in Signal Detail
+- a `Held` field that shows `N min` under 60 minutes and `D:HH:MM` at 60+ minutes
+- a compact two-row trade list
+- a `SELECTED WALLETS` table sourced from `buy_trade.wallet_names`
+- double-click on a wallet row to open Wallet Detail
+
+In remote client mode, if a clicked wallet is missing from the local UI cache, the client retries with `get_tracked_wallets(search="<wallet address>")` before giving up.
+
+---
+
 ## MCP Tools
 
 When running in `--mode server`, the following tools are available to any MCP client:

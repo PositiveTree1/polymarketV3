@@ -91,6 +91,15 @@ TitanAPI                         ← typed application facade over engine/state
 
 ---
 
+## UI Notes
+
+- `Position Detail` mirrors `Signal Detail` header styling for the highlighted `OUTCOME` pill.
+- `Held` in `Position Detail` is display-only formatting: under 60 minutes it shows `N min`; at 60+ minutes it shows `D:HH:MM`.
+- The `SELECTED WALLETS` list in `Position Detail` uses `buy_trade.wallet_names` / `pos.wallet_names` for display names.
+- Double-clicking a wallet row in `Position Detail` or `Signal Detail` opens `Wallet Detail`. In remote client mode the UI may first call `get_tracked_wallets(search="<wallet address>")` to hydrate a missing wallet into the local cache.
+
+---
+
 ## API Layer
 
 `TitanAPI` is the main application boundary above the engine. It is not the raw Polymarket API; it is TITAN's own typed facade for reading runtime state and issuing control actions.
