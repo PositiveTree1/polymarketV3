@@ -48,6 +48,7 @@ def _print(msg: str) -> None:
 if TYPE_CHECKING:
     from titan_signals import Signal
     from titan_position import Position
+    from titan_wallet import Wallet
     from titan_trade import TradeRecord
     from titan_types import (
         AlertDict, ErrorDict,
@@ -341,8 +342,16 @@ class TitanClient:
     def get_alerts(self) -> list[AlertDict]:
         return self._call_tool("get_alerts")  # type: ignore[return-value]
 
-    def get_tracked_wallets(self) -> list[dict]:
-        return self._call_tool("get_tracked_wallets")  # type: ignore[return-value]
+    def apply_selector(self) -> int:
+        result = self._call_tool("apply_selector")
+        return int(result) if isinstance(result, (int, float)) else 0
+
+    def get_tracked_wallets(self) -> list["Wallet"]:
+        from titan_wallet import Wallet as _Wallet
+        raw = self._call_tool("get_tracked_wallets")
+        if isinstance(raw, list):
+            return [_Wallet.from_db(d["wallet"], d) if isinstance(d, dict) else d for d in raw]
+        return []
 
     def get_pnl_summary(self) -> PnlSummaryDict:
         return self._call_tool("get_pnl_summary")  # type: ignore[return-value]

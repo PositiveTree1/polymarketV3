@@ -938,38 +938,179 @@ def get_compute_and_store_wallet(wallet: str) -> Wallet:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  WalletsCache — in-memory, client-safe  (mirrors PricesCache pattern)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WalletsCache:
+    """Thin dict wrapper for the wallet roster. Client-safe: no DB or API calls."""
+
+    def __init__(self) -> None:
+        self._data: dict[str, Wallet] = {}
+
+    # ── dict protocol ─────────────────────────────────────────────────────────
+
+    def __getitem__(self, addr: str) -> Wallet:
+        return self._data[addr]
+
+    def __setitem__(self, addr: str, wallet: Wallet) -> None:
+        self._data[addr] = wallet
+
+    def __contains__(self, addr: object) -> bool:
+        return addr in self._data
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def get(self, addr: str, default: Wallet | None = None) -> Wallet | None:
+        return self._data.get(addr, default)
+
+    def items(self):
+        return self._data.items()
+
+    def values(self):
+        return self._data.values()
+
+    def keys(self):
+        return self._data.keys()
+
+    # ── queries ───────────────────────────────────────────────────────────────
+
+    def get_elite(self) -> list[str]:
+        return [addr for addr, w in self._data.items() if w.elite]
+
+    def get_watchlist(self) -> list[str]:
+        return [addr for addr, w in self._data.items() if w.watchable]
+
+    def ingest(self, addr: str, wallet: Wallet) -> None:
+        """Store a wallet from wire data. Client-side entry point — no DB write."""
+        self._data[addr] = wallet
+
+
+class WalletsCacheSrv(WalletsCache):
+    """Server-side wallet cache: adds DB persistence and selector reclassification."""
+
+    def __setitem__(self, addr: str, wallet: Wallet) -> None:
+        self._data[addr] = wallet
+
+    def reclassify_all(self) -> int:
+        """Re-run selector scoring on every cached wallet. No Poly API calls. Returns count updated."""
+        import titan_config as _C
+        from dataclasses import replace as _replace
+
+        sel = _C.get_active_selector()
+        updated = 0
+        for addr, w in list(self._data.items()):
+            apt        = w.loaded_trade_pnl / w.n_resolved if w.n_resolved > 0 else 0.0
+            avg_profit = w.avg_profit
+            avg_profit_estimated = False
+            if avg_profit <= 0 and w.n_resolved >= 10 and w.total_pnl > 0:
+                avg_profit = round((w.total_pnl * 0.5) / w.n_resolved, 2)
+                avg_profit_estimated = True
+
+            if sel is not None:
+                from titan_selector import PerformanceSelector
+                score = sel.score(w)
+                watchable, verified, elite, fail_reasons = sel.is_selected(w, score)
+                hft_detected        = sel.is_hft(w.trades_per_hour, w.avg_bet, w.n_resolved) if isinstance(sel, PerformanceSelector) else False
+                sports_bot_detected = sel.is_sports_bot(w.name, w.trades_per_hour) if isinstance(sel, PerformanceSelector) else False
+            else:
+                wb  = w.wilson_lb
+                score = (
+                    0.30 * wb +
+                    0.25 * min(1.0, max(0, w.pnl_pct / 30)) +
+                    0.15 * min(1.0, w.total_value / 25_000) +
+                    0.10 * min(1.0, w.n_resolved / 20) +
+                    0.10 * min(1.0, w.n_pos / 10) +
+                    0.10 * min(1.0, max(0, avg_profit) / 50)
+                )
+                fail_reasons        = []
+                watchable           = w.win_rate >= 0.53 and wb >= 0.45 and w.n_resolved >= 10 and w.total_pnl >= 0
+                verified            = watchable and w.win_rate >= 0.56 and wb >= 0.49
+                elite               = False
+                hft_detected        = w.trades_per_hour >= HFT_MIN_TRADES_PER_HOUR
+                sports_bot_detected = False
+
+            est_tag    = "~" if avg_profit_estimated else ""
+            hft_tag    = "⚡HFT" if hft_detected else ""
+            sports_tag = "🏈SPORTS" if sports_bot_detected else ""
+            rf_tag     = f" RF30d:${w.recent_pnl_30d:+.0f}" if w.recent_pnl_30d is not None else ""
+
+            result = _replace(
+                w,
+                score=round(score, 5),
+                avg_profit=avg_profit,
+                alpha_per_trade=round(apt, 2),
+                verified=verified,
+                watchable=watchable,
+                elite=elite,
+                hft=hft_detected,
+                sports_bot=sports_bot_detected,
+                fail_reasons=fail_reasons,
+                detail=(
+                    f"Score:{score:.2f} WR:{w.win_rate*100:.0f}% WilsonLB:{w.wilson_lb*100:.0f}% "
+                    f"Res:{w.n_resolved} Port:${w.total_value:,.0f} PnL:${w.total_pnl:+,.0f}({w.pnl_pct:+.1f}%) "
+                    f"AvgProfit:{est_tag}${avg_profit:.1f} AvgBet:${w.avg_bet:.0f} "
+                    f"AlphaPT:${apt:.1f} TPH:{w.trades_per_hour:.1f} [{w.wr_source}] "
+                    f"{'🔥ELITE' if elite else '✅VER' if verified else '👁WATCH' if watchable else '❌'}"
+                    f"{hft_tag}{sports_tag}{rf_tag}"
+                ),
+            )
+
+            tier_before = w.tier()
+            tier_after  = result.tier()
+            if tier_before != tier_after:
+                reasons_str = ", ".join(fail_reasons) if fail_reasons else ""
+                stats_str   = f"PnL=${w.total_pnl:+,.0f} Port=${w.total_value:,.0f} Score={score:.2f} WR={w.win_rate*100:.0f}% Res={w.n_resolved}"
+                if tier_after in ("🔥ELITE", "✅VER", "👁WATCH"):
+                    S._log(f"⬆ {tier_before}→{tier_after} {w.name} ({addr[:12]}…) | {stats_str}", "INFO")
+                else:
+                    S._log(f"⬇ {tier_before}→{tier_after} {w.name} ({addr[:12]}…) | {reasons_str} | {stats_str}", "WARN")
+
+            self._data[addr] = result
+            if result.watchable:
+                DB.upsert_wallet_profile(addr, result.to_db_dict())
+            elif not result.watchable and w.watchable:
+                DB.clear_wallet_profile(addr)
+            updated += 1
+
+        S._log(f"🎯 Selector reclassified {updated} wallets", "INFO")
+        return updated
+
+    def refresh_recent_form(self) -> None:
+        """Refresh recent_pnl_30d / recent_pnl_7d for stale verified wallets. No classification."""
+        now_t = time.time()
+        stale_threshold = now_t - 6 * 3600
+        refreshed = 0
+        for addr, profile in list(self._data.items()):
+            if not profile.verified:
+                continue
+            if profile.recent_ts >= stale_threshold:
+                continue
+            try:
+                wr_data = fetch_real_winrate(addr)
+                profile.recent_pnl_30d = wr_data["recent_pnl_30d"]
+                profile.recent_pnl_7d  = wr_data["recent_pnl_7d"]
+                profile.recent_ts      = now_t
+                self._data[addr] = profile
+                refreshed += 1
+                time.sleep(0.12)
+            except Exception as e:
+                S._log(f"Recent form refresh failed for {addr}: {e}", "ERR")
+        if refreshed:
+            S._log(f"♻ Recent form refreshed for {refreshed} wallets", "DATA")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 def get_elite_wallets() -> list[str]:
-    return [w.lower() for w, p in S.env().wallet_cache.items() if p.elite]
+    return S.env().wallet_cache.get_elite()
 
 
 def _refresh_recent_form_scores() -> None:
-    """
-    v10: Refresh recent_pnl_30d / recent_pnl_7d for verified wallets whose
-    recent_ts is older than 6 hours. Called every 50 cycles from the engine.
-    This is additive to the normal wallet cache refresh.
-    """
-    now_t = time.time()
-    stale_threshold = now_t - 6 * 3600
-    refreshed = 0
-    for wallet, profile in list(S.env().wallet_cache.items()):
-        if not profile.verified:
-            continue
-        if profile.recent_ts >= stale_threshold:
-            continue
-        try:
-            wr_data = fetch_real_winrate(wallet)
-            profile.recent_pnl_30d = wr_data["recent_pnl_30d"]
-            profile.recent_pnl_7d  = wr_data["recent_pnl_7d"]
-            profile.recent_ts      = now_t
-            S.env().wallet_cache[wallet] = profile
-            refreshed += 1
-            time.sleep(0.12)
-        except Exception as e:
-            S._log(f"Recent form refresh failed for {wallet}: {e}", "ERR")
-    if refreshed:
-        S._log(f"♻ Recent form refreshed for {refreshed} wallets", "DATA")
+    cache = S.env().wallet_cache
+    if isinstance(cache, WalletsCacheSrv):
+        cache.refresh_recent_form()
 
 
 # Discover candidate wallets from the active selector, score/cache each new

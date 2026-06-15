@@ -14,7 +14,7 @@ import titan_config as C
 from titan_config import *
 
 if TYPE_CHECKING:
-    from titan_wallet import Wallet
+    from titan_wallet import WalletsCache
     from titan_market import Market
     from titan_position import Position
     from titan_signals import Signal
@@ -85,7 +85,7 @@ class TradeStats:
 class WalletEnv:
     def __init__(self):
         self.index:               int                                    = 0
-        self.wallet_cache:        dict[str, "Wallet"]                   = {}
+        self.wallet_cache:        "WalletsCache"                        = __import__("titan_wallet").WalletsCache()
         self.SYSTEM_LOGS:         list[str]                             = load_logs_from_disk()
         self.logged_signals:      dict[str, float]                      = {}
         self.cycle_count:         int                                    = 0
@@ -108,9 +108,8 @@ class WalletEnv:
 _wallet = WalletEnv()
 
 
-# Shared caches
-_shared_wallet_cache: dict[str, "Wallet"] = {}
-_wallet.wallet_cache = _shared_wallet_cache
+# Shared cache — WalletsCacheSrv installed at server startup; base WalletsCache used by client
+_shared_wallet_cache = _wallet.wallet_cache
 _http_trace_lock = threading.Lock()
 _recent_http_traces = deque(maxlen=400)
 

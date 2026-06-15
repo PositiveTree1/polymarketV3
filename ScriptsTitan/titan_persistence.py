@@ -11,7 +11,7 @@ import titan_db as DB
 import titan_prices
 from titan_prices import PricesCacheSrv
 from titan_config import STATE_FILE, STATE_DB, BANKROLL_START, MAX_WATCHLIST_SIZE
-from titan_wallet import Wallet
+from titan_wallet import Wallet, WalletsCacheSrv
 
 _STARTUP_ELITE_VER_REFRESH_MAX_AGE_S = 2 * 24 * 3600
 
@@ -55,9 +55,12 @@ def save_wallet_roster_async():
 def load_state() -> None:
     DB.init_db(STATE_DB)
     S.market_cache.load_all_from_db(force=True)
-    srv = PricesCacheSrv()
-    srv.init_db(STATE_DB)
-    titan_prices.PRICES = srv
+    prices_srv = PricesCacheSrv()
+    prices_srv.init_db(STATE_DB)
+    titan_prices.PRICES = prices_srv
+    wallets_srv = WalletsCacheSrv()
+    S.env().wallet_cache = wallets_srv
+    S._shared_wallet_cache = wallets_srv
     from titan_config import SEED_WATCHLIST as _SEEDS
     pruned = DB.purge_non_watchable(keep_seed=set(_SEEDS))
     if pruned:

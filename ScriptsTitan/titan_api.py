@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from titan_signals import Signal
     from titan_position import Position
     from titan_trade import TradeRecord
+    from titan_wallet import Wallet
     from titan_types import (
         AlertDict, ErrorDict,
         PnlSummaryDict, TradeStatsDict, PortfolioOverviewDict,
@@ -213,11 +214,12 @@ class TitanAPI:
         },
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_tracked_wallets(self, search: str = "", tier: str = "") -> list[dict]:
+    def get_tracked_wallets(self, search: str = "", tier: str = "") -> list[Wallet]:
         import titan_state as _TS
         from titan_config import VIP_WALLETS, VIP_WALLET_NAMES
+        from dataclasses import replace
         vip_wallets = {addr.lower() for addr in VIP_WALLETS}
-        results = []
+        results: list[Wallet] = []
         search_lower = search.lower()
         for w, wallet in _TS.env().wallet_cache.items():
             vip_name = VIP_WALLET_NAMES.get(w.lower(), "")
@@ -230,10 +232,8 @@ class TitanAPI:
             if tier == "verified"  and not wallet.verified:  continue
             if tier == "watchable" and not wallet.watchable: continue
             if tier == "vip"       and w.lower() not in vip_wallets: continue
-            wire = wallet.to_wire()
-            wire["name"] = display_name
-            wire["vip"]  = w.lower() in vip_wallets
-            results.append(wire)
+            out = replace(wallet, name=display_name, vip=w.lower() in vip_wallets)
+            results.append(out)
         return results
 
     @mcp_tool(
@@ -955,6 +955,26 @@ class TitanAPI:
 
     # ── actions ───────────────────────────────────────────────────────────────
 
+    @mcp_tool(
+        description="Re-run selector scoring on all cached wallets without hitting the Polymarket API. Returns count of wallets reclassified.",
+        annotations={"readOnlyHint": False, "openWorldHint": False},
+    )
+    def apply_selector(self) -> int:
+        import titan_state as _TS
+        from titan_wallet import WalletsCacheSrv
+        cache = _TS.env().wallet_cache
+        if not isinstance(cache, WalletsCacheSrv):
+            return 0
+        n = cache.reclassify_all()
+        wallets = _TS.env().wallet_cache
+        self._emit("titan/cycle_complete", {
+            "signals": _TS.env().LAST_SIGNALS,
+            "wallets": wallets,
+            "rejects": _TS.env().LAST_REJECTS,
+            "trades":  [],
+        })
+        return n
+
     def force_cycle(self) -> None:
         import titan_engine as _engine
         _engine.run_loop.__func__ if hasattr(_engine.run_loop, "__func__") else None
@@ -987,7 +1007,8 @@ class TitanAPI:
             try:
                 cb(payload)
             except Exception as e:
-                _TS._log(f"Event callback error [{event}]: {e}", "ERR")
+                import traceback
+                _TS._log(f"Event callback error [{event}] in {cb.__qualname__}: {e}\n{traceback.format_exc()}", "ERR")
 
     def _notify_telegram(self, method: str, *args) -> None:
         if not self._telegram_enabled or self._telegram is None:

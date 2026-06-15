@@ -126,9 +126,12 @@ _sessions = _SessionManager()
 
 def _to_serializable(value: object) -> object:
     from titan_position import Position as _Position
+    from titan_wallet import Wallet as _Wallet
 
     if isinstance(value, _Position):
         return value.to_dict()
+    if isinstance(value, _Wallet):
+        return value.to_wire()
     if is_dataclass(value) and not isinstance(value, type):
         return asdict(value)
     if isinstance(value, list):
@@ -199,7 +202,7 @@ def _read_resource(uri: str, api: TitanAPI) -> str:
     if uri == "titan://logs":
         return api.get_logs(lines=200)
     if uri == "titan://wallets":
-        return json.dumps(api.get_tracked_wallets(), indent=2)
+        return json.dumps([w.to_wire() for w in api.get_tracked_wallets()], indent=2)
     return f"ERROR: unknown resource URI '{uri}'"
 
 
@@ -256,7 +259,7 @@ def _get_prompt(name: str, api: TitanAPI) -> dict:
         }
     if name == "titan_wallet_brief":
         wallets = api.get_tracked_wallets()
-        wallets_text = json.dumps(wallets, indent=2)
+        wallets_text = json.dumps([w.to_wire() for w in wallets], indent=2)
         return {
             "description": _PROMPTS[2]["description"],
             "messages": [
