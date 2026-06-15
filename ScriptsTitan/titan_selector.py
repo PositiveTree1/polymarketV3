@@ -17,7 +17,11 @@ import time
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, fields
+from typing import TYPE_CHECKING
 import titan_config as C
+
+if TYPE_CHECKING:
+    from titan_wallet import Wallet
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -62,16 +66,12 @@ class WalletSelector(ABC):
         self.params = params
 
     @abstractmethod
-    def score(self, raw: dict) -> float:
-        """Return composite 0-1 score for a wallet's raw position/winrate data."""
+    def score(self, wallet: "Wallet") -> float:
+        """Return composite 0-1 score for a wallet."""
 
     @abstractmethod
-    def is_selected(self, raw: dict, score: float) -> tuple[bool, bool, bool, list[str]]:
-        """
-        Return (watchable, verified, elite, fail_reasons).
-        raw: position/winrate data dict as fetched from Polymarket.
-        score: result of self.score(raw).
-        """
+    def is_selected(self, wallet: "Wallet", score: float) -> tuple[bool, bool, bool, list[str]]:
+        """Return (watchable, verified, elite, fail_reasons)."""
 
     # Fetch candidate wallet addresses from large recent buy trades and leaderboard
     # snapshots, returning a de-duplicated input set for later evaluation. This
@@ -219,34 +219,28 @@ class PerformanceSelector(WalletSelector):
             leaderboard_periods=p.leaderboard_periods,
         )
 
-    def score(self, raw: dict) -> float:
+    def score(self, wallet: "Wallet") -> float:
         p = self.p
-        wb         = raw.get("wilson_lb", 0.0)
-        pct        = raw.get("pnl_pct", 0.0)
-        cur        = raw.get("total_value", 0.0)
-        n_res      = raw.get("n_resolved", 0)
-        n_pos      = raw.get("n_pos", 0)
-        avg_profit = raw.get("avg_profit", 0.0)
         return (
-            p.weight_wilson         * wb +
-            p.weight_pnl_pct        * min(1.0, max(0.0, pct / 30)) +
-            p.weight_portfolio      * min(1.0, cur / 25_000) +
-            p.weight_trade_count    * min(1.0, n_res / 20) +
-            p.weight_open_positions * min(1.0, n_pos / 10) +
-            p.weight_alpha          * min(1.0, max(0.0, avg_profit) / 50)
+            p.weight_wilson         * wallet.wilson_lb +
+            p.weight_pnl_pct        * min(1.0, max(0.0, wallet.pnl_pct / 30)) +
+            p.weight_portfolio      * min(1.0, wallet.total_value / 25_000) +
+            p.weight_trade_count    * min(1.0, wallet.n_resolved / 20) +
+            p.weight_open_positions * min(1.0, wallet.n_pos / 10) +
+            p.weight_alpha          * min(1.0, max(0.0, wallet.avg_profit) / 50)
         )
 
-    def is_selected(self, raw: dict, score: float) -> tuple[bool, bool, bool, list[str]]:
+    def is_selected(self, wallet: "Wallet", score: float) -> tuple[bool, bool, bool, list[str]]:
         p          = self.p
-        wr         = raw.get("win_rate", 0.0)
-        wb         = raw.get("wilson_lb", 0.0)
-        n_res      = raw.get("n_resolved", 0)
-        pnl        = raw.get("total_pnl", 0.0)
-        cur        = raw.get("total_value", 0.0)
-        avg_profit = raw.get("avg_profit", 0.0)
-        avg_bet    = raw.get("avg_bet", 0.0)
-        tph        = raw.get("trades_per_hour", 0.0)
-        apt        = raw.get("alpha_per_trade", 0.0)
+        wr         = wallet.win_rate
+        wb         = wallet.wilson_lb
+        n_res      = wallet.n_resolved
+        pnl        = wallet.total_pnl
+        cur        = wallet.total_value
+        avg_profit = wallet.avg_profit
+        avg_bet    = wallet.avg_bet
+        tph        = wallet.trades_per_hour
+        apt        = wallet.alpha_per_trade
 
         fail_reasons: list[str] = []
 

@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from titan_position import Position
     from titan_trade import TradeRecord
     from titan_types import (
-        AlertDict, ErrorDict, TrackedWalletDict,
+        AlertDict, ErrorDict,
         PnlSummaryDict, TradeStatsDict, PortfolioOverviewDict,
     )
 
@@ -213,25 +213,27 @@ class TitanAPI:
         },
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
-    def get_tracked_wallets(self, search: str = "", tier: str = "") -> list[TrackedWalletDict]:
+    def get_tracked_wallets(self, search: str = "", tier: str = "") -> list[dict]:
         import titan_state as _TS
         from titan_config import VIP_WALLETS, VIP_WALLET_NAMES
         vip_wallets = {addr.lower() for addr in VIP_WALLETS}
         results = []
         search_lower = search.lower()
-        for w, p in _TS.env().wallet_cache.items():
+        for w, wallet in _TS.env().wallet_cache.items():
             vip_name = VIP_WALLET_NAMES.get(w.lower(), "")
-            current_name = str(p.get("name") or "")
             display_name = vip_name if vip_name and (
-                not current_name or current_name.startswith("0x") or current_name.endswith("…")
-            ) else current_name
+                not wallet.name or wallet.name.startswith("0x") or wallet.name.endswith("…")
+            ) else wallet.name
             if search_lower and search_lower not in display_name.lower() and not w.lower().startswith(search_lower):
                 continue
-            if tier == "elite"     and not p.get("elite"):     continue
-            if tier == "verified"  and not p.get("verified"):  continue
-            if tier == "watchable" and not p.get("watchable"): continue
+            if tier == "elite"     and not wallet.elite:     continue
+            if tier == "verified"  and not wallet.verified:  continue
+            if tier == "watchable" and not wallet.watchable: continue
             if tier == "vip"       and w.lower() not in vip_wallets: continue
-            results.append({"wallet": w, **p, "name": display_name, "vip": w.lower() in vip_wallets})
+            wire = wallet.to_wire()
+            wire["name"] = display_name
+            wire["vip"]  = w.lower() in vip_wallets
+            results.append(wire)
         return results
 
     @mcp_tool(

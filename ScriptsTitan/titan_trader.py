@@ -29,7 +29,7 @@ from titan_position import Position, get_effective_stop_loss
 from titan_market  import get_market, get_outcome_price, is_market_resolving, Market
 from titan_prices  import PRICES
 from titan_signals import estimate_expected_value, _KNOWN_HEDGE_WALLETS, Signal
-from titan_wallet  import is_hft_wallet, record_whale_trade_performance
+from titan_wallet  import record_whale_trade_performance
 from titan_persistence import save_state, save_wallet_roster_async
 from titan_trade import TradeRecord
 import titan_db as DB
@@ -189,16 +189,16 @@ def _compact_market_snapshot(mkt: Market | None, *, fallback_title: str = "", fa
 def _compact_wallet_snapshot(wallet_addrs: list[str]) -> list[dict]:
     rows = []
     for addr in wallet_addrs[:8]:
-        prof = S.env().wallet_cache.get(str(addr).lower(), {})
+        prof = S.env().wallet_cache.get(str(addr).lower())
         rows.append({
             "wallet": addr,
-            "name": prof.get("name", str(addr)[:10] + "…"),
-            "score": prof.get("score"),
-            "win_rate": prof.get("win_rate"),
-            "total_pnl": prof.get("total_pnl"),
-            "verified": prof.get("verified"),
-            "elite": prof.get("elite"),
-            "hft": prof.get("hft"),
+            "name":      prof.name      if prof is not None else str(addr)[:10] + "…",
+            "score":     prof.score     if prof is not None else None,
+            "win_rate":  prof.win_rate  if prof is not None else None,
+            "total_pnl": prof.total_pnl if prof is not None else None,
+            "verified":  prof.verified  if prof is not None else None,
+            "elite":     prof.elite     if prof is not None else None,
+            "hft":       prof.hft       if prof is not None else None,
         })
     return rows
 
@@ -430,15 +430,14 @@ def auto_trade(signals: list[Signal], wallet_exits: dict) -> list[tuple[str, str
                 non_hft_exiting = [
                     w for w in matched_elite
                     if w not in _KNOWN_HEDGE_WALLETS
-                    and not ((_wp := S.env().wallet_cache.get(w)) and
-                             (_wp.get("hft") or is_hft_wallet(_wp)))
+                    and not ((_wp := S.env().wallet_cache.get(w)) and _wp.is_hft())
                 ]
                 if non_hft_exiting:
                     whale_losing = cur < pos.entry_price * 0.92
                     early_noise  = whale_losing and pnl_pct > -0.05 and hold_minutes < 20
                     if not early_noise:
                         matched_names = [
-                            S.env().wallet_cache.get(a, {}).get("name", a[:10]+"…")
+                            (p.name if (p := S.env().wallet_cache.get(a)) else None) or a[:10]+"…"
                             for a in non_hft_exiting[:2]
                         ]
                         reason = f"WHALE_SOLD {matched_names}"
@@ -449,7 +448,7 @@ def auto_trade(signals: list[Signal], wallet_exits: dict) -> list[tuple[str, str
                             "DIAG"
                         )
                 else:
-                    hft_names = [S.env().wallet_cache.get(w, {}).get("name", w[:10]) for w in matched_elite[:2]]
+                    hft_names = [(p.name if (p := S.env().wallet_cache.get(w)) else None) or w[:10] for w in matched_elite[:2]]
                     S._log(f"  ⚡ HFT/market-maker exit ignored: {hft_names} on {pos.title[:30]}", "DIAG")
 
         # (c) PROFIT TARGET
@@ -605,7 +604,7 @@ def auto_trade(signals: list[Signal], wallet_exits: dict) -> list[tuple[str, str
             elite_wallets=pos.elite_wallets,
             wallet_buy_cash=pos.wallet_buy_cash,
             wallet_names=[
-                S.env().wallet_cache.get(w, {}).get("name", w[:10]+"…")
+                (p.name if (p := S.env().wallet_cache.get(w)) else None) or w[:10]+"…"
                 for w in pos.elite_wallets[:3]
             ],
             avg_entry=pos.avg_entry or pos.entry_price,
@@ -729,7 +728,7 @@ def auto_trade(signals: list[Signal], wallet_exits: dict) -> list[tuple[str, str
             w0   = sig_elites[0]
             used = whale_position_counts.get(w0, 0) + opening_whale_counts.get(w0, 0)
             if used >= MAX_POSITIONS_PER_WALLET:
-                w_name = S.env().wallet_cache.get(w0, {}).get("name", w0[:10]+"…")
+                w_name = (p.name if (p := S.env().wallet_cache.get(w0)) else None) or w0[:10]+"…"
                 S._log(f"  🚫 Whale cap ({MAX_POSITIONS_PER_WALLET}): {w_name} — {title[:30]}", "DIAG")
                 continue
 
@@ -799,7 +798,7 @@ def auto_trade(signals: list[Signal], wallet_exits: dict) -> list[tuple[str, str
         elite_wallet_addrs = list(sig.elite_ver.keys())
         all_whale_addrs    = list(sig.ver.keys())
         elite_names = [
-            S.env().wallet_cache.get(w, {}).get("name", w[:10]+"…")
+            (p.name if (p := S.env().wallet_cache.get(w)) else None) or w[:10]+"…"
             for w in elite_wallet_addrs[:3]
         ]
 

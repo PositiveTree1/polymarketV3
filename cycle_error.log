@@ -1,14 +1,13 @@
 Traceback (most recent call last):
-  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_engine.py", line 271, in run_loop
-    trades = fetch_trades()
-             ^^^^^^^^^^^^^^
-  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_market.py", line 1047, in fetch_trades
-    priority = _poll_vip_and_elite(hot_cutoff, warm_cutoff)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_market.py", line 879, in _poll_vip_and_elite
-    get_compute_and_store_wallet(wallet),
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_wallet.py", line 502, in get_compute_and_store_wallet
-    if cached and (now_t - cached.get("ts", 0)) < WALLET_TTL:
-                           ^^^^^^^^^^^^
-KeyError: 'ts'
+  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_engine.py", line 301, in run_loop
+    analyse(trades)
+  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_engine.py", line 183, in analyse
+    signals, rejects = build_signals(trades, wallets, wallet_exits)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_signals.py", line 663, in build_signals
+    sigs, rejs = builder.build(trades, wallets, wallet_exits)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_signal_builder.py", line 188, in build
+    if not S.env().wallet_cache.get(w, {}).get("sports_bot", False)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'Wallet' object has no attribute 'get'

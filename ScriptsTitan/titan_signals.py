@@ -8,7 +8,7 @@ import titan_state as S
 import titan_config as C
 from titan_config import *
 from titan_market import get_market, get_outcome_price, get_outcome_price_by_trade, fetch_wallet_sells, mark_cid_verified, WalletObservation, Market
-from titan_wallet import is_hft_wallet, get_whale_weekly_pnl, is_recent_form_qualified
+from titan_wallet import Wallet, get_whale_weekly_pnl
 
 
 @dataclass
@@ -391,7 +391,7 @@ def check_wallet_exist(cid_to_wallet_sets: dict, entry_times: dict | None = None
                 _min_frac = float(getattr(C, "position_management_ext", {}).get("wallet_exit_min_sell_fraction", 0.30))
                 if sell_fraction < _min_frac:
                     S._log(
-                        f"  🐋 Partial trim ignored: {S.env().wallet_cache.get(wallet,{}).get('name',wallet[:10])} "
+                        f"  🐋 Partial trim ignored: {(p.name if (p := S.env().wallet_cache.get(wallet)) else None) or wallet[:10]} "
                         f"sold {sell_fraction*100:.0f}% of position (need ≥30%)",
                         "DIAG"
                     )
@@ -399,9 +399,9 @@ def check_wallet_exist(cid_to_wallet_sets: dict, entry_times: dict | None = None
 
             if wallet not in exits[cid]:
                 exits[cid].append(wallet)
-                w_name = S.env().wallet_cache.get(wallet, {}).get("name", wallet[:10])
-                prof   = S.env().wallet_cache.get(wallet, {})
-                tag    = "🔥" if prof.get("elite") else "✅" if prof.get("verified") else "👁"
+                prof   = S.env().wallet_cache.get(wallet)
+                w_name = (prof.name if prof is not None else None) or wallet[:10]
+                tag    = "🔥" if (prof and prof.elite) else "✅" if (prof and prof.verified) else "👁"
                 size_str = f" ${sell_cash:.0f}" if sell_cash > 0 else ""
                 S.env().WHALE_EXIT_HISTORY.append(
                     f"[{time.strftime('%H:%M')}] {tag} {w_name} SOLD{size_str}"
@@ -597,7 +597,7 @@ def _strategy_bet_multiplier(sig: Signal) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 #  SHARED SIGNAL CONSTRUCTION HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
-_EMPTY_W = {"score": 0.10, "verified": False, "watchable": False, "elite": False, "hft": False}
+_EMPTY_W: Wallet = Wallet.make_stub("0x0000000000000000000000000000000000000000", "empty")
 
 def _get_market_for_signal(cid, trade_title, asset_hint, slug_hint, event_slug_hint="", from_verified=True):
     """Call get_market with verified flag so cid is registered."""
@@ -616,16 +616,14 @@ def _build_names(elite_wallets, verified_wallets, all_ver, is_hft_signal, has_la
     """Build display names for a signal."""
     elite_names = []
     for w in list(elite_wallets.keys())[:3]:
-        name = (S.env().wallet_cache.get(w, {}).get("name") or
-                all_ver.get(w, {}).get("name") or
-                w[:10] + "…")
+        cached = S.env().wallet_cache.get(w)
+        name = (cached.name if cached is not None else None) or all_ver.get(w, {}).get("name") or w[:10] + "…"
         elite_names.append(name)
 
     conf_names = []
     for w in list(verified_wallets.keys())[:2]:
-        name = (S.env().wallet_cache.get(w, {}).get("name") or
-                all_ver.get(w, {}).get("name") or
-                w[:10] + "…")
+        cached = S.env().wallet_cache.get(w)
+        name = (cached.name if cached is not None else None) or all_ver.get(w, {}).get("name") or w[:10] + "…"
         conf_names.append(name)
 
     names = elite_names + ([f"+{len(conf_names)}conf"] if conf_names else [])
@@ -711,7 +709,7 @@ def build_signals(trades: list, wallets: dict, wallet_exits: dict) -> tuple[list
     for cid, wmap in cid_wallets.items():
         for w, outcomes in wmap.items():
             if len(outcomes) >= 2:
-                wname = S.env().wallet_cache.get(w, {}).get("name", w[:10] + "…")
+                wname = (p.name if (p := S.env().wallet_cache.get(w)) else None) or w[:10] + "…"
                 if w not in _KNOWN_HEDGE_WALLETS:
                     _KNOWN_HEDGE_WALLETS.add(w)
                     S._log(f"  🚫 HEDGE BOT FLAGGED: {wname} both {outcomes}", "WARN")

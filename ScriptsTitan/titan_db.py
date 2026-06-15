@@ -15,7 +15,6 @@ if TYPE_CHECKING:
     from titan_signals import Signal
     from titan_trade import TradeRecord
     from titan_market import Market
-    from titan_wallet import WalletProfile
 
 _DB_PATH: str = ""
 def init_db(db_path: str) -> None:
@@ -482,7 +481,7 @@ def load_equity_history(limit: int = 4000) -> list[tuple[float, float]]:
 # ── watchlist ────────────────────────────────────────────────────────────────
 
 
-def upsert_wallet_profile(addr: str, profile: "WalletProfile") -> None:
+def upsert_wallet_profile(addr: str, profile: dict) -> None:
     if not _DB_PATH:
         return
     now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -501,9 +500,9 @@ def upsert_wallet_profile(addr: str, profile: "WalletProfile") -> None:
         )
 
 
-def load_watchable_wallets(limit: int) -> "dict[str, WalletProfile | None]":
+def load_watchable_wallets(limit: int) -> dict[str, dict | None]:
     """Return watchable=1 addresses up to limit, ordered by score DESC.
-    Value is a WalletProfile if profile_json exists, else None (address known but not yet scored).
+    Value is a raw dict if profile_json exists, else None. Caller uses Wallet.from_db() to hydrate.
     """
     if not _DB_PATH:
         return {}
@@ -518,12 +517,11 @@ def load_watchable_wallets(limit: int) -> "dict[str, WalletProfile | None]":
             """,
             (limit,),
         ).fetchall()
-    result: dict[str, WalletProfile | None] = {}
+    result: dict[str, dict | None] = {}
     for addr, blob in rows:
         if blob:
             try:
-                profile = json.loads(blob)
-                result[addr] = profile
+                result[addr] = json.loads(blob)
             except Exception:
                 result[addr] = None
         else:

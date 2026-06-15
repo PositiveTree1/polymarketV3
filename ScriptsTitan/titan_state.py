@@ -14,7 +14,7 @@ import titan_config as C
 from titan_config import *
 
 if TYPE_CHECKING:
-    from titan_wallet import WalletProfile
+    from titan_wallet import Wallet
     from titan_market import Market
     from titan_position import Position
     from titan_signals import Signal
@@ -85,7 +85,7 @@ class TradeStats:
 class WalletEnv:
     def __init__(self):
         self.index:               int                                    = 0
-        self.wallet_cache:        dict[str, "WalletProfile"]            = {}
+        self.wallet_cache:        dict[str, "Wallet"]                   = {}
         self.SYSTEM_LOGS:         list[str]                             = load_logs_from_disk()
         self.logged_signals:      dict[str, float]                      = {}
         self.cycle_count:         int                                    = 0
@@ -109,7 +109,7 @@ _wallet = WalletEnv()
 
 
 # Shared caches
-_shared_wallet_cache: dict[str, "WalletProfile"] = {}
+_shared_wallet_cache: dict[str, "Wallet"] = {}
 _wallet.wallet_cache = _shared_wallet_cache
 _http_trace_lock = threading.Lock()
 _recent_http_traces = deque(maxlen=400)
@@ -125,7 +125,7 @@ def env() -> WalletEnv:
 
 def get_watchlist() -> list[str]:
     """Return addresses currently marked watchable=True in wallet_cache."""
-    return [w for w, p in _shared_wallet_cache.items() if p.get("watchable")]
+    return [w for w, p in _shared_wallet_cache.items() if p.watchable]
 
 def __getattr__(name):
     if hasattr(_wallet, name):

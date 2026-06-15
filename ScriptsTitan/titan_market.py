@@ -122,7 +122,7 @@ class Market:
 
 import titan_config as C
 from titan_config import *
-from titan_wallet import WalletProfile, get_compute_and_store_wallet, get_elite_wallets, is_hft_wallet
+from titan_wallet import Wallet, get_compute_and_store_wallet, get_elite_wallets
 
 _SPORTS_KEYWORDS = (
     "vs", "spread", "o/u", "over", "under", "winner", "set ", "game ",
@@ -814,8 +814,8 @@ def _poll_wallet_trades(wallet: str, limit: int, min_cash: float,
     })
     if not data or not isinstance(data, list):
         return []
-    prof    = S.env().wallet_cache.get(wallet, {})
-    name    = prof.get("name") or wallet[:14] + "…"
+    prof    = S.env().wallet_cache.get(wallet)
+    name    = (prof.name if prof is not None else None) or wallet[:14] + "…"
     if len(data) >= limit:
         if wallet not in _poll_limit_warned:
             _poll_limit_warned.add(wallet)
@@ -862,7 +862,7 @@ def _poll_wallet_trades(wallet: str, limit: int, min_cash: float,
 def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list[WalletObservation]:
     elite_addrs = set()
     for e in S.wallets:
-        elite_addrs.update(a.lower() for a, p in e.wallet_cache.items() if p.get("elite"))
+        elite_addrs.update(a.lower() for a, p in e.wallet_cache.items() if p.elite)
     vip_addrs   = {a.lower() for a in VIP_WALLETS}
     all_to_poll = elite_addrs | vip_addrs
 
@@ -873,13 +873,13 @@ def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list[WalletObs
     results : list[WalletObservation] = []
 
     for wallet in sorted(all_to_poll):
-        prof: WalletProfile = next(
+        prof: Wallet = next(
             (e.wallet_cache[wallet] for e in S.wallets if wallet in e.wallet_cache),
             get_compute_and_store_wallet(wallet),
         )
-        is_elite = prof.get("elite", False)
-        hft      = is_hft_wallet(prof)
-        avg_bet  = prof.get("avg_bet", 0)
+        is_elite = prof.elite
+        hft      = prof.is_hft()
+        avg_bet  = prof.avg_bet
 
         if hft:
             min_cash = HFT_MIN_CASH_PER_TRADE
@@ -913,7 +913,7 @@ def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) 
     e = S.env()
     for w in S.get_watchlist():
         prof = e.wallet_cache.get(w)
-        if w not in already_polled and prof is not None and prof["verified"]:
+        if w not in already_polled and prof is not None and prof.verified:
             candidates.add(w)
     candidates = list(candidates)[:50]
 
@@ -921,7 +921,7 @@ def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) 
     cache = S.env().wallet_cache
     for wallet in candidates:
         prof = cache.get(wallet)
-        avg_bet = prof["avg_bet"] if prof is not None else 0
+        avg_bet = prof.avg_bet if prof is not None else 0
         trades : list[WalletObservation]  = _poll_wallet_trades(
             wallet, 100, max(50.0, float(C.MIN_TRADE_CASH)),
             hot_cutoff, warm_cutoff, "watchlist_poll",
@@ -1088,7 +1088,7 @@ def fetch_hft_spike_trades() -> list[WalletObservation]:
     hft_wallets = {}
     for e in S.wallets:
         for addr, prof in e.wallet_cache.items():
-            if is_hft_wallet(prof) and addr not in hft_wallets:
+            if prof.is_hft() and addr not in hft_wallets:
                 hft_wallets[addr] = prof
 
     if not hft_wallets:
@@ -1096,7 +1096,7 @@ def fetch_hft_spike_trades() -> list[WalletObservation]:
 
     results : list[WalletObservation] = []
     for wallet, prof in hft_wallets.items():
-        avg_bet = prof.get("avg_bet", 0)
+        avg_bet = prof.avg_bet
         if avg_bet <= 0:
             continue
 
@@ -1117,7 +1117,7 @@ def fetch_hft_spike_trades() -> list[WalletObservation]:
                 continue
             cash = whaletrade.cash
 
-            tph = prof.get("trades_per_hour", 0)
+            tph = prof.trades_per_hour
             required_mult = HFT_SPIKE_MULTIPLIER_HIGH if tph > 200 else HFT_SPIKE_MULTIPLIER_LOW
             if cash < avg_bet * required_mult:
                 continue
@@ -1133,7 +1133,7 @@ def fetch_hft_spike_trades() -> list[WalletObservation]:
             whaletrade.source          = "hft_spike_poll"
             results.append(whaletrade)
 
-            name = prof.get("name", wallet[:10] + "…")
+            name = prof.name or wallet[:10] + "…"
             S._log(
                 f"⚡ HFT SPIKE: {name} ${cash:,.0f} = {cash/avg_bet:.0f}x avg "
                 f"[{whaletrade.title[:35]}]",

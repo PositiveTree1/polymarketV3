@@ -67,7 +67,7 @@ def _rescore_watchlist():
     stale = [
         w for w in S.get_watchlist()
         if w not in must
-        and (now_t - S.env().wallet_cache.get(w, {}).get("ts", 0)) >= WALLET_TTL
+        and (now_t - (p3.ts if (p3 := S.env().wallet_cache.get(w)) is not None else 0)) >= WALLET_TTL
     ]
     to_score = list(must) + stale
     if not to_score:
@@ -123,24 +123,24 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
             None
         )
         if trade_name:
-            current = p.get("name", "")
+            current = p.name
             current_real = current and not current.endswith("…") and not _is_auto(current)
             if not _is_auto(trade_name) or not current_real:
-                p["name"] = trade_name
+                p.name = trade_name
                 S.env().wallet_cache[w] = p
 
         cached = S.env().wallet_cache.get(w)
         if cached:
-            if not p["recent_pnl_30d"] and cached["recent_pnl_30d"]:
-                p["recent_pnl_30d"] = cached["recent_pnl_30d"]
-            if not p["recent_pnl_7d"] and cached["recent_pnl_7d"]:
-                p["recent_pnl_7d"] = cached["recent_pnl_7d"]
-            if not p["recent_ts"] and cached["recent_ts"]:
-                p["recent_ts"] = cached["recent_ts"]
+            if not p.recent_pnl_30d and cached.recent_pnl_30d:
+                p.recent_pnl_30d = cached.recent_pnl_30d
+            if not p.recent_pnl_7d and cached.recent_pnl_7d:
+                p.recent_pnl_7d = cached.recent_pnl_7d
+            if not p.recent_ts and cached.recent_ts:
+                p.recent_ts = cached.recent_ts
 
         wallets[w] = p
-        if p["verified"]:  ver_count  += 1
-        if p["elite"]:     elite_count += 1
+        if p.verified:  ver_count  += 1
+        if p.elite:     elite_count += 1
         time.sleep(0.04)
 
     # CRITICAL FIX: Inject all known elite/verified wallets from cache into the
@@ -149,16 +149,16 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
     # even when the spiking wallet IS elite and well-known.
     # We don't re-fetch them (too slow) — just pass the cached profile.
     for w, cached_profile in S.env().wallet_cache.items():
-        if w not in wallets and (cached_profile.get("elite") or cached_profile.get("verified")):
+        if w not in wallets and (cached_profile.elite or cached_profile.verified):
             wallets[w] = cached_profile
-            if cached_profile.get("verified"): ver_count  += 1
-            if cached_profile.get("elite"):    elite_count += 1
+            if cached_profile.verified: ver_count  += 1
+            if cached_profile.elite:    elite_count += 1
 
     if S.env().cycle_count % 10 == 0:
         elite_ws = get_elite_wallets()
         if elite_ws:
-            hft_count = sum(1 for w in elite_ws if S.env().wallet_cache.get(w, {}).get("hft"))
-            names = [S.env().wallet_cache.get(w, {}).get("name", w[:10]+"…") for w in elite_ws[:8]]
+            hft_count = sum(1 for w in elite_ws if (p2 := S.env().wallet_cache.get(w)) and p2.is_hft())
+            names = [(p2.name if (p2 := S.env().wallet_cache.get(w)) else None) or w[:10]+"…" for w in elite_ws[:8]]
             _log(f"🔥 Elite ({len(elite_ws)}, ⚡{hft_count} HFT): {', '.join(names)}", "INFO")
 
     # Wallet exit monitoring
@@ -327,7 +327,7 @@ def _hft_fast_loop():
         try:
             hft_count = sum(
                 1 for addr, prof in S.env().wallet_cache.items()
-                if prof.get("hft") or prof.get("trades_per_hour", 0) >= HFT_MIN_TRADES_PER_HOUR
+                if prof.is_hft()
             )
             if hft_count == 0:
                 if not _no_hft_warned:

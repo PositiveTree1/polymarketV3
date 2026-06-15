@@ -11,7 +11,7 @@ import titan_db as DB
 import titan_prices
 from titan_prices import PricesCacheSrv
 from titan_config import STATE_FILE, STATE_DB, BANKROLL_START, MAX_WATCHLIST_SIZE
-from titan_wallet import WalletProfile
+from titan_wallet import Wallet
 
 _STARTUP_ELITE_VER_REFRESH_MAX_AGE_S = 2 * 24 * 3600
 
@@ -38,9 +38,9 @@ def save_state():
 def save_wallet_roster():
     try:
         saved = 0
-        for addr, profile in S.env().wallet_cache.items():
-            if profile.get("verified") or profile.get("watchable"):
-                DB.upsert_wallet_profile(addr, profile)
+        for addr, wallet in S.env().wallet_cache.items():
+            if wallet.verified or wallet.watchable:
+                DB.upsert_wallet_profile(addr, wallet.to_db_dict())
                 saved += 1
         if saved:
             S._log(f"💾 Wallet roster saved: {saved} profiles to DB", "DATA")
@@ -204,57 +204,29 @@ def _rebuild_equity_from_trades(env):
 
 
 
-def _make_stub(addr: str, detail: str) -> "WalletProfile":
-    from titan_config import VIP_WALLETS
-    is_vip = addr.lower() in {wallet.lower() for wallet in VIP_WALLETS}
-    return cast(WalletProfile, {  # type: ignore[arg-type]
-        "score": 0.10, "win_rate": 0.0, "wilson_lb": 0.0, "alpha_per_trade": 0.0,
-        "n_resolved": 0, "n_pos": 0, "total_value": 0.0,
-        "total_pnl": 0.0, "pnl_pct": 0.0, "avg_pos_size": 0.0,
-        "avg_profit": 0.0, "avg_bet": 0.0, "trades_per_hour": 0.0,
-        "recent_pnl_30d": None, "recent_pnl_7d": None, "recent_ts": 0.0,
-        "loaded_trade_count": 0, "trade_load_limited": False,
-        "loaded_trade_pnl": 0.0,
-        "first_loaded_trade_ts": None, "last_loaded_trade_ts": None,
-        "verified": False, "watchable": True, "elite": False, "hft": False, "vip": is_vip, "sports_bot": False,
-        "name": addr[:10] + "…", "ts": 0.0,
-        "lb_rank": None, "lb_vol": None,
-        "detail": detail, "wr_source": "none", "fail_reasons": [],
-    })
+def _make_stub(addr: str, detail: str) -> Wallet:
+    return Wallet.make_stub(addr, detail)
 
 
 def _refresh_elite_ver_wallets() -> None:
     from titan_wallet import get_compute_and_store_wallet
     import time
     stale_before = time.time() - _STARTUP_ELITE_VER_REFRESH_MAX_AGE_S
-    
-    def _tier_label(profile: "WalletProfile") -> str:
-        if profile.get("elite"):
-            return "ELITE"
-        if profile.get("verified"):
-            return "VER"
-        if profile.get("watchable"):
-            return "PAR"
-        return "REJ"
 
     def _startup(msg: str) -> None:
         print(f"[STARTUP] {msg}", flush=True)
         S._log(f"[STARTUP] {msg}", "INFO")
 
-    def _fmt_date(ts: object) -> str:
-        if not isinstance(ts, (int, float)) or float(ts) <= 0.0:
+    def _fmt_date(ts: float | None) -> str:
+        if not ts or ts <= 0.0:
             return "?"
-        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d")
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
 
     targets = [
         (addr, p) for addr, p in S.env().wallet_cache.items()
-        if (p.get("elite") or p.get("verified"))
-        and float(p.get("ts") or 0.0) <= stale_before
+        if (p.elite or p.verified) and p.ts <= stale_before
     ]
-    elite_ver_total = sum(
-        1 for p in S.env().wallet_cache.values()
-        if p.get("elite") or p.get("verified")
-    )
+    elite_ver_total = sum(1 for p in S.env().wallet_cache.values() if p.elite or p.verified)
     fresh_count = elite_ver_total - len(targets)
     if not targets:
         _startup(f"ELITE/VER startup refresh summary: fresh={fresh_count} refresh=0 total={elite_ver_total}")
@@ -264,19 +236,17 @@ def _refresh_elite_ver_wallets() -> None:
     _startup(f"ELITE/VER startup refresh summary: fresh={fresh_count} refresh={total} total={elite_ver_total}")
     _startup(f"Refreshing {total} stale ELITE/VER wallets from Polymarket...")
     for i, (addr, p) in enumerate(targets, 1):
-        tier_before = _tier_label(p)
-        name = p.get("name") or addr[:14] + "..."
+        tier_before = p.tier()
+        name = p.name or addr[:14] + "..."
         try:
             refreshed = get_compute_and_store_wallet(addr)
-            if refreshed.get("watchable") or refreshed.get("verified"):
-                DB.upsert_wallet_profile(addr, refreshed)
-            tier_after = _tier_label(refreshed)
+            if refreshed.watchable or refreshed.verified:
+                DB.upsert_wallet_profile(addr, refreshed.to_db_dict())
+            tier_after = refreshed.tier()
             tier_change = f" {tier_before}=>{tier_after}" if tier_before != tier_after else f" {tier_after}"
-            loaded_trade_count = int(refreshed.get("loaded_trade_count", 0))
-            trade_load_limited = bool(refreshed.get("trade_load_limited", False))
-            trade_count_text = f"{loaded_trade_count}{'*' if trade_load_limited else ''}"
-            first_trade_text = _fmt_date(refreshed.get("first_loaded_trade_ts"))
-            last_trade_text = _fmt_date(refreshed.get("last_loaded_trade_ts"))
+            trade_count_text = f"{refreshed.loaded_trade_count}{'*' if refreshed.trade_load_limited else ''}"
+            first_trade_text = _fmt_date(refreshed.first_loaded_trade_ts)
+            last_trade_text  = _fmt_date(refreshed.last_loaded_trade_ts)
             _startup(
                 f"  {i}/{total}{tier_change} {name} "
                 f"trades={trade_count_text} range={first_trade_text}->{last_trade_text}"
@@ -291,37 +261,31 @@ def _refresh_elite_ver_wallets() -> None:
 
 def _load_wallets_from_db() -> None:
     from titan_config import SEED_WATCHLIST, VIP_WALLETS, VIP_WALLET_NAMES
-    vip_wallets = {wallet.lower() for wallet in VIP_WALLETS}
+    from titan_wallet import Wallet
+    vip_wallets = {w.lower() for w in VIP_WALLETS}
     try:
         profiles = DB.load_watchable_wallets(MAX_WATCHLIST_SIZE)
         with_profile = 0
         legacy = 0
-        for addr, profile in profiles.items():
+        for addr, raw in profiles.items():
             if addr in S.env().wallet_cache:
                 continue
-            if profile is not None:
-                profile["vip"] = addr.lower() in vip_wallets
-                profile.setdefault("loaded_trade_count", 0)
-                profile.setdefault("trade_load_limited", False)
-                profile.setdefault("loaded_trade_pnl", 0.0)
-                profile.setdefault("first_loaded_trade_ts", None)
-                profile.setdefault("last_loaded_trade_ts", None)
+            if raw is not None:
+                wallet = Wallet.from_db(addr, raw)
+                wallet.vip = addr.lower() in vip_wallets
                 vip_name = VIP_WALLET_NAMES.get(addr.lower(), "")
-                current_name = str(profile.get("name") or "")
-                if vip_name and (not current_name or current_name.startswith("0x") or current_name.endswith("…")):
-                    profile["name"] = vip_name
-                cached_ts = profile.get("ts")
-                if not isinstance(cached_ts, (int, float)) or float(cached_ts) < 0.0:
-                    profile["ts"] = 0.0
-                e = "🔥ELITE" if profile.get("elite") else ("✅VER" if profile.get("verified") else "👁WATCH")
-                S._log(f"📂 LOAD {addr[:14]}… {e} elite={profile.get('elite')} verified={profile.get('verified')} watchable={profile.get('watchable')}", "DIAG")
-                S.env().wallet_cache[addr] = cast(WalletProfile, profile)
+                if vip_name and (not wallet.name or wallet.name.startswith("0x") or wallet.name.endswith("…")):
+                    wallet.name = vip_name
+                if wallet.ts < 0.0:
+                    wallet.ts = 0.0
+                e = "🔥ELITE" if wallet.elite else ("✅VER" if wallet.verified else "👁WATCH")
+                S._log(f"📂 LOAD {addr[:14]}… {e} elite={wallet.elite} verified={wallet.verified} watchable={wallet.watchable}", "DIAG")
+                S.env().wallet_cache[addr] = wallet
                 with_profile += 1
             else:
                 S.env().wallet_cache[addr] = _make_stub(addr, "legacy")
                 legacy += 1
 
-        # Ensure SEED_WATCHLIST addresses are always watchable, within the cap
         seeds_added = 0
         for addr in SEED_WATCHLIST:
             a = addr.lower()

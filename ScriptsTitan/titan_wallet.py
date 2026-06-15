@@ -5,7 +5,7 @@ HFT DETECTION:
   Some elite wallets (e.g. swisstony) are high-frequency traders.
   They trade many small positions very rapidly. Traditional metrics
   (avg_bet, avg_profit_per_trade) unfairly penalise them.
-  is_hft_wallet() detects HFT behaviour and adjusts polling accordingly.
+  Wallet.is_hft() detects HFT behaviour and adjusts polling accordingly.
 
 v9 ADDITIONS:
   1. SPORTS BOT DETECTION: Identifies wallets that predominantly trade
@@ -26,17 +26,252 @@ v10 ADDITIONS:
   5. get_wallet_open_positions(): Fetches current open positions for a wallet.
      Used by the Open Book consensus scanner.
 
-  6. is_recent_form_qualified(): Gate function for Recent Form Copy strategy.
+  6. Wallet.is_recent_form_qualified(): Gate function for Recent Form Copy strategy.
 """
 
 import time
 import math
 from collections.abc import Mapping
-from typing import TypedDict
+from dataclasses import dataclass, field
+from typing import TypedDict, Any
 import titan_state as S
 import titan_config as C
 from titan_config import *
 import titan_db as DB
+
+
+@dataclass
+class Wallet:
+    # ── identity ──────────────────────────────────────────────────────────────
+    addr:               str
+    name:               str
+    ts:                 float
+    loaded_trade_count: int
+    trade_load_limited: bool
+    loaded_trade_pnl:   float
+    first_loaded_trade_ts: float | None
+    last_loaded_trade_ts:  float | None
+
+    # ── scoring ───────────────────────────────────────────────────────────────
+    score:              float
+    win_rate:           float
+    wilson_lb:          float
+    alpha_per_trade:    float
+    wr_source:          str
+
+    # ── stats ─────────────────────────────────────────────────────────────────
+    n_resolved:         int
+    n_pos:              int
+    total_value:        float
+    total_pnl:          float
+    pnl_pct:            float
+    avg_pos_size:       float
+    avg_profit:         float
+    avg_bet:            float
+    trades_per_hour:    float
+
+    # ── flags ─────────────────────────────────────────────────────────────────
+    verified:           bool
+    watchable:          bool
+    elite:              bool
+    hft:                bool
+    vip:                bool
+    sports_bot:         bool
+
+    # ── recent form ───────────────────────────────────────────────────────────
+    recent_pnl_30d:     float | None
+    recent_pnl_7d:      float | None
+    recent_ts:          float
+
+    # ── leaderboard ───────────────────────────────────────────────────────────
+    lb_rank:            int | None
+    lb_vol:             float | None
+
+    # ── debug ─────────────────────────────────────────────────────────────────
+    detail:             str
+    fail_reasons:       list[str] = field(default_factory=list)
+
+    # ── methods ───────────────────────────────────────────────────────────────
+
+    def is_hft(self) -> bool:
+        if self.hft:
+            return True
+        if self.trades_per_hour >= HFT_MIN_TRADES_PER_HOUR:
+            return True
+        if self.avg_bet > 0 and self.avg_bet < 50 and self.n_resolved > 100:
+            return True
+        return False
+
+    def is_sports_bot_wallet(self) -> bool:
+        if self.sports_bot:
+            return True
+        try:
+            import titan_config as _C
+            sports_bot_tph = getattr(_C, "SPORTS_BOT_MIN_TPH", 150)
+        except Exception:
+            sports_bot_tph = 150
+        if self.trades_per_hour >= sports_bot_tph:
+            return True
+        _SPORTS_BOT_NAMES = {
+            "gamblingisallyouneed", "swisstony", "rn1", "cannae", "lilybaeum",
+            "billdenter", "billdenter2026", "elkmonkey", "billyel", "sportsguy",
+            "texaskid", "ferrarichampions", "ferrarichampions2026", "snakeball",
+        }
+        lname = self.name.lower()
+        if any(sbn in lname for sbn in _SPORTS_BOT_NAMES):
+            return True
+        if self.trades_per_hour >= 50 and self.avg_bet > 0 and self.avg_bet < 100:
+            return True
+        return False
+
+    def calc_alpha_per_trade(self) -> float:
+        if self.n_resolved <= 0:
+            return 0.0
+        return self.total_pnl / self.n_resolved
+
+    def is_recent_form_qualified(self,
+                                  min_pnl_30d: float = 0,
+                                  min_pnl_7d: float = -50,
+                                  max_tph: float = 20) -> bool:
+        if self.trades_per_hour > max_tph:
+            return False
+        if self.recent_pnl_30d is None or self.recent_pnl_7d is None:
+            return False
+        return self.recent_pnl_30d >= min_pnl_30d and self.recent_pnl_7d >= min_pnl_7d
+
+    def tier(self) -> str:
+        if self.elite:     return "🔥ELITE"
+        if self.verified:  return "✅VER"
+        if self.watchable: return "👁WATCH"
+        return "❌REJ"
+
+    def to_wire(self) -> dict[str, Any]:
+        """Produce the API wire dict (TrackedWalletDict shape). Only call at JSON boundary."""
+        return {
+            "wallet":               self.addr,
+            "name":                 self.name,
+            "ts":                   self.ts,
+            "loaded_trade_count":   self.loaded_trade_count,
+            "loaded_trade_pnl":     self.loaded_trade_pnl,
+            "trade_load_limited":   self.trade_load_limited,
+            "first_loaded_trade_ts": self.first_loaded_trade_ts,
+            "last_loaded_trade_ts":  self.last_loaded_trade_ts,
+            "score":                self.score,
+            "win_rate":             self.win_rate,
+            "wilson_lb":            self.wilson_lb,
+            "alpha_per_trade":      self.alpha_per_trade,
+            "wr_source":            self.wr_source,
+            "n_resolved":           self.n_resolved,
+            "n_pos":                self.n_pos,
+            "total_value":          self.total_value,
+            "total_pnl":            self.total_pnl,
+            "pnl_pct":              self.pnl_pct,
+            "avg_pos_size":         self.avg_pos_size,
+            "avg_profit":           self.avg_profit,
+            "avg_bet":              self.avg_bet,
+            "trades_per_hour":      self.trades_per_hour,
+            "verified":             self.verified,
+            "watchable":            self.watchable,
+            "elite":                self.elite,
+            "hft":                  self.hft,
+            "vip":                  self.vip,
+            "sports_bot":           self.sports_bot,
+            "recent_pnl_30d":       self.recent_pnl_30d,
+            "recent_pnl_7d":        self.recent_pnl_7d,
+            "recent_ts":            self.recent_ts,
+            "lb_rank":              self.lb_rank,
+            "lb_vol":               self.lb_vol,
+            "detail":               self.detail,
+            "fail_reasons":         self.fail_reasons,
+        }
+
+    def to_db_dict(self) -> dict[str, Any]:
+        """Produce the dict stored as JSON in SQLite. Identical shape to to_wire() minus addr (stored as column)."""
+        d = self.to_wire()
+        d.pop("wallet", None)
+        return d
+
+    @classmethod
+    def from_db(cls, addr: str, d: dict[str, Any]) -> "Wallet":
+        """Reconstruct a Wallet from a DB JSON blob."""
+        return cls(
+            addr=addr,
+            name=str(d.get("name") or addr[:10] + "…"),
+            ts=float(d.get("ts") or 0.0),
+            loaded_trade_count=int(d.get("loaded_trade_count") or 0),
+            trade_load_limited=bool(d.get("trade_load_limited") or False),
+            loaded_trade_pnl=float(d.get("loaded_trade_pnl") or 0.0),
+            first_loaded_trade_ts=d.get("first_loaded_trade_ts"),
+            last_loaded_trade_ts=d.get("last_loaded_trade_ts"),
+            score=float(d.get("score") or 0.10),
+            win_rate=float(d.get("win_rate") or 0.0),
+            wilson_lb=float(d.get("wilson_lb") or 0.0),
+            alpha_per_trade=float(d.get("alpha_per_trade") or 0.0),
+            wr_source=str(d.get("wr_source") or "none"),
+            n_resolved=int(d.get("n_resolved") or 0),
+            n_pos=int(d.get("n_pos") or 0),
+            total_value=float(d.get("total_value") or 0.0),
+            total_pnl=float(d.get("total_pnl") or 0.0),
+            pnl_pct=float(d.get("pnl_pct") or 0.0),
+            avg_pos_size=float(d.get("avg_pos_size") or 0.0),
+            avg_profit=float(d.get("avg_profit") or 0.0),
+            avg_bet=float(d.get("avg_bet") or 0.0),
+            trades_per_hour=float(d.get("trades_per_hour") or 0.0),
+            verified=bool(d.get("verified") or False),
+            watchable=bool(d.get("watchable") or False),
+            elite=bool(d.get("elite") or False),
+            hft=bool(d.get("hft") or False),
+            vip=bool(d.get("vip") or False),
+            sports_bot=bool(d.get("sports_bot") or False),
+            recent_pnl_30d=d.get("recent_pnl_30d"),
+            recent_pnl_7d=d.get("recent_pnl_7d"),
+            recent_ts=float(d.get("recent_ts") or 0.0),
+            lb_rank=d.get("lb_rank"),
+            lb_vol=d.get("lb_vol"),
+            detail=str(d.get("detail") or ""),
+            fail_reasons=list(d.get("fail_reasons") or []),
+        )
+
+    @classmethod
+    def make_stub(cls, addr: str, detail: str, *, watchable: bool = True) -> "Wallet":
+        is_vip = addr.lower() in {a.lower() for a in C.VIP_WALLETS}
+        return cls(
+            addr=addr,
+            name=addr[:10] + "…",
+            ts=0.0,
+            loaded_trade_count=0,
+            trade_load_limited=False,
+            loaded_trade_pnl=0.0,
+            first_loaded_trade_ts=None,
+            last_loaded_trade_ts=None,
+            score=0.10,
+            win_rate=0.0,
+            wilson_lb=0.0,
+            alpha_per_trade=0.0,
+            wr_source="none",
+            n_resolved=0,
+            n_pos=0,
+            total_value=0.0,
+            total_pnl=0.0,
+            pnl_pct=0.0,
+            avg_pos_size=0.0,
+            avg_profit=0.0,
+            avg_bet=0.0,
+            trades_per_hour=0.0,
+            verified=False,
+            watchable=watchable,
+            elite=False,
+            hft=False,
+            vip=is_vip,
+            sports_bot=False,
+            recent_pnl_30d=None,
+            recent_pnl_7d=None,
+            recent_ts=0.0,
+            lb_rank=None,
+            lb_vol=None,
+            detail=detail,
+            fail_reasons=[],
+        )
 
 
 class WhalePerformanceRecord(TypedDict):
@@ -85,56 +320,6 @@ class WinRateData(TypedDict):
     trades_per_hour:    float
     recent_pnl_30d:     float
     recent_pnl_7d:      float
-
-
-class WalletProfile(TypedDict):
-    # ── identity ──────────────────────────────────────────────────────────────
-    name:               str
-    ts:                 float
-    loaded_trade_count: int
-    trade_load_limited: bool
-    loaded_trade_pnl:     float
-    first_loaded_trade_ts: float | None
-    last_loaded_trade_ts:  float | None
-
-    # ── scoring ───────────────────────────────────────────────────────────────
-    score:              float
-    win_rate:           float
-    wilson_lb:          float
-    alpha_per_trade:    float
-    wr_source:          str
-
-    # ── stats ─────────────────────────────────────────────────────────────────
-    n_resolved:         int
-    n_pos:              int
-    total_value:        float
-    total_pnl:          float
-    pnl_pct:            float
-    avg_pos_size:       float
-    avg_profit:         float
-    avg_bet:            float
-    trades_per_hour:    float
-
-    # ── flags ─────────────────────────────────────────────────────────────────
-    verified:           bool
-    watchable:          bool
-    elite:              bool
-    hft:                bool
-    vip:                bool
-    sports_bot:         bool
-
-    # ── recent form ───────────────────────────────────────────────────────────
-    recent_pnl_30d:     float | None
-    recent_pnl_7d:      float | None
-    recent_ts:          float
-
-    # ── leaderboard ───────────────────────────────────────────────────────────
-    lb_rank:            int | None
-    lb_vol:             float | None
-
-    # ── debug ─────────────────────────────────────────────────────────────────
-    detail:             str
-    fail_reasons:       list[str]
 
 
 def _is_auto_wallet_name(name: str) -> bool:
@@ -201,79 +386,6 @@ def wilson_lower_bound(wins: int, total: int, z: float = 1.96) -> float:
     return max(0.0, lb)
 
 
-def is_hft_wallet(profile: WalletProfile) -> bool:
-    """
-    Return True if this wallet behaves like a high-frequency trader.
-
-    HFT heuristics (any one is sufficient):
-      - avg_bet < $50 AND n_resolved > 100  (many small bets)
-      - trades_per_hour > HFT_MIN_TRADES_PER_HOUR (if we have that metric)
-      - explicitly tagged via "hft": True in cache
-    """
-    if profile.get("hft"):
-        return True
-    avg_bet  = profile.get("avg_bet", 0)
-    n_res    = profile.get("n_resolved", 0)
-    tph      = profile.get("trades_per_hour", 0)
-    if tph >= HFT_MIN_TRADES_PER_HOUR:
-        return True
-    if avg_bet > 0 and avg_bet < 50 and n_res > 100:
-        return True
-    return False
-
-
-def is_sports_bot(profile: WalletProfile) -> bool:
-    """
-    Return True if this wallet is likely a sports market-making bot.
-
-    Heuristics:
-      - Elite wallet with very high TPH (>= SPORTS_BOT_MIN_TPH, default 150)
-      - Explicitly tagged as sports_bot in cache
-      - Name matches known sports bot patterns
-      - High trades per hour combined with low avg_bet (non-elite version)
-    """
-    if profile.get("sports_bot"):
-        return True
-
-    tph     = profile.get("trades_per_hour", 0)
-    avg_bet = profile.get("avg_bet", 0)
-
-    try:
-        import titan_config as _C
-        sports_bot_tph = getattr(_C, "SPORTS_BOT_MIN_TPH", 150)
-    except Exception:
-        sports_bot_tph = 150
-
-    if tph >= sports_bot_tph:
-        return True
-
-    name = profile.get("name", "").lower()
-    _SPORTS_BOT_NAMES = {
-        "gamblingisallyouneed", "swisstony", "rn1", "cannae", "lilybaeum",
-        "billdenter", "billdenter2026", "elkmonkey", "billyel", "sportsguy",
-        "texaskid", "ferrarichampions", "ferrarichampions2026", "snakeball",
-    }
-    for sbn in _SPORTS_BOT_NAMES:
-        if sbn in name:
-            return True
-
-    if tph >= 50 and avg_bet > 0 and avg_bet < 100:
-        return True
-
-    return False
-
-
-def alpha_per_trade(profile: WalletProfile) -> float:
-    """
-    Calculate the average alpha (profit) per resolved trade.
-    Genuine alpha traders have alpha_per_trade >= $20.
-    Market makers have tiny alpha_per_trade despite high win rates.
-    """
-    pnl   = profile.get("total_pnl", 0)
-    n_res = profile.get("n_resolved", 0)
-    if n_res <= 0:
-        return 0.0
-    return pnl / n_res
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -333,7 +445,8 @@ def get_wallet_performance_summary() -> list[WhalePerformanceSummary]:
     summary = []
     week_ago = time.time() - 7 * 86400
     for w, rec in _whale_performance.items():
-        name = S.env().wallet_cache.get(w, {}).get("name", w[:10] + "…")
+        cached = S.env().wallet_cache.get(w)
+        name = cached.name if cached is not None else w[:10] + "…"
         wr = rec["wins"] / rec["n_trades"] if rec["n_trades"] > 0 else 0
         recent = rec.get("recent_trades", [])
         weekly_pnl = sum(p for ts, p in recent if ts >= week_ago)
@@ -386,23 +499,6 @@ def get_wallet_open_positions(wallet: str) -> list[WalletOpenPosition]:
         })
     return results
 
-
-def is_recent_form_qualified(profile: WalletProfile,
-                              min_pnl_30d: float = 0,
-                              min_pnl_7d: float = -50,
-                              max_tph: float = 20) -> bool:
-    """
-    Gate for Recent Form Copy strategy.
-    Wallet must be profitable recently AND not be an HFT bot.
-    """
-    tph = profile.get("trades_per_hour", 0)
-    if tph > max_tph:
-        return False
-    pnl_30d = profile.get("recent_pnl_30d", None)
-    pnl_7d  = profile.get("recent_pnl_7d", None)
-    if pnl_30d is None or pnl_7d is None:
-        return False  # no recent data available yet
-    return pnl_30d >= min_pnl_30d and pnl_7d >= min_pnl_7d
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -624,16 +720,16 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
 # ─────────────────────────────────────────────────────────────────────────────
 #  WALLET SCORING
 # ─────────────────────────────────────────────────────────────────────────────
-def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
+def get_compute_and_store_wallet(wallet: str) -> Wallet:
     wallet = wallet.lower()
     now_t  = time.time()
     is_vip = wallet in {addr.lower() for addr in C.VIP_WALLETS}
     vip_name = C.VIP_WALLET_NAMES.get(wallet, "")
     cached = S.env().wallet_cache.get(wallet)
-    if cached and (now_t - (cached.get("ts") or 0)) < WALLET_TTL:
+    if cached is not None and (now_t - cached.ts) < WALLET_TTL:
         return cached
 
-    existing_name    = (cached or {}).get("name") or ""
+    existing_name    = cached.name if cached is not None else ""
     existing_is_real = bool(existing_name) and not _is_auto_wallet_name(existing_name)
     keep_name        = existing_name if existing_is_real else vip_name
 
@@ -652,27 +748,16 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
         "sortBy": "CASHPNL", "sortDirection": "DESC",
     })
 
-    null: WalletProfile = {
-        "score": 0.10, "win_rate": 0.0, "wilson_lb": 0.0, "alpha_per_trade": 0.0,
-        "n_resolved": 0, "n_pos": 0, "total_value": 0.0,
-        "total_pnl": 0.0, "pnl_pct": 0.0, "avg_pos_size": 0.0,
-        "avg_profit": 0.0, "avg_bet": 0.0, "trades_per_hour": 0.0,
-        "recent_pnl_30d": None, "recent_pnl_7d": None, "recent_ts": 0.0,
-        "loaded_trade_count": 0, "trade_load_limited": False,
-        "loaded_trade_pnl": 0.0,
-        "first_loaded_trade_ts": None, "last_loaded_trade_ts": None,
-        "verified": False, "watchable": False, "elite": False, "hft": False, "vip": is_vip, "sports_bot": False,
-        "name": keep_name or (wallet[:10] + "…"), "ts": now_t,
-        "lb_rank": None, "lb_vol": None,
-        "detail": "No data", "wr_source": "none",
-        "fail_reasons": ["no_data"],
-    }
-
     if pos_data is None or not isinstance(pos_data, list):
-        if cached:
-            cached["ts"] = now_t - WALLET_TTL + 60
+        if cached is not None:
+            cached.ts = now_t - WALLET_TTL + 60
             S.env().wallet_cache[wallet] = cached
             return cached
+        null = Wallet.make_stub(wallet, "No data", watchable=False)
+        null.ts   = now_t
+        null.name = keep_name or (wallet[:10] + "…")
+        null.vip  = is_vip
+        null.fail_reasons = ["no_data"]
         S.env().wallet_cache[wallet] = null
         return null
 
@@ -700,22 +785,21 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
         if lb_row.get("vol") is not None:
             lb_vol = float(lb_row["vol"])
 
-    wr_data    = fetch_real_winrate(wallet)
-    wr         = wr_data["win_rate"]
-    wb         = wr_data["wilson_lb"]
-    n_res      = wr_data["total"]
-    wr_src     = wr_data["source"]
-    avg_profit = wr_data.get("avg_profit", 0)
-    avg_bet    = wr_data.get("avg_bet", 0)
-    tph        = wr_data.get("trades_per_hour", 0)
-    loaded_trade_count = int(wr_data.get("loaded_trade_count", 0))
-    trade_load_limited = bool(wr_data.get("trade_load_limited", False))
-    loaded_trade_pnl = float(wr_data.get("loaded_trade_pnl", 0.0))
-    first_loaded_trade_ts = wr_data.get("first_loaded_trade_ts")
-    last_loaded_trade_ts = wr_data.get("last_loaded_trade_ts")
-    # v10: store recent-form fields with their own TTL
-    recent_pnl_30d = wr_data.get("recent_pnl_30d", None)
-    recent_pnl_7d  = wr_data.get("recent_pnl_7d", None)
+    wr_data            = fetch_real_winrate(wallet)
+    wr                 = wr_data["win_rate"]
+    wb                 = wr_data["wilson_lb"]
+    n_res              = wr_data["total"]
+    wr_src             = wr_data["source"]
+    avg_profit         = wr_data["avg_profit"]
+    avg_bet            = wr_data["avg_bet"]
+    tph                = wr_data["trades_per_hour"]
+    loaded_trade_count = wr_data["loaded_trade_count"]
+    trade_load_limited = wr_data["trade_load_limited"]
+    loaded_trade_pnl   = wr_data["loaded_trade_pnl"]
+    first_loaded_trade_ts = wr_data["first_loaded_trade_ts"]
+    last_loaded_trade_ts  = wr_data["last_loaded_trade_ts"]
+    recent_pnl_30d     = wr_data["recent_pnl_30d"]
+    recent_pnl_7d      = wr_data["recent_pnl_7d"]
 
     avg_profit_estimated = False
     if avg_profit <= 0 and n_res >= 10 and pnl > 0:
@@ -724,35 +808,33 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
 
     apt = loaded_trade_pnl / n_res if n_res > 0 else 0.0
 
-    # ── delegate scoring and tiering to the active WalletSelector ────────────
     import titan_config as _C
     sel = _C.get_active_selector()
 
-    raw_for_selector = {
-        "win_rate":       wr,
-        "wilson_lb":      wb,
-        "n_resolved":     n_res,
-        "n_pos":          n_pos,
-        "total_pnl":      pnl,
-        "total_value":    cur,
-        "pnl_pct":        pct,
-        "avg_profit":     avg_profit,
-        "avg_bet":        avg_bet,
-        "trades_per_hour": tph,
-        "alpha_per_trade": apt,
-    }
-
     if sel is not None:
-        score = sel.score(raw_for_selector)
-        watchable, verified, elite, fail_reasons = sel.is_selected(raw_for_selector, score)
         from titan_selector import PerformanceSelector
-        hft_detected      = sel.is_hft(tph, avg_bet, n_res) if isinstance(sel, PerformanceSelector) else False
+        _draft = Wallet(
+            addr=wallet, name="", ts=now_t,
+            loaded_trade_count=loaded_trade_count, trade_load_limited=trade_load_limited,
+            loaded_trade_pnl=loaded_trade_pnl,
+            first_loaded_trade_ts=float(first_loaded_trade_ts) if first_loaded_trade_ts is not None else None,
+            last_loaded_trade_ts=float(last_loaded_trade_ts) if last_loaded_trade_ts is not None else None,
+            score=0.0, win_rate=wr, wilson_lb=wb, alpha_per_trade=round(apt, 2), wr_source=wr_src,
+            n_resolved=n_res, n_pos=n_pos, total_value=cur, total_pnl=pnl, pnl_pct=pct,
+            avg_pos_size=avg_sz, avg_profit=avg_profit, avg_bet=avg_bet, trades_per_hour=round(tph, 2),
+            verified=False, watchable=False, elite=False, hft=False, vip=is_vip, sports_bot=False,
+            recent_pnl_30d=round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
+            recent_pnl_7d=round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
+            recent_ts=now_t, lb_rank=lb_rank, lb_vol=lb_vol, detail="", fail_reasons=[],
+        )
+        score = sel.score(_draft)
+        watchable, verified, elite, fail_reasons = sel.is_selected(_draft, score)
+        hft_detected       = sel.is_hft(tph, avg_bet, n_res) if isinstance(sel, PerformanceSelector) else False
         sports_bot_detected = False
         _check_name = keep_name or existing_name or (wallet[:10] + "…")
         if isinstance(sel, PerformanceSelector):
             sports_bot_detected = sel.is_sports_bot(_check_name, tph)
     else:
-        # fallback: hardcoded defaults so the system keeps running if selector fails to load
         score = (
             0.30 * wb +
             0.25 * min(1.0, max(0, pct / 30)) +
@@ -777,34 +859,47 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
     else:
         final_name = wallet[:10] + "…"
 
-    est_tag   = "~" if avg_profit_estimated else ""
-    hft_tag   = "⚡HFT" if hft_detected else ""
+    est_tag    = "~" if avg_profit_estimated else ""
+    hft_tag    = "⚡HFT" if hft_detected else ""
     sports_tag = "🏈SPORTS" if sports_bot_detected else ""
-    rf_tag    = f" RF30d:${recent_pnl_30d:+.0f}" if recent_pnl_30d is not None else ""
+    rf_tag     = f" RF30d:${recent_pnl_30d:+.0f}" if recent_pnl_30d is not None else ""
 
-    result: WalletProfile = {
-        "score": round(score, 5), "win_rate": wr, "wilson_lb": wb,
-        "n_resolved": n_res, "n_pos": n_pos,
-        "total_value": cur, "total_pnl": pnl, "pnl_pct": pct,
-        "avg_pos_size": avg_sz, "avg_profit": avg_profit, "avg_bet": avg_bet,
-        "trades_per_hour": round(tph, 2),
-        "alpha_per_trade": round(apt, 2),
-        "hft": hft_detected,
-        "vip": is_vip,
-        "sports_bot": sports_bot_detected,
-        "verified": verified, "watchable": watchable, "elite": elite,
-        "loaded_trade_count": loaded_trade_count,
-        "trade_load_limited": trade_load_limited,
-        "loaded_trade_pnl": loaded_trade_pnl,
-        "first_loaded_trade_ts": float(first_loaded_trade_ts) if first_loaded_trade_ts is not None else None,
-        "last_loaded_trade_ts": float(last_loaded_trade_ts) if last_loaded_trade_ts is not None else None,
-        "name": final_name, "ts": now_t, "wr_source": wr_src,
-        "fail_reasons": fail_reasons,
-        "recent_pnl_30d": round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
-        "recent_pnl_7d":  round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
-        "recent_ts": now_t,
-        "lb_rank": lb_rank, "lb_vol": lb_vol,
-        "detail": (
+    result = Wallet(
+        addr=wallet,
+        name=final_name,
+        ts=now_t,
+        loaded_trade_count=loaded_trade_count,
+        trade_load_limited=trade_load_limited,
+        loaded_trade_pnl=loaded_trade_pnl,
+        first_loaded_trade_ts=float(first_loaded_trade_ts) if first_loaded_trade_ts is not None else None,
+        last_loaded_trade_ts=float(last_loaded_trade_ts) if last_loaded_trade_ts is not None else None,
+        score=round(score, 5),
+        win_rate=wr,
+        wilson_lb=wb,
+        alpha_per_trade=round(apt, 2),
+        wr_source=wr_src,
+        n_resolved=n_res,
+        n_pos=n_pos,
+        total_value=cur,
+        total_pnl=pnl,
+        pnl_pct=pct,
+        avg_pos_size=avg_sz,
+        avg_profit=avg_profit,
+        avg_bet=avg_bet,
+        trades_per_hour=round(tph, 2),
+        verified=verified,
+        watchable=watchable,
+        elite=elite,
+        hft=hft_detected,
+        vip=is_vip,
+        sports_bot=sports_bot_detected,
+        recent_pnl_30d=round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
+        recent_pnl_7d=round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
+        recent_ts=now_t,
+        lb_rank=lb_rank,
+        lb_vol=lb_vol,
+        fail_reasons=fail_reasons,
+        detail=(
             f"Score:{score:.2f} WR:{wr*100:.0f}% WilsonLB:{wb*100:.0f}% "
             f"Res:{n_res} Port:${cur:,.0f} PnL:${pnl:+,.0f}({pct:+.1f}%) "
             f"AvgProfit:{est_tag}${avg_profit:.1f} AvgBet:${avg_bet:.0f} "
@@ -812,38 +907,32 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
             f"{'🔥ELITE' if elite else '✅VER' if verified else '👁WATCH' if watchable else '❌'}"
             f"{hft_tag}{sports_tag}{rf_tag}"
         ),
-    }
+    )
 
-    def _tier(p: WalletProfile | None) -> str:
-        if not p:
-            return "NEW"
-        if p.get("elite"):     return "🔥ELITE"
-        if p.get("verified"):  return "✅VER"
-        if p.get("watchable"): return "👁WATCH"
-        return "❌REJ"
-
-    tier_before = _tier(cached)
-    tier_after  = _tier(result)
+    tier_before = cached.tier() if cached is not None else "NEW"
+    tier_after  = result.tier()
     if tier_before != tier_after:
         reasons_str = ", ".join(fail_reasons) if fail_reasons else ""
         stats_str = f"PnL=${pnl:+,.0f} Port=${cur:,.0f} Score={score:.2f} WR={wr*100:.0f}% Res={n_res}"
         if tier_after in ("🔥ELITE", "✅VER", "👁WATCH"):
-            msg  = f"⬆ {tier_before}→{tier_after} {final_name} ({wallet[:12]}…) | {stats_str}"
+            msg   = f"⬆ {tier_before}→{tier_after} {final_name} ({wallet[:12]}…) | {stats_str}"
             level = "INFO"
         else:
-            msg  = f"⬇ {tier_before}→{tier_after} {final_name} ({wallet[:12]}…) | {reasons_str} | {stats_str}"
+            msg   = f"⬇ {tier_before}→{tier_after} {final_name} ({wallet[:12]}…) | {reasons_str} | {stats_str}"
             level = "WARN"
         print(f"[WALLET] {msg}", flush=True)
         S._log(msg, level)
 
-    _TRACKED = ("elite", "verified", "watchable", "score", "win_rate", "wilson_lb",
-                "total_pnl", "name", "hft", "vip", "sports_bot", "recent_pnl_30d", "recent_pnl_7d",
-                "loaded_trade_count", "trade_load_limited", "first_loaded_trade_ts", "last_loaded_trade_ts", "ts")
-    _changed = cached is None or any(result.get(k) != cached.get(k) for k in _TRACKED)
+    _changed = cached is None or any(
+        getattr(result, k) != getattr(cached, k)
+        for k in ("elite", "verified", "watchable", "score", "win_rate", "wilson_lb",
+                  "total_pnl", "name", "hft", "vip", "sports_bot", "recent_pnl_30d", "recent_pnl_7d",
+                  "loaded_trade_count", "trade_load_limited", "first_loaded_trade_ts", "last_loaded_trade_ts", "ts")
+    )
     S.env().wallet_cache[wallet] = result
     if watchable and _changed:
-        DB.upsert_wallet_profile(wallet, result)
-    elif not watchable and (cached or {}).get("watchable"):
+        DB.upsert_wallet_profile(wallet, result.to_db_dict())
+    elif not watchable and cached is not None and cached.watchable:
         DB.clear_wallet_profile(wallet)
     return result
 
@@ -852,7 +941,7 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
 #  HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 def get_elite_wallets() -> list[str]:
-    return [w.lower() for w, p in S.env().wallet_cache.items() if p.get("elite")]
+    return [w.lower() for w, p in S.env().wallet_cache.items() if p.elite]
 
 
 def _refresh_recent_form_scores() -> None:
@@ -865,16 +954,15 @@ def _refresh_recent_form_scores() -> None:
     stale_threshold = now_t - 6 * 3600
     refreshed = 0
     for wallet, profile in list(S.env().wallet_cache.items()):
-        if not profile.get("verified"):
+        if not profile.verified:
             continue
-        recent_ts = profile.get("recent_ts", 0)
-        if recent_ts >= stale_threshold:
+        if profile.recent_ts >= stale_threshold:
             continue
         try:
             wr_data = fetch_real_winrate(wallet)
-            profile["recent_pnl_30d"] = wr_data.get("recent_pnl_30d")
-            profile["recent_pnl_7d"]  = wr_data.get("recent_pnl_7d")
-            profile["recent_ts"]      = now_t
+            profile.recent_pnl_30d = wr_data["recent_pnl_30d"]
+            profile.recent_pnl_7d  = wr_data["recent_pnl_7d"]
+            profile.recent_ts      = now_t
             S.env().wallet_cache[wallet] = profile
             refreshed += 1
             time.sleep(0.12)
@@ -903,13 +991,13 @@ def discover_new_wallets() -> None:
     discovered = 0
     for w in list(new_cands)[:25]:
         prof = get_compute_and_store_wallet(w)
-        if prof.get("verified"):
+        if prof.verified:
             discovered += 1
-            tag = "🔥ELITE" if prof["elite"] else ("⚡HFT" if prof.get("hft") else "✅VER")
+            tag = "🔥ELITE" if prof.elite else ("⚡HFT" if prof.hft else "✅VER")
             S._log(
                 f"🆕 {tag} {w[:14]}… "
-                f"Score:{prof['score']:.2f} WR:{prof['win_rate']*100:.0f}% "
-                f"PnL:${prof['total_pnl']:+,.0f} TPH:{prof.get('trades_per_hour',0):.1f}",
+                f"Score:{prof.score:.2f} WR:{prof.win_rate*100:.0f}% "
+                f"PnL:${prof.total_pnl:+,.0f} TPH:{prof.trades_per_hour:.1f}",
                 "INFO"
             )
         time.sleep(0.12)
@@ -917,11 +1005,11 @@ def discover_new_wallets() -> None:
     wl = S.get_watchlist()
     if len(wl) > MAX_WATCHLIST_SIZE:
         import titan_db as DB
-        verified_set = {w for w in wl if S.env().wallet_cache.get(w, {}).get("verified")}
+        verified_set = {w for w in wl if (p := S.env().wallet_cache.get(w)) and p.verified}
         unverified   = [w for w in wl if w not in verified_set]
         keep_unver   = max(0, MAX_WATCHLIST_SIZE - len(verified_set))
         for w in unverified[keep_unver:]:
-            S.env().wallet_cache[w]["watchable"] = False
+            S.env().wallet_cache[w].watchable = False
             DB.set_watchable(w, False)
         S._log(f"🧹 Watchlist pruned to {MAX_WATCHLIST_SIZE} ({len(unverified[keep_unver:])} toggled off)", "DATA")
 
@@ -954,10 +1042,10 @@ def scan_top_market_holders() -> None:
         added = 0
         for w in list(new_cands)[:20]:
             prof = get_compute_and_store_wallet(w)
-            if prof.get("watchable"):
+            if prof.watchable:
                 added += 1
-                if prof.get("verified"):
-                    tag = "🔥ELITE" if prof["elite"] else ("⚡HFT" if prof.get("hft") else "✅VER")
+                if prof.verified:
+                    tag = "🔥ELITE" if prof.elite else ("⚡HFT" if prof.hft else "✅VER")
                     S._log(f"🆕 {tag} from market scan: {w[:14]}…", "INFO")
             time.sleep(0.12)
         S._log(f"🔍 Market scan done — {added} added", "DATA")

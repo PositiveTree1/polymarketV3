@@ -9,7 +9,6 @@ import titan_state as S
 import titan_config as C
 from titan_config import *
 from titan_market import get_outcome_price, fetch_wallet_sells
-from titan_wallet import is_hft_wallet, is_recent_form_qualified
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -102,9 +101,9 @@ class ConsensusBasketBuilder(SignalBuilderBase):
                 next(iter(by_w.values())).title
             )
 
-            elite_wallets    = {w: t for w, t in by_w.items() if wallets.get(w, _EMPTY_W).get("elite")}
+            elite_wallets    = {w: t for w, t in by_w.items() if wallets.get(w, _EMPTY_W).elite}
             verified_wallets = {w: t for w, t in by_w.items()
-                                if wallets.get(w, _EMPTY_W).get("verified") and w not in elite_wallets}
+                                if wallets.get(w, _EMPTY_W).verified and w not in elite_wallets}
 
             _any_hft_trade_tagged = any(
                 t.is_large_trade or _hft_spike_ratio_value(t) > 0
@@ -119,13 +118,12 @@ class ConsensusBasketBuilder(SignalBuilderBase):
                     if w in elite_wallets:
                         continue
                     prof = wallets.get(w, _EMPTY_W)
-                    if not (is_hft_wallet(prof) or prof.get("verified")):
+                    if not (prof.is_hft() or prof.verified):
                         continue
                     elite_wallets[w] = t
 
             hft_wallets = {w: t for w, t in by_w.items()
-                           if (wallets.get(w, _EMPTY_W).get("hft") or
-                               is_hft_wallet(wallets.get(w, _EMPTY_W)))
+                           if wallets.get(w, _EMPTY_W).is_hft()
                            and w in {**elite_wallets, **verified_wallets}}
             all_ver = {**elite_wallets, **verified_wallets}
             n_ver   = len(all_ver)
@@ -138,7 +136,7 @@ class ConsensusBasketBuilder(SignalBuilderBase):
                 if other_cid == cid and other_outcome != outcome:
                     for t in other_group:
                         w = t.wallet
-                        if wallets.get(w, _EMPTY_W).get("elite") or wallets.get(w, _EMPTY_W).get("verified"):
+                        if wallets.get(w, _EMPTY_W).elite or wallets.get(w, _EMPTY_W).verified:
                             opposite_elite_cash += t.cash
                     break
 
@@ -187,7 +185,7 @@ class ConsensusBasketBuilder(SignalBuilderBase):
             if mkt.is_sports:
                 genuine_sports_elites = {
                     w: t for w, t in elite_wallets.items()
-                    if not S.env().wallet_cache.get(w, {}).get("sports_bot", False)
+                    if not ((p := S.env().wallet_cache.get(w)) and p.is_sports_bot_wallet())
                 }
                 if len(genuine_sports_elites) < 1:
                     rejects.append(
@@ -255,12 +253,12 @@ class ConsensusBasketBuilder(SignalBuilderBase):
             _CONVICTION_PORTFOLIO_PCT = self.params.conviction_portfolio_pct
             _CONVICTION_ABS_FLOOR = float(LARGE_TRADE)
             for w, t in {**elite_wallets, **verified_wallets}.items():
-                prof = wallets.get(w, {})
-                portfolio = prof.get("total_value", 0) or prof.get("total_pnl", 0)
+                prof = wallets.get(w, _EMPTY_W)
+                portfolio = prof.total_value or prof.total_pnl
                 cash = t.cash
-                avg_b = prof.get("avg_bet", 0)
                 if portfolio > 0 and cash >= portfolio * _CONVICTION_PORTFOLIO_PCT and cash >= _CONVICTION_ABS_FLOOR:
-                    w_name = S.env().wallet_cache.get(w, {}).get("name", w[:10])
+                    cached = S.env().wallet_cache.get(w)
+                    w_name = (cached.name if cached is not None else None) or w[:10]
                     conviction_detail = f"{w_name} ${cash:,.0f} = {cash/portfolio*100:.1f}% portfolio"
                     has_large_trade = True
                     break
@@ -300,7 +298,7 @@ class ConsensusBasketBuilder(SignalBuilderBase):
             oldest_ts    = min(t.ts for t in all_ver.values())
             age_h        = (now_t - newest_ts) / 3600
 
-            avg_wscore = sum(wallets.get(w, _EMPTY_W).get("score", 0.10) for w in elite_wallets) / len(elite_wallets)
+            avg_wscore = sum(wallets.get(w, _EMPTY_W).score for w in elite_wallets) / len(elite_wallets)
 
             exits_here   = wallet_exits.get(cid, [])
             exits_same_side = list(set(exits_here) & set(all_ver.keys()))
@@ -407,9 +405,9 @@ class RecentFormBuilder(SignalBuilderBase):
         for t in trades:
             w = t.wallet
             prof = wallets.get(w, _EMPTY_W)
-            if not prof.get("verified") and not prof.get("elite"):
+            if not prof.verified and not prof.elite:
                 continue
-            if not is_recent_form_qualified(prof, min_pnl_30d, min_pnl_7d, max_tph):
+            if not prof.is_recent_form_qualified(min_pnl_30d, min_pnl_7d, max_tph):
                 continue
             qualified_trades.append(t)
 
@@ -436,7 +434,7 @@ class RecentFormBuilder(SignalBuilderBase):
             rf_qualified = {}
             for w, t in by_w.items():
                 prof = wallets.get(w, _EMPTY_W)
-                if is_recent_form_qualified(prof, min_pnl_30d, min_pnl_7d, max_tph):
+                if prof.is_recent_form_qualified(min_pnl_30d, min_pnl_7d, max_tph):
                     rf_qualified[w] = t
 
             if not rf_qualified:
@@ -508,19 +506,19 @@ class RecentFormBuilder(SignalBuilderBase):
                 continue
 
             avg_recent_wr = 0.55
-            rf_pnl_vals = [wallets.get(w, {}).get("recent_pnl_30d", 0) or 0 for w in rf_qualified]
+            rf_pnl_vals = [wallets.get(w, _EMPTY_W).recent_pnl_30d or 0 for w in rf_qualified]
             if rf_pnl_vals:
                 avg_pnl = sum(rf_pnl_vals) / len(rf_pnl_vals)
                 avg_recent_wr = max(0.50, min(0.75, 0.55 + avg_pnl / 10000))
 
             elite_wallets_rf = {w: t for w, t in rf_qualified.items()
-                                if wallets.get(w, _EMPTY_W).get("elite")}
+                                if wallets.get(w, _EMPTY_W).elite}
             verified_wallets_rf = {w: t for w, t in rf_qualified.items()
-                                   if wallets.get(w, _EMPTY_W).get("verified") and w not in elite_wallets_rf}
+                                   if wallets.get(w, _EMPTY_W).verified and w not in elite_wallets_rf}
             all_ver = {**elite_wallets_rf, **verified_wallets_rf}
 
             scoring_elites = elite_wallets_rf if elite_wallets_rf else rf_qualified
-            avg_wscore = sum(wallets.get(w, _EMPTY_W).get("score", 0.10) for w in scoring_elites) / len(scoring_elites)
+            avg_wscore = sum(wallets.get(w, _EMPTY_W).score for w in scoring_elites) / len(scoring_elites)
 
             exits_here = wallet_exits.get(cid, [])
             exits_same_side = list(set(exits_here) & set(all_ver.keys()))
@@ -610,8 +608,8 @@ class DriftDiscountBuilder(SignalBuilderBase):
 
         verified_trades = [
             t for t in trades
-            if wallets.get(t.wallet, _EMPTY_W).get("verified") or
-               wallets.get(t.wallet, _EMPTY_W).get("elite")
+            if wallets.get(t.wallet, _EMPTY_W).verified or
+               wallets.get(t.wallet, _EMPTY_W).elite
         ]
 
         if not verified_trades:
@@ -634,9 +632,9 @@ class DriftDiscountBuilder(SignalBuilderBase):
                 next(iter(by_w.values())).title
             )
 
-            elite_wallets = {w: t for w, t in by_w.items() if wallets.get(w, _EMPTY_W).get("elite")}
+            elite_wallets = {w: t for w, t in by_w.items() if wallets.get(w, _EMPTY_W).elite}
             verified_wallets = {w: t for w, t in by_w.items()
-                               if wallets.get(w, _EMPTY_W).get("verified") and w not in elite_wallets}
+                               if wallets.get(w, _EMPTY_W).verified and w not in elite_wallets}
             all_ver = {**elite_wallets, **verified_wallets}
 
             if not all_ver:
@@ -698,7 +696,7 @@ class DriftDiscountBuilder(SignalBuilderBase):
                     time.sleep(0.05)
 
                 if exited_wallets:
-                    exited_names = [S.env().wallet_cache.get(w, {}).get("name", w[:10]) for w in exited_wallets[:2]]
+                    exited_names = [(p.name if (p := S.env().wallet_cache.get(w)) else None) or w[:10] for w in exited_wallets[:2]]
                     if len(exited_wallets) >= len(all_ver):
                         rejects.append(
                             f"  {outcome:<12} {title[:40]}\n"
@@ -720,7 +718,7 @@ class DriftDiscountBuilder(SignalBuilderBase):
                 event_slug = mkt.event_slug
 
             drift = (cur - avg_wallet_entry) / max(avg_wallet_entry, 0.01)
-            avg_wscore = sum(wallets.get(w, _EMPTY_W).get("score", 0.10) for w in all_ver) / max(len(all_ver), 1)
+            avg_wscore = sum(wallets.get(w, _EMPTY_W).score for w in all_ver) / max(len(all_ver), 1)
 
             exits_here = wallet_exits.get(cid, [])
             exits_same_side = list(set(exits_here) & set(all_ver.keys()))

@@ -1,10 +1,13 @@
-"""Shared TypedDicts for all data that crosses the API / MCP wire boundary.
+"""Shared TypedDicts for data that crosses the API / MCP wire boundary.
+
+Wallet data is represented internally as titan_wallet.Wallet.
+At the wire boundary, call wallet.to_wire() to get a plain dict.
 
 Import with TYPE_CHECKING to avoid runtime circular imports:
 
     from typing import TYPE_CHECKING
     if TYPE_CHECKING:
-        from titan_types import AlertDict, TrackedWalletDict, ...
+        from titan_types import AlertDict, ...
 """
 from __future__ import annotations
 
@@ -18,51 +21,6 @@ class AlertDict(TypedDict):
 
 class ErrorDict(TypedDict):
     message: str
-
-
-class TrackedWalletDict(TypedDict):
-    # identity (key injected by get_tracked_wallets)
-    wallet:             str
-    name:               str
-    ts:                 float
-    loaded_trade_count: int
-    loaded_trade_pnl:   float
-    trade_load_limited: bool
-    first_loaded_trade_ts: float | None
-    last_loaded_trade_ts:  float | None
-    # scoring
-    score:              float
-    win_rate:           float
-    wilson_lb:          float
-    alpha_per_trade:    float
-    wr_source:          str
-    # stats
-    n_resolved:         int
-    n_pos:              int
-    total_value:        float
-    total_pnl:          float
-    pnl_pct:            float
-    avg_pos_size:       float
-    avg_profit:         float
-    avg_bet:            float
-    trades_per_hour:    float
-    # flags
-    verified:           bool
-    watchable:          bool
-    elite:              bool
-    hft:                bool
-    vip:                bool
-    sports_bot:         bool
-    # recent form
-    recent_pnl_30d:     float | None
-    recent_pnl_7d:      float | None
-    recent_ts:          float
-    # debug
-    detail:             str
-    fail_reasons:       list[str]
-
-
-WhaleDict = TrackedWalletDict  # backward compat alias
 
 
 class PnlSummaryDict(TypedDict):
