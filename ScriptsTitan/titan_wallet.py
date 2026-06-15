@@ -73,9 +73,10 @@ class WinRateData(TypedDict):
     losses:             int
     total:              int
     loaded_trade_count: int
-    trade_load_limited: bool
+    loaded_trade_pnl:     float
     first_loaded_trade_ts: float | None
     last_loaded_trade_ts:  float | None
+    trade_load_limited: bool
     win_rate:           float
     wilson_lb:          float
     source:             str
@@ -92,6 +93,7 @@ class WalletProfile(TypedDict):
     ts:                 float
     loaded_trade_count: int
     trade_load_limited: bool
+    loaded_trade_pnl:     float
     first_loaded_trade_ts: float | None
     last_loaded_trade_ts:  float | None
 
@@ -471,6 +473,8 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
         v = float(t.get("usdcSize") or 0) or float(t.get("size") or 0) * float(t.get("price") or 0)
         return v
 
+    loaded_trade_pnl = total_redeem_value - sum(_cash(t) for t in trades_raw)
+
     recent_pnl_30d = (
         sum(float(r.get("usdcSize", 0) or 0) for r in redeems_30d) -
         sum(_cash(t) for t in trades_30d)
@@ -548,6 +552,7 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
             "wins": wins, "losses": n_open, "total": total,
             "loaded_trade_count": loaded_trade_count,
             "trade_load_limited": trade_load_limited,
+            "loaded_trade_pnl": round(loaded_trade_pnl, 2),
             "first_loaded_trade_ts": first_loaded_trade_ts,
             "last_loaded_trade_ts": last_loaded_trade_ts,
             "win_rate": round(wr, 4), "wilson_lb": round(wb, 4),
@@ -586,6 +591,7 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
             "total": n_open,
             "loaded_trade_count": loaded_trade_count,
             "trade_load_limited": trade_load_limited,
+            "loaded_trade_pnl": round(loaded_trade_pnl, 2),
             "first_loaded_trade_ts": first_loaded_trade_ts,
             "last_loaded_trade_ts": last_loaded_trade_ts,
             "win_rate": wr_open,
@@ -602,6 +608,7 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
         "wins": wins, "losses": losses, "total": total,
         "loaded_trade_count": loaded_trade_count,
         "trade_load_limited": trade_load_limited,
+        "loaded_trade_pnl": round(loaded_trade_pnl, 2),
         "first_loaded_trade_ts": first_loaded_trade_ts,
         "last_loaded_trade_ts": last_loaded_trade_ts,
         "win_rate": round(wr, 4), "wilson_lb": round(wb, 4),
@@ -652,6 +659,7 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
         "avg_profit": 0.0, "avg_bet": 0.0, "trades_per_hour": 0.0,
         "recent_pnl_30d": None, "recent_pnl_7d": None, "recent_ts": 0.0,
         "loaded_trade_count": 0, "trade_load_limited": False,
+        "loaded_trade_pnl": 0.0,
         "first_loaded_trade_ts": None, "last_loaded_trade_ts": None,
         "verified": False, "watchable": False, "elite": False, "hft": False, "vip": is_vip, "sports_bot": False,
         "name": keep_name or (wallet[:10] + "…"), "ts": now_t,
@@ -672,6 +680,11 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
     init   = sum(float(p.get("initialValue") or 0) for p in pos_data)
     cur    = sum(float(p.get("currentValue") or 0) for p in pos_data)
     pnl    = sum(float(p.get("cashPnl")      or 0) for p in pos_data)
+
+    value_data = S.safe_get(f"{C.DATA_API}/value", {"user": wallet})
+    if value_data and isinstance(value_data, list) and len(value_data) > 0:
+        cur = float(value_data[0].get("value") or cur)
+
     pct    = pnl / init * 100 if init > 0 else 0
     avg_sz = init / n_pos if n_pos > 0 else 0
 
@@ -697,6 +710,7 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
     tph        = wr_data.get("trades_per_hour", 0)
     loaded_trade_count = int(wr_data.get("loaded_trade_count", 0))
     trade_load_limited = bool(wr_data.get("trade_load_limited", False))
+    loaded_trade_pnl = float(wr_data.get("loaded_trade_pnl", 0.0))
     first_loaded_trade_ts = wr_data.get("first_loaded_trade_ts")
     last_loaded_trade_ts = wr_data.get("last_loaded_trade_ts")
     # v10: store recent-form fields with their own TTL
@@ -708,7 +722,7 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
         avg_profit = round((pnl * 0.5) / n_res, 2)
         avg_profit_estimated = True
 
-    apt = pnl / n_res if n_res > 0 else 0.0
+    apt = loaded_trade_pnl / n_res if n_res > 0 else 0.0
 
     # ── delegate scoring and tiering to the active WalletSelector ────────────
     import titan_config as _C
@@ -781,6 +795,7 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
         "verified": verified, "watchable": watchable, "elite": elite,
         "loaded_trade_count": loaded_trade_count,
         "trade_load_limited": trade_load_limited,
+        "loaded_trade_pnl": loaded_trade_pnl,
         "first_loaded_trade_ts": float(first_loaded_trade_ts) if first_loaded_trade_ts is not None else None,
         "last_loaded_trade_ts": float(last_loaded_trade_ts) if last_loaded_trade_ts is not None else None,
         "name": final_name, "ts": now_t, "wr_source": wr_src,
@@ -799,14 +814,27 @@ def get_compute_and_store_wallet(wallet: str) -> WalletProfile:
         ),
     }
 
-    was_elite = (cached or {}).get("elite", False)
-    if was_elite and not elite:
-        reasons_str = ", ".join(fail_reasons) if fail_reasons else "unknown"
-        S._log(
-            f"⬇ ELITE→DOWNGRADE {final_name} ({wallet[:12]}…) | {reasons_str} | "
-            f"PnL=${pnl:+,.0f} Port=${cur:,.0f} Score={score:.2f} WR={wr*100:.0f}% Res={n_res}",
-            "WARN"
-        )
+    def _tier(p: WalletProfile | None) -> str:
+        if not p:
+            return "NEW"
+        if p.get("elite"):     return "🔥ELITE"
+        if p.get("verified"):  return "✅VER"
+        if p.get("watchable"): return "👁WATCH"
+        return "❌REJ"
+
+    tier_before = _tier(cached)
+    tier_after  = _tier(result)
+    if tier_before != tier_after:
+        reasons_str = ", ".join(fail_reasons) if fail_reasons else ""
+        stats_str = f"PnL=${pnl:+,.0f} Port=${cur:,.0f} Score={score:.2f} WR={wr*100:.0f}% Res={n_res}"
+        if tier_after in ("🔥ELITE", "✅VER", "👁WATCH"):
+            msg  = f"⬆ {tier_before}→{tier_after} {final_name} ({wallet[:12]}…) | {stats_str}"
+            level = "INFO"
+        else:
+            msg  = f"⬇ {tier_before}→{tier_after} {final_name} ({wallet[:12]}…) | {reasons_str} | {stats_str}"
+            level = "WARN"
+        print(f"[WALLET] {msg}", flush=True)
+        S._log(msg, level)
 
     _TRACKED = ("elite", "verified", "watchable", "score", "win_rate", "wilson_lb",
                 "total_pnl", "name", "hft", "vip", "sports_bot", "recent_pnl_30d", "recent_pnl_7d",

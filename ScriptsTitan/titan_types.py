@@ -26,6 +26,7 @@ class TrackedWalletDict(TypedDict):
     name:               str
     ts:                 float
     loaded_trade_count: int
+    loaded_trade_pnl:   float
     trade_load_limited: bool
     first_loaded_trade_ts: float | None
     last_loaded_trade_ts:  float | None

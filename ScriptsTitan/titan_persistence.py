@@ -214,6 +214,7 @@ def _make_stub(addr: str, detail: str) -> "WalletProfile":
         "avg_profit": 0.0, "avg_bet": 0.0, "trades_per_hour": 0.0,
         "recent_pnl_30d": None, "recent_pnl_7d": None, "recent_ts": 0.0,
         "loaded_trade_count": 0, "trade_load_limited": False,
+        "loaded_trade_pnl": 0.0,
         "first_loaded_trade_ts": None, "last_loaded_trade_ts": None,
         "verified": False, "watchable": True, "elite": False, "hft": False, "vip": is_vip, "sports_bot": False,
         "name": addr[:10] + "…", "ts": 0.0,
@@ -302,6 +303,7 @@ def _load_wallets_from_db() -> None:
                 profile["vip"] = addr.lower() in vip_wallets
                 profile.setdefault("loaded_trade_count", 0)
                 profile.setdefault("trade_load_limited", False)
+                profile.setdefault("loaded_trade_pnl", 0.0)
                 profile.setdefault("first_loaded_trade_ts", None)
                 profile.setdefault("last_loaded_trade_ts", None)
                 vip_name = VIP_WALLET_NAMES.get(addr.lower(), "")

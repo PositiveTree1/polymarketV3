@@ -885,7 +885,7 @@ def run_ui(api: TitanBackend) -> None:
         whale_name = str(whale.get("name", wallet[:16] + "…"))
         win.title(f"Whale Detail — {whale_name[:50]}")
         win.configure(bg="#060615")
-        win.geometry("760x560")
+        win.geometry("760x672")
         win.resizable(True, True)
 
         mono10 = font.Font(family="Courier", size=10)
@@ -908,37 +908,72 @@ def run_ui(api: TitanBackend) -> None:
                  fg="#00aaff" if verified or elite else "#aaaaaa", bg="#0a0a20",
                  font=bold11, wraplength=730, justify="left").pack(anchor="w", padx=12)
         tk.Label(hf, text=f"Wallet: {wallet}",
-                 fg="#556677", bg="#0a0a20", font=mono9, wraplength=730,
+                 fg="#8899bb", bg="#0a0a20", font=mono9, wraplength=730,
                  justify="left").pack(anchor="w", padx=12)
 
         sf2 = tk.Frame(win, bg="#060615")
         sf2.pack(fill="x", padx=8, pady=6)
 
         def stat_cell(parent: tk.Misc, label: str, value: str, color: str = "#aaaacc", col: int = 0, row: int = 0) -> None:
-            f = tk.Frame(parent, bg="#0d0d20", bd=1, relief="solid")
+            f = tk.Frame(parent, bg="#161628", bd=1, relief="solid")
             f.grid(row=row, column=col, padx=4, pady=3, sticky="nsew")
-            tk.Label(f, text=label, fg="#445566", bg="#0d0d20", font=mono9, pady=2).pack()
-            tk.Label(f, text=value, fg=color, bg="#0d0d20", font=bold9, pady=2).pack()
+            tk.Label(f, text=label, fg="#7788bb", bg="#161628", font=mono9, pady=2).pack()
+            tk.Label(f, text=value, fg=color, bg="#161628", font=bold9, pady=2).pack()
 
-        stats_data = [
-            ("Score", f"{score:.2f}", "#ffdd44"),
-            ("Win Rate", f"{cast(float, whale['win_rate']) * 100:.0f}%", "#00ff88"),
-            ("Wilson LB", f"{cast(float, whale['wilson_lb']) * 100:.0f}%", "#88ccff"),
-            ("Resolved", f"{cast(int, whale['n_resolved'])}", "#aaaacc"),
-            ("Portfolio", f"${cast(float, whale['total_value']):,.0f}", "#00aaff"),
-            ("PnL", f"${total_pnl:+,.0f}", pnl_color),
-            ("Avg Bet", f"${cast(float, whale['avg_bet']):,.0f}", "#ffaa44"),
-            ("TPH", f"{cast(float, whale['trades_per_hour']):.1f}", "#aaaacc"),
-            ("7d PnL", f"${(whale['recent_pnl_7d'] or 0.0):+,.0f}", "#88ccff"),
-            ("30d PnL", f"${(whale['recent_pnl_30d'] or 0.0):+,.0f}", "#88ccff"),
-            ("Status", "ELITE" if elite else ("VERIFIED" if verified else "WATCH / REJECT"), "#ff8844"),
-            ("Type", "VIP HFT" if vip and hft else ("VIP" if vip else ("HFT" if hft else "STANDARD")), "#aaaacc"),
-            ("LB Rank", f"#{whale['lb_rank']:,}" if whale.get("lb_rank") else "—", "#aaaacc"),
-            ("Volume", f"${cast(float, whale['lb_vol']):,.0f}" if whale.get("lb_vol") else "—", "#88ccff"),
+        sports_bot = bool(whale.get("sports_bot"))
+        pnl_pct = cast(float, whale.get("pnl_pct") or 0.0)
+        avg_profit = cast(float, whale.get("avg_profit") or 0.0)
+        alpha_pt = cast(float, whale.get("alpha_per_trade") or 0.0)
+        type_parts = []
+        if vip: type_parts.append("VIP")
+        if hft: type_parts.append("HFT")
+        if sports_bot: type_parts.append("SPORTS")
+        type_label = " ".join(type_parts) if type_parts else "STANDARD"
+
+        for c in range(4):
+            sf2.columnconfigure(c, weight=1)
+
+        def section_header(parent: tk.Misc, text: str, grid_row: int) -> None:
+            tk.Label(parent, text=f"── {text} ──", fg="#8899cc", bg="#060615",
+                     font=mono9, anchor="w").grid(
+                row=grid_row, column=0, columnspan=4, sticky="w", padx=6, pady=(6, 1))
+
+        # ── GLOBAL ───────────────────────────────────────────────────────────
+        # Data sourced from leaderboard / positions endpoint (all-time)
+        global_cells = [
+            ("Score",    f"{score:.2f}",                                                  "#ffdd44"),
+            ("Status",   "ELITE" if elite else ("VERIFIED" if verified else "WATCH / REJECT"), "#ff8844"),
+            ("Type",     type_label,                                                       "#aaaacc"),
+            ("LB Rank",  f"#{whale['lb_rank']:,}" if whale.get("lb_rank") else "—",       "#aaaacc"),
+            ("Portfolio",f"${cast(float, whale['total_value']):,.0f}",                     "#00aaff"),
+            ("PnL",      f"${total_pnl:+,.0f}",                                            pnl_color),
+            ("PnL %",    f"{pnl_pct:+.1f}%", "#00ff88" if pnl_pct >= 0 else "#ff5555"),
+            ("Volume",   f"${cast(float, whale['lb_vol']):,.0f}" if whale.get("lb_vol") else "—", "#88ccff"),
         ]
-        for i, (lbl, val, col) in enumerate(stats_data):
-            sf2.columnconfigure(i % 4, weight=1)
-            stat_cell(sf2, lbl, val, col, i % 4, i // 4)
+
+        # ── LOADED TRADES ────────────────────────────────────────────────────
+        # Data computed from the loaded trade window (capped at ACTIVITY_LIMIT)
+        loaded_cells = [
+            ("Win Rate",    f"{cast(float, whale['win_rate']) * 100:.0f}%",                "#00ff88"),
+            ("Wilson LB",   f"{cast(float, whale['wilson_lb']) * 100:.0f}%",               "#88ccff"),
+            ("Resolved",    f"{cast(int, whale['n_resolved'])}",                            "#aaaacc"),
+            ("TPH",         f"{cast(float, whale['trades_per_hour']):.1f}",                 "#aaaacc"),
+            ("Avg Bet",     f"${cast(float, whale['avg_bet']):,.0f}",                      "#ffaa44"),
+            ("Avg Profit",  f"${avg_profit:+.1f}", "#00ff88" if avg_profit >= 0 else "#ff5555"),
+            ("Alpha/Trade", f"${alpha_pt:+.1f}",   "#00ff88" if alpha_pt >= 0 else "#ff5555"),
+            ("30d PnL",     f"${(whale['recent_pnl_30d'] or 0.0):+,.0f}",                 "#88ccff"),
+            ("7d PnL",      f"${(whale['recent_pnl_7d'] or 0.0):+,.0f}",                  "#88ccff"),
+        ]
+
+        grid_row = 0
+        section_header(sf2, "GLOBAL", grid_row); grid_row += 1
+        for i, (lbl, val, col) in enumerate(global_cells):
+            stat_cell(sf2, lbl, val, col, i % 4, grid_row + i // 4)
+        grid_row += math.ceil(len(global_cells) / 4)
+
+        section_header(sf2, "LOADED TRADES", grid_row); grid_row += 1
+        for i, (lbl, val, col) in enumerate(loaded_cells):
+            stat_cell(sf2, lbl, val, col, i % 4, grid_row + i // 4)
 
         info_f = tk.Frame(win, bg="#060615")
         info_f.pack(fill="x", padx=8, pady=(0, 6))
@@ -948,13 +983,14 @@ def run_ui(api: TitanBackend) -> None:
             f"  Elite: {'yes' if elite else 'no'}",
             f"  VIP: {'yes' if vip else 'no'}",
             f"  HFT: {'yes' if hft else 'no'}",
+            f"  Sports bot: {'yes' if sports_bot else 'no'}",
             f"  Watchable: {'yes' if bool(whale.get('watchable')) else 'no'}",
         ]
         fail_reasons = whale.get("fail_reasons")
         if isinstance(fail_reasons, list) and fail_reasons:
             detail_lines.append(f"  Fail reasons: {', '.join(str(x) for x in fail_reasons[:8])}")
         for line in detail_lines:
-            tk.Label(info_f, text=line, fg="#cccccc", bg="#060615", font=mono10,
+            tk.Label(info_f, text=line, fg="#ddeeff", bg="#060615", font=mono10,
                      anchor="w", justify="left", wraplength=720).pack(anchor="w", padx=12)
 
         lf = tk.Frame(win, bg="#060615")
@@ -3325,13 +3361,13 @@ def run_ui(api: TitanBackend) -> None:
             lb_vol  = p.get("lb_vol")
             item_id = wh_tree.insert("", "end", values=(
                 p.get("name", w[:10]+"…"),
-                f"#{lb_rank:,}" if lb_rank is not None else "—",
-                f"${lb_vol:,.0f}" if lb_vol is not None else "—",
                 f"{p.get('score',0):.2f}",
                 f"{p.get('win_rate',0)*100:.0f}%",
                 f"{p.get('wilson_lb',0)*100:.0f}%",
                 p.get("n_resolved", 0),
                 f"${p.get('total_value',0):,.0f}",
+                f"#{lb_rank:,}" if lb_rank is not None else "—",
+                f"${lb_vol:,.0f}" if lb_vol is not None else "—",
                 f"${p.get('total_pnl',0):+,.0f}",
                 f"${p.get('avg_bet',0):,.0f}",
                 f"{p.get('trades_per_hour',0):.1f}",
