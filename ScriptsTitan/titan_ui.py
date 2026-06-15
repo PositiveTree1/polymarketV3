@@ -19,9 +19,10 @@ import traceback
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
 from types import TracebackType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from titan_protocol import TitanBackend
 from titan_client import _log as _client_log
+from titan_types import PnlSummaryDict, TradeStatsDict
     
 import os
 import webbrowser
@@ -70,6 +71,19 @@ def _load_guide_text():
 
 
 _GUIDE = _load_guide_text()
+
+
+@dataclass
+class UiRefreshData:
+    pnl: PnlSummaryDict | None = None
+    logs: str | None = None
+    positions: list[Position] | None = None
+    wallets: dict[str, Wallet] | None = None
+    signals_live: list[Signal] | None = None
+    signal_history: list[Signal] | None = None
+    closed_positions: list[Position] | None = None
+    trade_stats: TradeStatsDict | None = None
+    trade_history: list[TradeRecord] | None = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -189,14 +203,20 @@ def show_loading_screen(root, api, on_complete):
 
 def run_ui(api: TitanBackend) -> None:
     _cfg: dict = {}
+    _open_positions_cache: list[Position] | None = None
+    _wallet_cache_state: dict[str, Wallet] | None = None
 
     def _open_positions() -> list[Position]:
+        if _open_positions_cache is not None:
+            return _open_positions_cache
         try:
             return api.get_positions()
         except Exception as e:
             _log_ui_error("open positions cache", e)
             return []
     def _wallet_cache() -> "dict[str, Wallet]":
+        if _wallet_cache_state is not None:
+            return _wallet_cache_state
         try:
             return {w.addr: w for w in api.get_tracked_wallets()}
         except Exception as e:
@@ -1289,7 +1309,9 @@ def run_ui(api: TitanBackend) -> None:
     
     def _pnl_chart_data_rows():
         from datetime import datetime as _dt
-        pnl_summary = api.get_pnl_summary()
+        pnl_summary = _latest_pnl
+        if pnl_summary is None:
+            return []
         eq_hist      = pnl_summary["equity_history"]
         bankroll_start = pnl_summary["bankroll_start"]
         return [
@@ -1331,14 +1353,15 @@ def run_ui(api: TitanBackend) -> None:
     
     hist_tree.bind("<Double-1>", _on_hist_double_click)
 
-    def draw_pnl_graph():
-        pnl_summary = api.get_pnl_summary()
+    def draw_pnl_graph(pnl_summary: PnlSummaryDict) -> None:
         pnl_graph.load(pnl_summary["equity_history"], pnl_summary["bankroll_start"])
     
     
-    def refresh_pnl_tab():
-        st   = api.get_trade_stats()
-        pnl  = api.get_pnl_summary()
+    def refresh_pnl_tab(
+        pnl: PnlSummaryDict,
+        st: TradeStatsDict,
+        history: list[TradeRecord],
+    ) -> None:
         unrealised_pnl = sum(
             ((pos.cur_price or pos.entry_price) - pos.entry_price) * pos.shares
             for pos in _open_positions()
@@ -1362,7 +1385,6 @@ def run_ui(api: TitanBackend) -> None:
         stat_vars["bankroll"].set(f"${pnl['bankroll'] + open_val:.4f}")
         stat_vars["expectancy"].set(f"${st['expectancy']:+.4f}")
 
-        history = api.get_trade_history()
         hist_tree.delete(*hist_tree.get_children())
         _hist_tree_items.clear()
         for t in reversed(history[-200:]):
@@ -1386,7 +1408,7 @@ def run_ui(api: TitanBackend) -> None:
                 ), tags=(tag,))
                 _hist_tree_items[iid] = t
     
-        draw_pnl_graph()
+        draw_pnl_graph(pnl)
         pnl_chart_frame.refresh_panel()
 
     
@@ -2319,17 +2341,35 @@ def run_ui(api: TitanBackend) -> None:
     nb.add(tab_log,       text="  📜 LOG  ")
     nb.add(tab_config,    text="  ⚙ CONFIG  ")
 
+    _tab_keys_by_widget: dict[str, str] = {
+        str(tab_live): "signals",
+        str(tab_alerts): "alerts",
+        str(tab_positions): "positions",
+        str(tab_pnl): "pnl",
+        str(tab_wallets): "wallets",
+        str(tab_analysis): "analysis",
+        str(tab_diag): "diag",
+        str(tab_log): "log",
+    }
+
+    def _selected_tab_key() -> str:
+        return _tab_keys_by_widget.get(nb.select(), "")
+
     # ═══════════════════════════════════════════════════════════════════════════════
     #  RENDERERS
     # ═══════════════════════════════════════════════════════════════════════════════
     _last_signals: list[Signal] = []
     _last_wallets: dict[str, "Wallet"] = {}
-    _last_rejects        = []
-    _last_trades         = []
+    _last_rejects: list[str] = []
+    _last_trades: list[object] = []
     _cycle_num           = [0]
     _pending_update      = [False]
     _show_signal_history = [False]
     _signal_history_cache: list[list[Signal]] = [[]]
+    _latest_pnl: PnlSummaryDict | None = None
+    _latest_trade_stats: TradeStatsDict | None = None
+    _latest_trade_history: list[TradeRecord] = []
+    _latest_closed_positions: list[Position] = []
     _last_hb_ts          = [0.0]
     _HB_DEAD_SECS = 60
     _HB_BLINK_MS  = 600
@@ -3083,7 +3123,11 @@ def run_ui(api: TitanBackend) -> None:
     sig_tree.bind("<Double-1>", _on_signal_double_click)
     
     
-    def render_alerts(signals, wallets):
+    def render_alerts(
+        signals: list[Signal],
+        wallets: dict[str, Wallet],
+        pnl_summary: PnlSummaryDict,
+    ) -> None:
         alert_txt.configure(state="normal")
         alert_txt.delete("1.0", tk.END)
         ts  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -3134,11 +3178,11 @@ def run_ui(api: TitanBackend) -> None:
             elif abs(d) < 0.10: fresh = "✅ ACCEPTABLE"
             else:                fresh = "⚠ STALE"
     
-            in_market  = s.cid in api.get_pnl_summary()["active_market_cids"]
+            in_market  = s.cid in pnl_summary["active_market_cids"]
             trade_note = "🤖 AUTO-BOUGHT" if in_market else "⏳ Watching (below ALERT threshold)"
             cd_note    = ""
-            if s.cid in api.get_pnl_summary()["cooldown_cids"]:
-                remaining = _cfg.get("EXIT_COOLDOWN_SECONDS", 300) - (time.time() - api.get_pnl_summary()["cooldown_cids"][s.cid])
+            if s.cid in pnl_summary["cooldown_cids"]:
+                remaining = _cfg.get("EXIT_COOLDOWN_SECONDS", 300) - (time.time() - pnl_summary["cooldown_cids"][s.cid])
                 cd_note   = f"\n  ⏳ COOLDOWN: {remaining/60:.0f}min remaining\n"
 
             exit_warn = "\n  ⚠ EXIT ALERT: Whale selling detected.\n" if s.exits_detected else ""
@@ -3172,7 +3216,7 @@ def run_ui(api: TitanBackend) -> None:
                 f"  Buy {s.outcome.upper()} @ ${s.cur:.4f} ({s.cur*100:.1f}¢)\n"
                 f"  Whale avg entry:  ${s.avg_entry:.4f}  →  Now: ${s.cur:.4f}\n"
                 f"  Drift: {s.drift*100:+.1f}%  {fresh}\n"
-                f"  Auto-size: ${s.bet:.2f}  ({s.bet/max(api.get_pnl_summary()['bankroll'],0.01)*100:.1f}% bankroll)\n"
+                f"  Auto-size: ${s.bet:.2f}  ({s.bet/max(pnl_summary['bankroll'],0.01)*100:.1f}% bankroll)\n"
                 f"  Shares: ~{s.bet/max(s.cur,0.01):.1f}\n\n"
                 f"  WALLET INTEL  ({s.n_elite} elite / {s.n_ver} total verified)\n  {'─'*50}\n"
             )
@@ -3197,7 +3241,7 @@ def run_ui(api: TitanBackend) -> None:
         alert_txt.configure(state="disabled")
     
     
-    def render_open_positions():
+    def render_open_positions(closed_positions: list[Position]) -> None:
         now_t = time.time()
         prev_sel_key = None
         sel = pos_tree.selection()
@@ -3217,8 +3261,7 @@ def run_ui(api: TitanBackend) -> None:
         if _show_closed[0]:
             _open_tree_items.clear()
             _closed_tree_items.clear()
-            closed: list[Position] = api.get_closed_positions(limit=200)
-            for pos in closed:
+            for pos in closed_positions:
                 entry   = pos.entry_price
                 w_entry = pos.avg_entry or entry
                 exit_p  = pos.exit_price or entry
@@ -3247,7 +3290,7 @@ def run_ui(api: TitanBackend) -> None:
                 ), tags=(tag,))
                 _closed_tree_items[iid] = pos
                 new_item_map[_closed_position_selection_key(pos)] = iid
-            pos_var.set(f"Pos: {len(closed)} closed")
+            pos_var.set(f"Pos: {len(closed_positions)} closed")
         else:
             _closed_tree_items.clear()
             _open_tree_items.clear()
@@ -3378,31 +3421,36 @@ def run_ui(api: TitanBackend) -> None:
     wh_tree.bind("<Double-1>", _on_whale_double_click)
     
     
-    def render_analysis(signals, trades, wallets):
+    def render_analysis(
+        signals: list[Signal],
+        trades: list[object],
+        wallets: dict[str, Wallet],
+        pnl_summary: PnlSummaryDict,
+        trade_stats: TradeStatsDict,
+    ) -> None:
         analysis_txt.configure(state="normal")
         analysis_txt.delete("1.0", tk.END)
         ts     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ver    = {w: p for w, p in wallets.items() if p.verified}
-        elites = {w.addr: w for w in api.get_tracked_wallets()}
-        hot_t  = sum(1 for t in trades if t.get("window") == "hot")
-        hft_t  = sum(1 for t in trades if t.get("source") in ("hft_spike_poll",))
-        st        = api.get_trade_stats()
-        total_pnl = st["sum_pnl"]
-        wins_n    = st["win_count"]
-        wr_pct    = st["win_rate"] * 100
-        n_sells   = st["sell_count"]
+        elites = {w.addr: w for w in wallets.values() if w.elite}
+        hot_t  = sum(1 for t in trades if isinstance(t, dict) and t.get("window") == "hot")
+        hft_t  = sum(1 for t in trades if isinstance(t, dict) and t.get("source") in ("hft_spike_poll",))
+        total_pnl = trade_stats["sum_pnl"]
+        wins_n    = trade_stats["win_count"]
+        wr_pct    = trade_stats["win_rate"] * 100
+        n_sells   = trade_stats["sell_count"]
 
         analysis_txt.insert(tk.END,
             f"{'═'*78}\n  ANALYSIS  —  {ts}\n{'═'*78}\n\n"
             f"PAPER TRADING ACCOUNT\n{'─'*50}\n"
-            f"  Bankroll:     ${api.get_pnl_summary()["bankroll"]:.4f}  (start ${api.get_pnl_summary()["bankroll_start"]:.2f})\n"
-            f"  Session P&L:  ${api.get_pnl_summary()["session_pnl"]:+.4f}\n"
+            f"  Bankroll:     ${pnl_summary['bankroll']:.4f}  (start ${pnl_summary['bankroll_start']:.2f})\n"
+            f"  Session P&L:  ${pnl_summary['session_pnl']:+.4f}\n"
             f"  Total P&L:    ${total_pnl:+.4f}\n"
             f"  Trades:       {n_sells} closed  WR:{wr_pct:.0f}% ({wins_n}W/{n_sells - wins_n}L)\n"
             f"  Open:         {len(_open_positions())} positions\n\n"
             f"TRADE FEED (this cycle)\n{'─'*50}\n"
             f"  Total: {len(trades)}  hot:{hot_t}  hft_spikes:{hft_t}\n"
-            f"  Verified: {len(ver)}  Elite: {len(elites)}  Watchlist: {api.get_pnl_summary()['watchlist_size']}\n"
+            f"  Verified: {len(ver)}  Elite: {len(elites)}  Watchlist: {pnl_summary['watchlist_size']}\n"
             f"  Signals: {len(signals)}\n"
             f"    💎 CONVICTION: {sum(1 for s in signals if s.tier=='CONVICTION')}\n"
             f"    ⚡ HFT:    {sum(1 for s in signals if s.tier=='HFT')}\n"
@@ -3421,7 +3469,12 @@ def run_ui(api: TitanBackend) -> None:
         analysis_txt.configure(state="disabled")
     
     
-    def render_diagnostics(rejects, trades, wallets):
+    def render_diagnostics(
+        rejects: list[str],
+        trades: list[object],
+        wallets: dict[str, Wallet],
+        pnl_summary: PnlSummaryDict,
+    ) -> None:
         diag_txt.configure(state="normal")
         diag_txt.delete("1.0", tk.END)
         ts    = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -3430,11 +3483,13 @@ def run_ui(api: TitanBackend) -> None:
         cd_lines = []
         cid_to_title = {}
         for trade in trades:
-            cid = trade["cid"]
-            title = trade["title"]
+            if not isinstance(trade, dict):
+                continue
+            cid = trade.get("cid")
+            title = trade.get("title")
             if cid and title and cid not in cid_to_title:
-                cid_to_title[cid] = title
-        for cid, cd_ts in api.get_pnl_summary()["cooldown_cids"].items():
+                cid_to_title[str(cid)] = str(title)
+        for cid, cd_ts in pnl_summary["cooldown_cids"].items():
             remaining = _cfg.get("EXIT_COOLDOWN_SECONDS", 300) - (now_t - cd_ts)
             title = cid_to_title.get(str(cid), str(cid))
             cd_lines.append(f"  ⏳ {title[:45]}  {remaining/60:.0f}min left")
@@ -3545,71 +3600,144 @@ def run_ui(api: TitanBackend) -> None:
     # ═══════════════════════════════════════════════════════════════════════════════
     _fetch_running = [False]
 
-    def ui_refresh():
+    def _render_logs(logs: str) -> None:
+        full_log.configure(state="normal")
+        full_log.delete("1.0", tk.END)
+        for line in logs.splitlines()[-600:]:
+            full_log.insert(tk.END, line + "\n")
+        full_log.see(tk.END)
+        full_log.configure(state="disabled")
+
+        cli_logs = _read_client_log(600)
+        client_log.configure(state="normal")
+        client_log.delete("1.0", tk.END)
+        for line in cli_logs.splitlines():
+            client_log.insert(tk.END, line + "\n")
+        client_log.see(tk.END)
+        client_log.configure(state="disabled")
+
+    def _render_selected_tab() -> None:
+        selected_tab = _selected_tab_key()
+        pnl_summary = _latest_pnl
+        trade_stats = _latest_trade_stats
+        if selected_tab == "signals":
+            signal_rows = _signal_history_cache[0] if _show_signal_history[0] else _last_signals
+            render_signals(signal_rows)
+        elif selected_tab == "alerts" and pnl_summary is not None:
+            render_alerts(_last_signals, _last_wallets, pnl_summary)
+        elif selected_tab == "positions":
+            render_open_positions(_latest_closed_positions)
+        elif selected_tab == "pnl" and pnl_summary is not None and trade_stats is not None:
+            refresh_pnl_tab(pnl_summary, trade_stats, _latest_trade_history)
+        elif selected_tab == "wallets":
+            render_wallets(_last_wallets)
+        elif selected_tab == "analysis" and pnl_summary is not None and trade_stats is not None:
+            render_analysis(_last_signals, _last_trades, _last_wallets, pnl_summary, trade_stats)
+        elif selected_tab == "diag" and pnl_summary is not None:
+            render_diagnostics(_last_rejects, _last_trades, _last_wallets, pnl_summary)
+
+    def _request_refresh() -> None:
         if not _fetch_running[0]:
             _fetch_running[0] = True
-            threading.Thread(target=_fetch_and_apply, daemon=True).start()
+            selected_tab = _selected_tab_key()
+            threading.Thread(target=_fetch_and_apply, args=(selected_tab,), daemon=True).start()
+
+    def ui_refresh() -> None:
+        _request_refresh()
         root.after(2000, ui_refresh)
 
-    def _fetch_and_apply():
+    def _fetch_and_apply(selected_tab: str) -> None:
         try:
-            data: dict = {}
-            try: data["pnl"]      = api.get_pnl_summary()
-            except Exception as e: data["pnl"] = {}; root.after(0, lambda err=e: _log_ui_error("fetch pnl", err))
-            try: data["logs"]     = api.get_logs(lines=600)
-            except Exception as e: data["logs"] = ""; root.after(0, lambda err=e: _log_ui_error("fetch logs", err))
-            try: data["pos"]      = _open_positions()
-            except Exception as e: data["pos"] = []; log(f"[fetch pos] {e}", "ERR")
-            try: data["wallets"]  = _wallet_cache()
-            except Exception as e: data["wallets"] = {}; log(f"[fetch wallets] {e}", "ERR")
-            if not _show_signal_history[0]:
+            data = UiRefreshData()
+            try:
+                data.pnl = api.get_pnl_summary()
+            except Exception as e:
+                root.after(0, lambda err=e: _log_ui_error("fetch pnl", err))
+            try:
+                data.positions = api.get_positions()
+            except Exception as e:
+                root.after(0, lambda err=e: _log_ui_error("fetch positions", err))
+            if selected_tab in {"wallets", "alerts", "analysis", "diag"} or _pending_update[0]:
                 try:
-                    data["signals_live"] = _require_signal_rows(api.get_signals())
-                except Exception as e: data["signals_live"] = []; log(f"[fetch live signals] {e}", "ERR")
-            if _show_signal_history[0] and (_pending_update[0] or not _signal_history_cache[0]):
+                    data.wallets = _build_wallet_cache(api.get_tracked_wallets())
+                except Exception as e:
+                    root.after(0, lambda err=e: _log_ui_error("fetch wallets", err))
+            if selected_tab == "signals":
+                if not _show_signal_history[0]:
+                    try:
+                        data.signals_live = _require_signal_rows(api.get_signals())
+                    except Exception as e:
+                        root.after(0, lambda err=e: _log_ui_error("fetch live signals", err))
+                elif _pending_update[0] or not _signal_history_cache[0]:
+                    try:
+                        data.signal_history = _require_signal_rows(api.get_signal_history(limit=200))
+                    except Exception as e:
+                        root.after(0, lambda err=e: _log_ui_error("fetch signal history", err))
+            if selected_tab == "positions" and _show_closed[0]:
                 try:
-                    data["signal_history"] = api.get_signal_history(limit=200)
-                except Exception as e: data["signal_history"] = []; log(f"[fetch signal history] {e}", "ERR")
-            if _show_closed[0]:
-                try: data["closed"] = api.get_closed_positions(limit=200)
-                except Exception as e: data["closed"] = []; log(f"[fetch closed] {e}", "ERR")
+                    data.closed_positions = api.get_closed_positions(limit=200)
+                except Exception as e:
+                    root.after(0, lambda err=e: _log_ui_error("fetch closed positions", err))
+            if selected_tab in {"pnl", "analysis"}:
+                try:
+                    data.trade_stats = api.get_trade_stats()
+                except Exception as e:
+                    root.after(0, lambda err=e: _log_ui_error("fetch trade stats", err))
+            if selected_tab == "pnl":
+                try:
+                    data.trade_history = api.get_trade_history()
+                except Exception as e:
+                    root.after(0, lambda err=e: _log_ui_error("fetch trade history", err))
+            if selected_tab == "log":
+                try:
+                    data.logs = api.get_logs(lines=600)
+                except Exception as e:
+                    root.after(0, lambda err=e: _log_ui_error("fetch logs", err))
             root.after(0, lambda: _ui_apply(data))
         finally:
             _fetch_running[0] = False
 
-    def _ui_apply(data: dict):
+    def _ui_apply(data: UiRefreshData) -> None:
         try:
             _ui_apply_inner(data)
         except Exception as e:
             import traceback
             log(f"[_ui_apply crash] {e}\n{traceback.format_exc()[:400]}", "ERR")
 
-    def _ui_apply_inner(data: dict):
-        nonlocal _last_wallets
-        pnl     = data.get("pnl", {})
-        logs    = data.get("logs", "")
-        pos     = data.get("pos", {})
-        wallets = data.get("wallets", {})
-        closed  = data.get("closed", [])
-        signals_live = data.get("signals_live")
-        signal_history = data.get("signal_history", [])
-        if signals_live is not None:
+    def _ui_apply_inner(data: UiRefreshData) -> None:
+        nonlocal _last_wallets, _latest_pnl, _latest_trade_stats, _latest_trade_history
+        nonlocal _latest_closed_positions, _open_positions_cache, _wallet_cache_state
+        if data.pnl is not None:
+            _latest_pnl = data.pnl
+        pnl = _latest_pnl
+        if pnl is None:
+            return
+        if data.positions is not None:
+            _open_positions_cache = data.positions
+        pos = _open_positions()
+        if data.wallets is not None:
+            _wallet_cache_state = data.wallets
+            _last_wallets = data.wallets
+        wallets = _last_wallets
+        if data.trade_stats is not None:
+            _latest_trade_stats = data.trade_stats
+        if data.trade_history is not None:
+            _latest_trade_history = data.trade_history
+        if data.closed_positions is not None:
+            _latest_closed_positions = data.closed_positions
+        if data.signals_live is not None:
+            signals_live = data.signals_live
             _last_signals[:] = signals_live
-        if signal_history:
-            _signal_history_cache[0] = _require_signal_rows(signal_history)
+        else:
+            signals_live = None
+        if data.signal_history:
+            _signal_history_cache[0] = data.signal_history
 
         signals = signals_live if (not _show_signal_history[0] and signals_live is not None) else _last_signals
         signal_rows = _signal_history_cache[0] if _show_signal_history[0] else signals
 
-        try:
-            render_signals(signal_rows)
-        except Exception as _e:
-            log(f"[render_signals error] {_e}", "ERR")
-
         sig_var.set(f"Sigs: {len(signal_rows)}")
-        if wallets:
-            _last_wallets = wallets
-        roster_wallets = wallets or _last_wallets
+        roster_wallets = wallets
         n_ver = sum(1 for p in roster_wallets.values() if p.verified)
         n_elite = sum(1 for p in roster_wallets.values() if p.elite)
         ver_var.set(f"Ver: {n_ver}")
@@ -3618,25 +3746,6 @@ def run_ui(api: TitanBackend) -> None:
         if _pending_update[0]:
             _pending_update[0] = False
             _cycle_num[0] += 1
-            _wallets_from_cycle = roster_wallets
-            rejects = _last_rejects
-            trades  = _last_trades
-            for fn in (
-                lambda: render_alerts(signals, _wallets_from_cycle),
-                lambda: render_analysis(signals, trades, _wallets_from_cycle),
-                lambda: render_diagnostics(rejects, trades, _wallets_from_cycle),
-            ):
-                try:
-                    fn()
-                except Exception as e:
-                    _log_ui_error("secondary renderer", e)
-
-        try: render_open_positions()
-        except Exception as _e: log(f"[render_open_positions error] {_e}", "ERR")
-        try: refresh_pnl_tab()
-        except Exception as _e: _log_ui_error("refresh_pnl_tab error", _e)
-        try: render_wallets(roster_wallets)
-        except Exception as _e: log(f"[render_wallets error] {_e}", "ERR")
 
         cycle_var.set(f"Cycle: {_cycle_num[0]}")
 
@@ -3661,49 +3770,23 @@ def run_ui(api: TitanBackend) -> None:
         pnl_var.set(f"P&L: ${total_equity - bk_start:+.3f}")
         cooldown_var.set(f"CD: {len(pnl.get('cooldown_cids', {}))}")
 
-        if logs:
-            full_log.configure(state="normal")
-            full_log.delete("1.0", tk.END)
-            for line in logs.splitlines()[-600:]:
-                full_log.insert(tk.END, line + "\n")
-            full_log.see(tk.END)
-            full_log.configure(state="disabled")
+        try:
+            _render_selected_tab()
+        except Exception as _e:
+            _log_ui_error("render selected tab", _e)
 
-        cli_logs = _read_client_log(600)
-        client_log.configure(state="normal")
-        client_log.delete("1.0", tk.END)
-        for line in cli_logs.splitlines():
-            client_log.insert(tk.END, line + "\n")
-        client_log.see(tk.END)
-        client_log.configure(state="disabled")
+        if data.logs is not None and _selected_tab_key() == "log":
+            _render_logs(data.logs)
 
-        # Update position chart
-        sel = pos_tree.selection()
-        if not sel:
-            children = pos_tree.get_children()
-            if children:
-                pos_tree.selection_set(children[0])
-                sel = pos_tree.selection()
-        if sel:
-            _load_selected_position_chart()
-            return
-        if sel:
-            vals = pos_tree.item(sel[0])['values']
-            if vals:
-                mkt_name = str(vals[0]).replace('💎', '').replace('⚡', '')
-                outcome  = str(vals[1])
-                if _show_closed[0]:
-                    for p in closed:
-                        if p['title'][:48] in mkt_name or mkt_name in p['title'][:48]:
-                            if p.get('outcome') == outcome:
-                                pos_graph.load(p.get("price_history", []), p['title'], p.get('entry_price', 0), entry_ts=float(p.get('entry_ts') or 0) or None)
-                                break
-                else:
-                    for _, p in pos.items():
-                        if p['title'][:48] in mkt_name or mkt_name in p['title'][:48]:
-                            if p['outcome'] == outcome:
-                                pos_graph.load(p.get("price_history", []), p['title'], p['entry_price'], entry_ts=float(p.get('entry_ts') or 0) or None)
-                                break
+        if _selected_tab_key() == "positions":
+            sel = pos_tree.selection()
+            if not sel:
+                children = pos_tree.get_children()
+                if children:
+                    pos_tree.selection_set(children[0])
+                    sel = pos_tree.selection()
+            if sel:
+                _load_selected_position_chart()
     
     
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -3756,6 +3839,15 @@ def run_ui(api: TitanBackend) -> None:
             except Exception as e:
                 root.after(0, lambda err=e: _log_ui_error("fast price updater", err))
             time.sleep(3.0)
+
+    def _on_tab_changed(_event: tk.Event[tk.Misc]) -> None:
+        try:
+            _render_selected_tab()
+        except Exception as e:
+            _log_ui_error("tab change render", e, "WARN")
+        _request_refresh()
+
+    nb.bind("<<NotebookTabChanged>>", _on_tab_changed)
     
     # ═══════════════════════════════════════════════════════════════════════════════
     #  BOOT

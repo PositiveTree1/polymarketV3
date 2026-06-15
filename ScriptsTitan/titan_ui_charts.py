@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import time
 import tkinter as tk
 from dataclasses import dataclass
@@ -83,6 +84,7 @@ class BaseChart(tk.Canvas):
         self._redraw_pending: bool = False
         self._drag_x: int | None = None
         self._drag_view_start: int = 0
+        self._last_ctx: RenderContext | None = None
         self.bind("<Configure>", lambda _event: self._mark_dirty())
         self.bind("<Map>", lambda _event: self._mark_dirty())
         self.bind("<MouseWheel>", self._on_scroll)
@@ -175,14 +177,26 @@ class BaseChart(tk.Canvas):
         return None
 
     def _selector_index_from_x(self, x_pos: int) -> int | None:
-        visible = self._visible()
-        if not visible:
+        ctx = self._last_ctx
+        if ctx is None or not ctx.visible:
             return None
-        plot_width = (self.winfo_width() or 600) - self.PAD_L - self.PAD_R
-        if plot_width <= 0:
+        if x_pos <= ctx.pad_left:
+            return self._view_start
+        if x_pos >= ctx.width - ctx.pad_right:
+            return self._view_start + len(ctx.visible) - 1
+
+        target_ts = ctx.timestamps[0] + ((x_pos - ctx.pad_left) / max(ctx.plot_width, 1)) * ctx.time_span
+        insert_at = bisect.bisect_left(ctx.timestamps, target_ts)
+        if insert_at <= 0:
+            visible_index = 0
+        elif insert_at >= len(ctx.timestamps):
+            visible_index = len(ctx.timestamps) - 1
+        else:
+            prev_ts = ctx.timestamps[insert_at - 1]
+            next_ts = ctx.timestamps[insert_at]
+            visible_index = insert_at - 1 if abs(target_ts - prev_ts) <= abs(next_ts - target_ts) else insert_at
+        if not (0 <= visible_index < len(ctx.visible)):
             return None
-        relative_x = max(0, min(plot_width, x_pos - self.PAD_L))
-        visible_index = int(round(relative_x / max(plot_width, 1) * max(len(visible) - 1, 0)))
         return self._view_start + visible_index
 
     def _move_selector(self, step: int) -> None:
@@ -257,7 +271,7 @@ class BaseChart(tk.Canvas):
             return
         self._selector_index = selector_index
         self._keep_selector_visible()
-        self._redraw()
+        self._redraw_crosshair()
 
     def _crosshair_label(self, ts: float, value: float) -> str:
         diff = value - self._baseline_value
@@ -295,6 +309,7 @@ class BaseChart(tk.Canvas):
     ) -> tuple[int, int, int, int, int, int, list[HistoryPoint]]:
         self.delete("chart")
         self.delete("crosshair")
+        self._last_ctx = None
         self.update_idletasks()
         width = self.winfo_width() or 600
         height = self.winfo_height() or 220
@@ -509,6 +524,27 @@ class BaseChart(tk.Canvas):
             tags="chart",
         )
 
+    def _redraw_crosshair(self) -> None:
+        ctx = self._last_ctx
+        if ctx is None:
+            self._mark_dirty()
+            return
+        self.delete("crosshair")
+        selector_visible_index = self._selector_visible_index()
+        if selector_visible_index is None:
+            return
+        self._draw_selector_overlay(
+            visible=ctx.visible,
+            x_pos=ctx.x_from_ts(ctx.timestamps[selector_visible_index]),
+            y_pos=ctx.y_from_value(ctx.values[selector_visible_index]),
+            plot_left=ctx.pad_left,
+            plot_right=ctx.pad_right,
+            plot_top=ctx.pad_top,
+            plot_bottom=ctx.pad_bottom,
+            width=ctx.width,
+            height=ctx.height,
+        )
+
     def _redraw(self) -> None:
         width, height, pad_left, pad_right, pad_top, pad_bottom, visible = self._begin_redraw()
         empty_message = self._empty_message_text(visible)
@@ -530,21 +566,8 @@ class BaseChart(tk.Canvas):
         self._draw_time_axis(ctx)
         self._draw_series(ctx)
         self._draw_markers(ctx)
-
-        selector_visible_index = self._selector_visible_index()
-        if selector_visible_index is not None:
-            self._draw_selector_overlay(
-                visible=ctx.visible,
-                x_pos=ctx.x_from_ts(ctx.timestamps[selector_visible_index]),
-                y_pos=ctx.y_from_value(ctx.values[selector_visible_index]),
-                plot_left=ctx.pad_left,
-                plot_right=ctx.pad_right,
-                plot_top=ctx.pad_top,
-                plot_bottom=ctx.pad_bottom,
-                width=ctx.width,
-                height=ctx.height,
-            )
-
+        self._last_ctx = ctx
+        self._redraw_crosshair()
         self._draw_header(ctx)
         self._draw_footer(width, height, len(visible))
 
