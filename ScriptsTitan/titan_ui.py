@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from titan_signals import Signal
     from titan_position import Position
     from titan_trade import TradeRecord
-    from titan_market import Market
+    from titan_market import Market, WalletObservation
     from titan_wallet import Wallet
 
 try:
@@ -1053,9 +1053,16 @@ def run_ui(api: TitanBackend) -> None:
             return parts[1].strip()
         return raw
 
+    def _position_cid_or_empty(pos: Position) -> str:
+        if pos.buy_trade is not None and pos.buy_trade.cid:
+            return str(pos.buy_trade.cid)
+        if pos.sell_trade is not None and pos.sell_trade.cid:
+            return str(pos.sell_trade.cid)
+        return ""
+
     def _closed_position_selection_key(pos: Position) -> tuple[str, str, str, str]:
         return (
-            str(pos.cid or ""),
+            _position_cid_or_empty(pos),
             str(pos.title or ""),
             str(pos.outcome or ""),
             str(pos.exit_ts or ""),
@@ -1064,6 +1071,53 @@ def run_ui(api: TitanBackend) -> None:
     _closed_tree_items: dict[str, Position] = {}
     _open_tree_items: dict[str, Position] = {}
     _last_chart_signature: list[object | None] = [None]
+    _closed_chart_loads_inflight: set[tuple[str, float, float]] = set()
+
+    def _closed_position_history_request_key(pos: Position) -> tuple[str, float, float]:
+        return (str(pos.asset or ""), float(pos.entry_ts or 0.0), float(pos.exit_ts or 0.0))
+
+    def _request_closed_position_chart_history(pos: Position) -> None:
+        request_key = _closed_position_history_request_key(pos)
+        if request_key in _closed_chart_loads_inflight:
+            return
+
+        asset = str(pos.asset or "").strip()
+        if not asset:
+            pos.price_history = []
+            pos.price_history_source = ""
+            pos.price_history_error = "Closed position has no asset"
+            return
+
+        _closed_chart_loads_inflight.add(request_key)
+        pos.price_history_error = "Loading chart history..."
+
+        def _load_history() -> None:
+            points: list[tuple[float, float]] = []
+            error: str | None = None
+            try:
+                points = api.get_asset_price_history(asset)
+            except Exception as e:
+                error = str(e)
+
+            start_ts = float(pos.entry_ts or 0.0)
+            end_ts = float(pos.exit_ts or 0.0)
+            if points and start_ts > 0.0 and end_ts > 0.0 and end_ts >= start_ts:
+                points = [point for point in points if start_ts <= point[0] <= end_ts]
+
+            def _apply_history() -> None:
+                _closed_chart_loads_inflight.discard(request_key)
+                pos.price_history = points
+                pos.price_history_source = "asset_history"
+                pos.price_history_error = None if points else (error or "Closed position has no chart history.")
+                if _show_closed[0]:
+                    selected_pos = _find_selected_closed_position()
+                    if selected_pos is pos:
+                        _last_chart_signature[0] = None
+                        _load_selected_position_chart()
+
+            root.after(0, _apply_history)
+
+        threading.Thread(target=_load_history, daemon=True).start()
 
     def _load_selected_position_chart() -> None:
         sel = pos_tree.selection()
@@ -1103,10 +1157,13 @@ def run_ui(api: TitanBackend) -> None:
             history = pos.price_history
             entry_price = pos.entry_price
             title = pos.title or mkt_name
+            if not history and pos.price_history_error != "Loading chart history...":
+                _request_closed_position_chart_history(pos)
+                history = pos.price_history
             if history:
                 history_signature = (
                     "closed",
-                    str(pos.cid or ""),
+                    _position_cid_or_empty(pos),
                     title,
                     outcome,
                     len(history),
@@ -1130,7 +1187,7 @@ def run_ui(api: TitanBackend) -> None:
             detail = pos.price_history_error or "Closed position has no chart history."
             empty_history_signature = (
                 "closed-empty",
-                str(pos.cid if (pos.buy_trade or pos.sell_trade) else ""),
+                _position_cid_or_empty(pos),
                 title,
                 outcome,
                 detail,
@@ -1147,10 +1204,11 @@ def run_ui(api: TitanBackend) -> None:
                 )
                 pos_chart_frame.refresh_panel(reset=True)
                 _last_chart_signature[0] = empty_history_signature
-            warn_msg = f"Closed chart empty: {title[:80]} [{outcome}] | {detail}"
-            if _last_chart_warn[0] != warn_msg:
-                pos_log_write(warn_msg, "WARN")
-                _last_chart_warn[0] = warn_msg
+            if detail != "Loading chart history...":
+                warn_msg = f"Closed chart empty: {title[:80]} [{outcome}] | {detail}"
+                if _last_chart_warn[0] != warn_msg:
+                    pos_log_write(warn_msg, "WARN")
+                    _last_chart_warn[0] = warn_msg
             return
 
         for pos in _open_positions():
@@ -1159,7 +1217,7 @@ def run_ui(api: TitanBackend) -> None:
                 if pos.outcome == outcome:
                     history_signature = (
                         "open",
-                        str(pos.cid or ""),
+                        _position_cid_or_empty(pos),
                         title,
                         outcome,
                         len(pos.price_history),
@@ -1660,30 +1718,54 @@ def run_ui(api: TitanBackend) -> None:
                                sashwidth=4, sashrelief="flat")
     log_paned.pack(fill="both", expand=True, padx=4, pady=4)
 
+    def _make_log_listbox(parent: tk.Frame, fg: str) -> tk.Listbox:
+        vsb = ttk.Scrollbar(parent, orient="vertical")
+        hsb = ttk.Scrollbar(parent, orient="horizontal")
+        lb = tk.Listbox(
+            parent,
+            bg="#050508", fg=fg, font=mono_sm,
+            selectbackground="#1a2a4a", selectforeground=fg,
+            activestyle="none", bd=0, highlightthickness=0,
+            yscrollcommand=vsb.set, xscrollcommand=hsb.set,
+        )
+        vsb.config(command=lb.yview)
+        hsb.config(command=lb.xview)
+        hsb.pack(side="bottom", fill="x")
+        vsb.pack(side="right",  fill="y")
+        lb.pack(side="left", fill="both", expand=True)
+        return lb
+
     srv_frame = tk.Frame(log_paned, bg="#0d0d1a")
     tk.Label(srv_frame, text="SERVER", bg="#0d0d1a", fg="#445566", font=mono_sm,
              anchor="w").pack(fill="x", padx=2)
-    full_log = scrolledtext.ScrolledText(srv_frame, bg="#050508", fg="#66ffaa", font=mono_sm,
-                                         selectbackground="#1a2a4a", wrap=tk.NONE)
-    full_log.pack(fill="both", expand=True)
+    full_log = _make_log_listbox(srv_frame, "#66ffaa")
     log_paned.add(srv_frame, stretch="always")
 
     cli_frame = tk.Frame(log_paned, bg="#0d0d1a")
     tk.Label(cli_frame, text="CLIENT", bg="#0d0d1a", fg="#445566", font=mono_sm,
              anchor="w").pack(fill="x", padx=2)
-    client_log = scrolledtext.ScrolledText(cli_frame, bg="#050508", fg="#aaddff", font=mono_sm,
-                                           selectbackground="#1a2a4a", wrap=tk.NONE)
-    client_log.pack(fill="both", expand=True)
+    client_log = _make_log_listbox(cli_frame, "#aaddff")
     log_paned.add(cli_frame, stretch="always")
 
     _CLIENT_LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "Logs", "titan_client.log")
+    _client_log_mtime: list[float] = [0.0]
+    _client_log_cache: list[str]   = [""]   # cached result of last read
 
     def _read_client_log(lines: int = 600) -> str:
         if not os.path.exists(_CLIENT_LOG_FILE):
             return ""
         try:
+            mtime = os.path.getmtime(_CLIENT_LOG_FILE)
+            if mtime == _client_log_mtime[0]:
+                return _client_log_cache[0]
             with open(_CLIENT_LOG_FILE, "r", encoding="utf-8") as f:
-                return "\n".join(l.rstrip("\r\n") for l in f.readlines()[-lines:])
+                raw = [l.rstrip("\r\n") for l in f.readlines()[-lines:]]
+            if not _debug_mode[0]:
+                raw = [l[:200] for l in raw]
+            result = "\n".join(raw)
+            _client_log_mtime[0] = mtime
+            _client_log_cache[0] = result
+            return result
         except Exception:
             return ""
     
@@ -2831,7 +2913,7 @@ def run_ui(api: TitanBackend) -> None:
         win = tk.Toplevel(root)
         win.title(f"Signal Detail — {signal_title[:50]}")
         win.configure(bg="#060615")
-        win.geometry("760x860")
+        win.geometry("760x1050")
         win.resizable(True, True)
 
         mono10 = font.Font(family="Courier", size=10)
@@ -2925,6 +3007,71 @@ def run_ui(api: TitanBackend) -> None:
         for line in detail_lines:
             tk.Label(info_f, text=line, fg="#cccccc", bg="#060615", font=mono10,
                      anchor="w", justify="left", wraplength=720).pack(anchor="w", padx=12)
+
+        # ── Wallet list ───────────────────────────────────────────────────────────
+        wlist_f = tk.Frame(win, bg="#060615")
+        wlist_f.pack(fill="x", padx=8, pady=(0, 6))
+        tk.Label(wlist_f, text="WALLETS", fg="#00ff88", bg="#060615", font=bold9).pack(anchor="w", padx=4, pady=(4, 2))
+
+        wallet_cols = ("name", "price", "size", "cash", "status")
+        wallet_tree = ttk.Treeview(wlist_f, columns=wallet_cols, show="headings", height=3)
+        wallet_tree.heading("name",   text="Name")
+        wallet_tree.heading("price",  text="Price")
+        wallet_tree.heading("size",   text="Size")
+        wallet_tree.heading("cash",   text="Cash")
+        wallet_tree.heading("status", text="Status")
+        wallet_tree.column("name",   width=220, anchor="w",      stretch=True)
+        wallet_tree.column("price",  width=80,  anchor="e",      stretch=False)
+        wallet_tree.column("size",   width=80,  anchor="e",      stretch=False)
+        wallet_tree.column("cash",   width=90,  anchor="e",      stretch=False)
+        wallet_tree.column("status", width=70,  anchor="center", stretch=False)
+        wallet_tree.pack(fill="x", padx=4, pady=(0, 4))
+
+        _signal_wallet_addrs: list[str] = []
+        seen_wl: set[str] = set()
+        all_obs: list[tuple[str, "WalletObservation", bool]] = []
+        for addr, obs in (signal.elite_ver or {}).items():
+            key = addr.lower()
+            if key not in seen_wl:
+                seen_wl.add(key)
+                all_obs.append((addr, obs, True))
+        for addr, obs in (signal.ver or {}).items():
+            key = addr.lower()
+            if key not in seen_wl:
+                seen_wl.add(key)
+                all_obs.append((addr, obs, False))
+
+        for addr, obs, is_elite_obs in all_obs:
+            prof = _wallet_cache().get(addr.lower())
+            display_name = (prof.name if prof else None) or obs.name or addr[:16] + "…"
+            status_label = "ELITE" if is_elite_obs else "VER"
+            wallet_tree.insert(
+                "", "end",
+                values=(
+                    display_name,
+                    f"${obs.price:.4f}",
+                    f"{obs.size:.2f}",
+                    f"${obs.cash:,.0f}",
+                    status_label,
+                ),
+            )
+            _signal_wallet_addrs.append(addr.lower())
+
+        def _on_wallet_list_dblclick(event: tk.Event[tk.Misc]) -> None:
+            item_id = wallet_tree.identify_row(event.y)
+            if not item_id:
+                return
+            idx = wallet_tree.index(item_id)
+            if idx >= len(_signal_wallet_addrs):
+                return
+            addr = _signal_wallet_addrs[idx]
+            prof = _wallet_cache().get(addr)
+            if prof is None:
+                log(f"[signal detail] wallet {addr} not in cache", "WARN")
+                return
+            show_whale_detail(addr, prof)
+
+        wallet_tree.bind("<Double-1>", _on_wallet_list_dblclick)
 
         lf = tk.Frame(win, bg="#060615")
         lf.pack(fill="x", padx=8, pady=6)
@@ -3599,22 +3746,26 @@ def run_ui(api: TitanBackend) -> None:
     #  UI REFRESH LOOP  (fetch in bg thread → apply on main thread)
     # ═══════════════════════════════════════════════════════════════════════════════
     _fetch_running = [False]
+    _last_rendered_srv_log: list[str] = [""]   # [last_line]
+    _last_rendered_cli_log: list[str] = [""]
+
+    def _fill_log_listbox(lb: tk.Listbox, lines: list[str]) -> None:
+        lb.delete(0, tk.END)
+        lb.insert(tk.END, *lines)
+        lb.see(tk.END)
 
     def _render_logs(logs: str) -> None:
-        full_log.configure(state="normal")
-        full_log.delete("1.0", tk.END)
-        for line in logs.splitlines()[-600:]:
-            full_log.insert(tk.END, line + "\n")
-        full_log.see(tk.END)
-        full_log.configure(state="disabled")
+        srv_lines = logs.splitlines()[-600:]
+        srv_last  = srv_lines[-1] if srv_lines else ""
+        if srv_last != _last_rendered_srv_log[0]:
+            _last_rendered_srv_log[0] = srv_last
+            _fill_log_listbox(full_log, srv_lines)
 
-        cli_logs = _read_client_log(600)
-        client_log.configure(state="normal")
-        client_log.delete("1.0", tk.END)
-        for line in cli_logs.splitlines():
-            client_log.insert(tk.END, line + "\n")
-        client_log.see(tk.END)
-        client_log.configure(state="disabled")
+        cli_lines = _read_client_log(600).splitlines()
+        cli_last  = cli_lines[-1] if cli_lines else ""
+        if cli_last != _last_rendered_cli_log[0]:
+            _last_rendered_cli_log[0] = cli_last
+            _fill_log_listbox(client_log, cli_lines)
 
     def _render_selected_tab() -> None:
         selected_tab = _selected_tab_key()

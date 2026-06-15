@@ -136,7 +136,7 @@ class TitanAPI:
         return positions
 
     @mcp_tool(
-        description="Returns closed positions as consolidated position dicts enriched with price_history from DB.",
+        description="Returns closed positions as consolidated position dicts.",
         input_schema={"limit": {"type": "integer", "description": "Max number of closed positions to return (default 200)"}},
         annotations={"readOnlyHint": True, "openWorldHint": False},
     )
@@ -144,6 +144,7 @@ class TitanAPI:
         import titan_db as _DB
         import titan_state as _TS
         from titan_position import group_trades_by_position, build_position_from_trades
+
         all_trades = _DB.load_trade_history(limit=limit * 2)
         open_assets: set[str] = {pos.asset for pos in _TS.env().open_positions.values() if pos.asset}
         positions = []

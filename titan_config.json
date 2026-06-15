@@ -682,7 +682,7 @@
                     "'MONTH'",
                     "'WEEK']"
                 ],
-                "min_win_rate_watch": 0.53,
+                "min_win_rate_watch": 0.7,
                 "wilson_min_watch": 0.0,
                 "min_resolved_bets": 20,
                 "min_pnl": 1000.0,
