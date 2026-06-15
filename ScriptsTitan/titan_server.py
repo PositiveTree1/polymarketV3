@@ -411,6 +411,28 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         pass  # suppress default Apache-style logging
 
+    def _log_client_disconnect(self, context: str) -> None:
+        _log(
+            f"Client disconnected during {context}  addr={self.client_address[0]}",
+            "INFO",
+        )
+
+    def _end_headers_safe(self, context: str) -> bool:
+        try:
+            self.end_headers()
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            self._log_client_disconnect(context)
+            return False
+
+    def _write_body_safe(self, data: bytes, context: str) -> bool:
+        try:
+            self.wfile.write(data)
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            self._log_client_disconnect(context)
+            return False
+
     def _check_auth(self) -> bool:
         if not self.token:
             return True
@@ -430,8 +452,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         if sid:
             self.send_header("MCP-Session-Id", sid)
-        self.end_headers()
-        self.wfile.write(data)
+        if not self._end_headers_safe("json response headers"):
+            return
+        self._write_body_safe(data, "json response body")
 
     def do_POST(self) -> None:  # noqa: N802
         if self.path != "/mcp":
@@ -455,7 +478,7 @@ class _Handler(BaseHTTPRequestHandler):
             # notification — no response body
             self.send_response(204)
             self.send_header("MCP-Session-Id", sid)
-            self.end_headers()
+            self._end_headers_safe("notification response")
         else:
             self._send_json(200, response, sid)
 

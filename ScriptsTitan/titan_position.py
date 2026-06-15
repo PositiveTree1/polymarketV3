@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
+import time
 import webbrowser
 
 import titan_state as S
@@ -414,6 +415,9 @@ class Position:
     def load_prices(self) -> None:
         if self.sell_trade is not None:
             return
+        from titan_prices import PRICES
+        if self.asset and self.entry_ts > 0.0:
+            PRICES.ensure_history_range(self.asset, self.entry_ts, time.time())
         self.buy_trade.load_prices()
         return
 

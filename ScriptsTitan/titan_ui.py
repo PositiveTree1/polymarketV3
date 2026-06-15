@@ -1254,35 +1254,8 @@ def run_ui(api: TitanBackend) -> None:
     tk.Label(pos_btn_bar, text="Double-click for detail", fg="#334455",
              bg="#080810", font=mono_sm).pack(side="left", padx=8)
     
-    pos_log_frame = tk.Frame(pos_split, bg="#080810", width=380)
-    pos_log_frame.pack(side="right", fill="both", expand=False)
-    pos_log_frame.pack_propagate(False)
-    
-    pos_log = tk.Text(pos_log_frame, bg="#050508", fg="#cccccc", font=mono,
-                      selectbackground="#1a2a4a", wrap="word")
-    pos_sb  = tk.Scrollbar(pos_log_frame, command=pos_log.yview, bg="#0d0d1a")
-    pos_log.configure(yscrollcommand=pos_sb.set)
-    pos_sb.pack(side="right", fill="y")
-    pos_log.pack(fill="both", expand=True)
-    
-    pos_log.tag_configure("BUY",    foreground="#00ff88")
-    pos_log.tag_configure("SELL_W", foreground="#00ff55")
-    pos_log.tag_configure("SELL_L", foreground="#ff5555")
-    pos_log.tag_configure("WARN",   foreground="#ffaa00")
-    pos_log.tag_configure("INFO",   foreground="#aaaaaa")
-    
-    
     def pos_log_write(msg, tag="INFO"):
-        try:
-            pos_log.configure(state="normal")
-            was_at_end = _is_scrolled_to_end(pos_log)
-            ts = datetime.now().strftime("%H:%M:%S")
-            pos_log.insert(tk.END, f"[{ts}] {msg}\n", tag)
-            if was_at_end:
-                pos_log.see(tk.END)
-            pos_log.configure(state="disabled")
-        except Exception:
-            pass
+        log(f"[positions] {msg}", tag)
     
     
     # ═══════════════════════════════════════════════════════════════════════════════

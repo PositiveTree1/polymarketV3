@@ -8,6 +8,7 @@ from typing import Iterator
 
 PriceHistoryPoint = tuple[float, float]
 PriceHistoryResult = tuple[list[PriceHistoryPoint], str, str | None]
+_HISTORY_GAP_THRESHOLD_SECONDS = 6 * 60 * 60
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -88,6 +89,40 @@ def extract_history_points(payload: object) -> list[tuple[float, float]]:
     return sorted(points_by_ts.items(), key=lambda item: item[0])
 
 
+def history_has_large_gap(
+    points: list[PriceHistoryPoint],
+    start_ts: float,
+    end_ts: float,
+    gap_threshold_seconds: float = _HISTORY_GAP_THRESHOLD_SECONDS,
+) -> bool:
+    if not points:
+        return True
+
+    window_start = max(0.0, float(start_ts))
+    window_end = max(window_start, float(end_ts))
+    if window_end <= 0.0:
+        return False
+
+    relevant_points = [point for point in points if window_start <= point[0] <= window_end]
+    if not relevant_points:
+        return True
+
+    first_ts = float(relevant_points[0][0])
+    last_ts = float(relevant_points[-1][0])
+    if first_ts - window_start > gap_threshold_seconds:
+        return True
+    if window_end - last_ts > gap_threshold_seconds:
+        return True
+
+    prev_ts = first_ts
+    for ts, _price in relevant_points[1:]:
+        current_ts = float(ts)
+        if current_ts - prev_ts > gap_threshold_seconds:
+            return True
+        prev_ts = current_ts
+    return False
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  PricesCache — in-memory, client-safe
 # ─────────────────────────────────────────────────────────────────────────────
@@ -151,6 +186,10 @@ class PricesCache:
 
     def refresh(self, asset: str) -> None:
         """Force-fetch latest prices. No-op on client; overridden by PricesCacheSrv."""
+        pass
+
+    def ensure_history_range(self, asset: str, start_ts: float, end_ts: float) -> None:
+        """Ensure the cached history covers the requested time window."""
         pass
 
     # Override hooks for subclasses
@@ -300,6 +339,25 @@ class PricesCacheSrv(PricesCache):
         if points:
             self.add_points(asset, points)
             self.upsert(asset, points)
+
+    def ensure_history_range(self, asset: str, start_ts: float, end_ts: float) -> None:
+        asset_id = asset.strip()
+        if not asset_id:
+            return
+
+        cached_points = self._data.get(asset_id)
+        if not cached_points:
+            db_points = self.load_from_db(asset_id)
+            if db_points:
+                self._data[asset_id] = db_points
+                cached_points = db_points
+
+        if cached_points and not history_has_large_gap(cached_points, start_ts, end_ts):
+            return
+
+        api_points = self.fetch_from_api(asset_id)
+        if api_points:
+            self.add_points(asset_id, api_points)
 
     # ── Override hooks: persist on every write ────────────────────────────────
 

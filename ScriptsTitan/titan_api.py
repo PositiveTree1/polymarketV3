@@ -132,8 +132,7 @@ class TitanAPI:
             reverse=True,
         )
         for pos in positions:
-            if not pos.price_history:
-                pos.load_prices()
+            pos.load_prices()
         return positions
 
     @mcp_tool(
