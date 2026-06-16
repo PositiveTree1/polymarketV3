@@ -138,7 +138,6 @@ def init_db(db_path: str) -> None:
         scanned_rows, updated_rows = _migrate_strip_signal_embedded_market_data(cx)
     if updated_rows:
         cleanup_line = f"Signal cleanup: scanned={scanned_rows} updated={updated_rows}"
-        print(cleanup_line)
         try:
             import titan_state as S
             S._log(cleanup_line, "INFO")
@@ -625,7 +624,11 @@ def _signal_from_row(payload: dict, snapshot_ts: float | None = None) -> "Signal
         return sig
     except Exception as e:
         import traceback
-        print(f"[titan_db] _signal_from_row failed: {e}\n{traceback.format_exc()}")
+        try:
+            import titan_state as S
+            S._log(f"[titan_db] _signal_from_row failed: {e}\n{traceback.format_exc()}", "ERR")
+        except Exception:
+            pass
         return None
 
 

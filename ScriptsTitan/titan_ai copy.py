@@ -3,13 +3,19 @@ import tkinter as tk
 from tkinter import font as tkfont, scrolledtext
 import threading
 import json
-import requests
 import os
+import re
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeAlias
+import litellm
 from titan_client import TitanClient, _log
 from titan_protocol import TitanBackend
+
+litellm.drop_params = True        # ignore unsupported params silently
+litellm._turn_on_debug()  # type: ignore[attr-defined]
+
+WidgetState: TypeAlias = Literal["normal", "disabled"]
 
 # ── ai config (persisted) ─────────────────────────────────────────────────────
 _AI_CONFIG_PATH = Path(__file__).parent.parent / "titan_ai_config.json"
@@ -127,6 +133,20 @@ def _json_dump(value) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, default=str)
 
 
+def _summarize_tool_result(value: object) -> str:
+    if isinstance(value, str):
+        return f"{len(value)} chars"
+    if isinstance(value, list):
+        return f"list[{len(value)}]"
+    if isinstance(value, dict):
+        preview_keys = ", ".join(str(k) for k in list(value.keys())[:4])
+        more = "…" if len(value) > 4 else ""
+        return f"dict[{len(value)}] {preview_keys}{more}".strip()
+    if value is None:
+        return "null"
+    return type(value).__name__
+
+
 def _coerce_tool_schema(tool: dict) -> dict:
     schema = dict(tool.get("inputSchema") or {})
     if schema.get("type") != "object":
@@ -163,261 +183,219 @@ class TitanMCPBridge:
 
     def call(self, name: str, arguments: dict | None = None) -> object:
         allowed = {tool["name"] for tool in self.available_tools()}
+        _log(f"AI MCP bridge: name={name!r} allowed={sorted(allowed)}", "DEBUG")
         if name not in allowed:
-            raise RuntimeError(f"Tool not allowed: {name}")
-        return self._client.call_tool(name, arguments or {})
+            raise RuntimeError(f"Tool not allowed: {name!r} (available: {sorted(allowed)})")
+        safe_arguments = arguments or {}
+        try:
+            return self._client.call_tool(name, safe_arguments)
+        except Exception as exc:
+            _log(f"MCP tool call failed: {name} args={safe_arguments} error={exc}", "ERR")
+            raise
 
 
-# ── unified ask function ──────────────────────────────────────────────────────
+# ── litellm model string ──────────────────────────────────────────────────────
 
-def _ask_openai_compat(messages: list[dict], on_token, on_done, on_error) -> None:
-    url     = _backend["base_url"].rstrip("/") + "/chat/completions"
-    headers = {"Authorization": f"Bearer {_backend['api_key']}", "Content-Type": "application/json"}
-    payload = {"model": MODEL, "messages": messages, "stream": True, "temperature": 0.2}
-    try:
-        resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=120)
-        if resp.status_code != 200:
-            on_error(f"HTTP {resp.status_code}: {resp.text[:200]}")
-            return
-        full = ""
-        for line in resp.iter_lines():
-            if not line or line == b"data: [DONE]":
-                continue
-            raw = line.decode("utf-8").removeprefix("data: ")
-            try:
-                tok = json.loads(raw)["choices"][0]["delta"].get("content", "")
-                if tok:
-                    full += tok
-                    on_token(tok)
-            except Exception:
-                continue
-        on_done(full)
-    except Exception as e:
-        on_error(str(e))
+def _litellm_model() -> str:
+    b = _backend
+    btype = b["type"]
+    model = b["model"]
+    if btype == "ollama":
+        return f"ollama/{model}"
+    if btype == "gemini":
+        return f"gemini/{model}"
+    if btype == "openai_compat":
+        name = ACTIVE_BACKEND
+        if name == "groq":
+            return f"groq/{model}"
+        if name == "openai":
+            return model
+        # local / LM Studio: pass model name as-is — litellm provider is set
+        # explicitly via custom_llm_provider in _litellm_kwargs() to avoid litellm
+        # misreading the model name (e.g. "qwen/..." triggering Qwen prompt templates)
+        return model
+    return model
 
 
-def _openai_chat_once(messages: list[dict], tools: list[dict] | None = None) -> dict:
-    url = _backend["base_url"].rstrip("/") + "/chat/completions"
-    headers = {"Authorization": f"Bearer {_backend['api_key']}", "Content-Type": "application/json"}
-    payload = {"model": MODEL, "messages": messages, "stream": False, "temperature": 0.2}
-    if tools:
-        payload["tools"] = tools
-        payload["tool_choice"] = "auto"
-    resp = requests.post(url, headers=headers, json=payload, timeout=120)
-    if resp.status_code != 200:
-        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:400]}")
-    body = resp.json()
-    choices = body.get("choices") or []
-    if not choices:
-        raise RuntimeError("No choices returned by model")
-    return choices[0].get("message") or {}
+def _litellm_kwargs() -> dict:
+    b = _backend
+    kwargs: dict = {"api_key": b.get("api_key") or "not-needed", "timeout": 120}
+    btype = b.get("type")
+    if btype in ("openai_compat", "ollama") and b.get("base_url"):
+        kwargs["api_base"] = b["base_url"]
+    if btype == "gemini" and b.get("api_key"):
+        kwargs["api_key"] = b["api_key"]
+    # For local openai-compat endpoints, force the openai provider so litellm never
+    # applies a vendor-specific prompt template based on the model name string.
+    if btype == "openai_compat" and ACTIVE_BACKEND not in ("openai", "groq"):
+        kwargs["custom_llm_provider"] = "openai"
+    return kwargs
 
 
-def _ollama_chat_once(messages: list[dict], tools: list[dict] | None = None) -> dict:
-    payload = {
-        "model": MODEL,
-        "messages": messages,
-        "stream": False,
-        "think": False,
-        "keep_alive": -1,
-        "options": {"num_ctx": 8192, "temperature": 0.2, "top_k": 20, "num_predict": 1024},
-    }
-    if tools:
-        payload["tools"] = tools
-    resp = requests.post(_backend["base_url"], json=payload, timeout=120)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Ollama HTTP {resp.status_code}: {resp.text[:400]}")
-    body = resp.json()
-    return body.get("message") or {}
-
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def _strip_think(text: str) -> str:
-    import re
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-def _message_tool_calls(msg: dict) -> list[dict]:
-    tool_calls = msg.get("tool_calls") or []
-    return [tc for tc in tool_calls if isinstance(tc, dict)]
 
-def _clean_content(msg: dict) -> str:
-    return _strip_think(msg.get("content", "") or "")
+def _clean_text(text: str) -> str:
+    return _strip_think(text or "").strip()
 
 
-def _tool_call_name(tc: dict) -> str:
-    fn = tc.get("function") or {}
-    return str(fn.get("name") or tc.get("name") or "")
+def _tc_name(tc) -> str:
+    fn = getattr(tc, "function", None) or {}
+    if hasattr(fn, "name"):
+        return fn.name or ""
+    return str(fn.get("name", ""))
 
 
-def _tool_call_args(tc: dict) -> dict:
-    fn = tc.get("function") or {}
-    args = fn.get("arguments")
+def _tc_args(tc) -> dict:
+    fn = getattr(tc, "function", None) or {}
+    args = fn.arguments if hasattr(fn, "arguments") else fn.get("arguments")
     if isinstance(args, dict):
         return args
     if isinstance(args, str) and args.strip():
-        return json.loads(args)
+        try:
+            return json.loads(args)
+        except Exception:
+            return {}
     return {}
 
 
-def _tool_call_id(tc: dict, idx: int) -> str:
-    return str(tc.get("id") or f"toolcall_{idx}")
+def _tc_id(tc, idx: int) -> str:
+    return str(getattr(tc, "id", None) or f"toolcall_{idx}")
 
 
-def _append_openai_tool_roundtrip(messages: list[dict], assistant_msg: dict, tool_calls: list[dict], bridge: TitanMCPBridge, on_tool_call=None) -> None:
-    messages.append({
-        "role": "assistant",
-        "content": assistant_msg.get("content", "") or "",
-        "tool_calls": tool_calls,
-    })
-    for idx, tool_call in enumerate(tool_calls, start=1):
-        name = _tool_call_name(tool_call)
-        args = _tool_call_args(tool_call)
-        if on_tool_call:
-            on_tool_call(name, args)
-        result = bridge.call(name, args)
+# ── tool loop (used by both streaming and non-streaming paths) ────────────────
+
+def _run_tool_loop(
+    messages: list[dict],
+    bridge: TitanMCPBridge,
+    on_tool_call=None,
+    on_tool_result=None,
+) -> str:
+    tools = bridge.openai_tools()
+    model = _litellm_model()
+    kwargs = _litellm_kwargs()
+
+    for step in range(TOOL_LOOP_MAX_STEPS):
+        resp = litellm.completion(
+            model=model,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            temperature=0.2,
+            stream=False,
+            **kwargs,
+        )
+        msg = resp.choices[0].message
+        tool_calls = msg.tool_calls or []
+
+        if not tool_calls:
+            return _clean_text(msg.content or "")
+
+        # append assistant turn with tool_calls
         messages.append({
-            "role": "tool",
-            "tool_call_id": _tool_call_id(tool_call, idx),
-            "name": name,
-            "content": _json_dump(result),
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": [
+                {
+                    "id":       _tc_id(tc, i),
+                    "type":     "function",
+                    "function": {
+                        "name":      _tc_name(tc),
+                        "arguments": json.dumps(_tc_args(tc), ensure_ascii=False),
+                    },
+                }
+                for i, tc in enumerate(tool_calls, 1)
+            ],
         })
 
+        for idx, tc in enumerate(tool_calls, 1):
+            name = _tc_name(tc)
+            args = _tc_args(tc)
+            _log(f"AI tool[{idx}/{step+1}]: {name}({args})", "DEBUG")
+            if on_tool_call:
+                on_tool_call(name, args)
+            try:
+                result = bridge.call(name, args)
+                summary = _summarize_tool_result(result)
+                _log(f"AI tool[{idx}/{step+1}]: {name} → {summary}", "INFO")
+                if on_tool_result:
+                    on_tool_result(name, args, True, summary)
+            except Exception as exc:
+                _log(f"AI tool[{idx}/{step+1}]: {name} FAILED — {exc}", "ERR")
+                if on_tool_result:
+                    on_tool_result(name, args, False, str(exc))
+                result = {"error": str(exc)}
+            messages.append({
+                "role":         "tool",
+                "tool_call_id": _tc_id(tc, idx),
+                "name":         name,
+                "content":      _json_dump(result),
+            })
 
-def _append_ollama_tool_roundtrip(messages: list[dict], assistant_msg: dict, tool_calls: list[dict], bridge: TitanMCPBridge, on_tool_call=None) -> None:
-    messages.append({
-        "role": "assistant",
-        "content": assistant_msg.get("content", "") or "",
-        "tool_calls": tool_calls,
-    })
-    for idx, tool_call in enumerate(tool_calls, start=1):
-        name = _tool_call_name(tool_call)
-        args = _tool_call_args(tool_call)
-        if on_tool_call:
-            on_tool_call(name, args)
-        result = bridge.call(name, args)
-        messages.append({
-            "role": "tool",
-            "tool_call_id": _tool_call_id(tool_call, idx),
-            "name": name,
-            "content": _json_dump(result),
-        })
+    _log("AI tool loop: max steps reached without final answer", "WARN")
+    return ""
 
 
-def _dispatch_with_titan_tools(messages: list[dict], bridge: TitanMCPBridge, on_token, on_done, on_error, on_tool_call=None) -> bool:
-    if _btype not in {"openai_compat", "ollama"}:
-        return False
+# ── streaming fallback (no tools) ─────────────────────────────────────────────
 
+def _dispatch_stream(messages: list[dict], on_token, on_done, on_error) -> None:
+    model  = _litellm_model()
+    kwargs = _litellm_kwargs()
+    try:
+        stream = litellm.completion(
+            model=model,
+            messages=messages,
+            temperature=0.2,
+            stream=True,
+            **kwargs,
+        )
+        full = ""
+        for chunk in stream:
+            tok = (chunk.choices[0].delta.content or "") if chunk.choices else ""
+            if tok:
+                full += tok
+                on_token(tok)
+        on_done(full)
+    except Exception as exc:
+        on_error(str(exc))
+
+
+_JINJA_TOOL_ERROR = (
+    "Error rendering prompt with jinja template",
+    "Cannot call something that is not a function",
+    "prompt template",
+)
+
+
+def _is_no_tool_support(exc: BaseException) -> bool:
+    msg = str(exc)
+    return any(s in msg for s in _JINJA_TOOL_ERROR)
+
+
+def _dispatch_with_titan_tools(
+    messages: list[dict],
+    bridge: TitanMCPBridge,
+    on_token, on_done, on_error,
+    on_tool_call=None,
+    on_tool_result=None,
+) -> bool:
     try:
         tool_messages = [dict(m) for m in messages]
-        tools = bridge.openai_tools()
-        if not tools:
-            raise RuntimeError("No read-only Titan MCP tools are available")
-
-        final_text = ""
-        for _ in range(TOOL_LOOP_MAX_STEPS):
-            if _btype == "ollama":
-                assistant_msg = _ollama_chat_once(tool_messages, tools)
-                tool_calls = _message_tool_calls(assistant_msg)
-                if tool_calls:
-                    _append_ollama_tool_roundtrip(tool_messages, assistant_msg, tool_calls, bridge, on_tool_call)
-                    continue
-            else:
-                assistant_msg = _openai_chat_once(tool_messages, tools)
-                tool_calls = _message_tool_calls(assistant_msg)
-                if tool_calls:
-                    _append_openai_tool_roundtrip(tool_messages, assistant_msg, tool_calls, bridge, on_tool_call)
-                    continue
-
-            final_text = _clean_content(assistant_msg)
-            break
-
+        final_text = _run_tool_loop(tool_messages, bridge, on_tool_call, on_tool_result)
         if not final_text:
-            raise RuntimeError("Tool loop finished without a final assistant response")
+            raise RuntimeError("Tool loop returned empty response")
         on_token(final_text)
         on_done(final_text)
         return True
-    except Exception as e:
-        _log(f"Tool dispatch failed: {e}", "ERR")
-        return False
-
-
-def _ask_gemini(messages: list[dict], on_token, on_done, on_error) -> None:
-    api_key = _backend["api_key"]
-    model   = _backend["model"]
-    url     = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={api_key}"
-    contents = []
-    for m in messages:
-        if m["role"] == "system":
-            contents.append({"role": "user", "parts": [{"text": f"[SYSTEM]\n{m['content']}"}]})
-            contents.append({"role": "model", "parts": [{"text": "Understood."}]})
-        elif m["role"] == "assistant":
-            contents.append({"role": "model", "parts": [{"text": m["content"]}]})
+    except Exception as exc:
+        if _is_no_tool_support(exc):
+            _log(f"Model {MODEL!r} does not support tool calls — falling back to stream. Fix: use a model with a tool-call prompt template.", "WARN")
         else:
-            contents.append({"role": "user", "parts": [{"text": m["content"]}]})
-    payload = {"contents": contents, "generationConfig": {"temperature": 0.2}}
-    try:
-        resp = requests.post(url, json=payload, stream=True, timeout=120)
-        if resp.status_code != 200:
-            on_error(f"Gemini HTTP {resp.status_code}: {resp.text[:200]}")
-            return
-        full = ""
-        for line in resp.iter_lines():
-            if not line:
-                continue
-            raw = line.decode("utf-8").removeprefix("data: ").strip()
-            if not raw:
-                continue
-            try:
-                tok = json.loads(raw)["candidates"][0]["content"]["parts"][0]["text"]
-                if tok:
-                    full += tok
-                    on_token(tok)
-            except Exception:
-                continue
-        on_done(full)
-    except Exception as e:
-        on_error(str(e))
-
-
-def _ask_ollama(messages: list[dict], on_token, on_done, on_error) -> None:
-    url     = _backend["base_url"]
-    payload = {
-        "model": MODEL, "messages": messages, "stream": True,
-        "think": False, "keep_alive": -1,
-        "options": {"num_ctx": 8192, "temperature": 0.2, "top_k": 20, "num_predict": 1024},
-    }
-    try:
-        resp = requests.post(url, json=payload, stream=True, timeout=120)
-        if resp.status_code != 200:
-            on_error(f"Ollama HTTP {resp.status_code}: {resp.text[:200]}")
-            return
-        full = ""
-        for line in resp.iter_lines():
-            if not line:
-                continue
-            try:
-                chunk = json.loads(line.decode("utf-8"))
-                tok = chunk.get("message", {}).get("content", "")
-                if tok:
-                    full += tok
-                    on_token(tok)
-                if chunk.get("done"):
-                    break
-            except Exception:
-                continue
-        on_done(full)
-    except requests.exceptions.ConnectionError:
-        on_error("Cannot connect to Ollama. Is it running?\n  → Run: ollama serve")
-    except Exception as e:
-        on_error(str(e))
-
-
-def _dispatch(messages: list[dict], on_token, on_done, on_error) -> None:
-    if _btype == "ollama":
-        _ask_ollama(messages, on_token, on_done, on_error)
-    elif _btype == "gemini":
-        _ask_gemini(messages, on_token, on_done, on_error)
-    else:
-        _ask_openai_compat(messages, on_token, on_done, on_error)
+            _log(f"AI tool dispatch failed: {exc}", "ERR")
+        return False
 
 
 # ── AI client ─────────────────────────────────────────────────────────────────
@@ -428,6 +406,7 @@ class TitanAIClient:
         self._messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
         self._lock = threading.Lock()
         self._mcp = TitanMCPBridge()
+        self._tools_unsupported = False   # set True after first jinja/template rejection
 
     def _build_system_prompt(self) -> str:
         try:
@@ -449,13 +428,13 @@ class TitanAIClient:
             history.append(dict(message))
         return [{"role": "system", "content": self._build_system_prompt()}, *history, {"role": "user", "content": full_msg}]
 
-
-    def ask(self, user_msg: str, on_token, on_done, on_error, on_tool_call=None) -> None:
+    def ask(self, user_msg: str, on_token, on_done, on_error, on_tool_call=None, on_tool_result=None) -> None:
         snapshot = ""
         if self._engine is not None:
             try:
                 snapshot = self._engine.get_snapshot(compressed=True)
             except Exception as exc:
+                _log(f"AI snapshot build failed: {exc}", "ERR")
                 snapshot = f"(snapshot error: {exc})"
 
         full_msg = f"[LIVE SYSTEM SNAPSHOT]\n{snapshot}\n\n[USER QUESTION]\n{user_msg}"
@@ -471,18 +450,30 @@ class TitanAIClient:
             except Exception as e:
                 _log(f"AI snapshot save failed: {e}", "ERR")
 
-            def _done(full: str):
+            def _done_final(full: str) -> None:
                 with self._lock:
                     self._messages.append({"role": "user", "content": user_msg})
                     self._messages.append({"role": "assistant", "content": full})
                 on_done()
 
-            def _err(msg: str):
-                on_error(msg)
+            def _on_token_and_done(final_text: str) -> None:
+                on_token(final_text)
+                _done_final(final_text)
 
-            if _dispatch_with_titan_tools(snapshot_messages, self._mcp, on_token, _done, _err, on_tool_call):
-                return
-            _dispatch(snapshot_messages, on_token, _done, _err)
+            ok = _dispatch_with_titan_tools(
+                snapshot_messages, self._mcp,
+                _on_token_and_done, lambda _: None,
+                on_error, on_tool_call, on_tool_result,
+            )
+            if not ok:
+                # fallback: stream without tools
+                chunks: list[str] = []
+                def _buf(tok: str) -> None:
+                    chunks.append(tok)
+                    on_token(tok)
+                def _stream_done(full: str) -> None:
+                    _done_final(_clean_text(full or "".join(chunks)))
+                _dispatch_stream(snapshot_messages, _buf, _stream_done, on_error)
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -710,9 +701,26 @@ class AIPanel:
         def on_tool_call(name: str, args: dict) -> None:
             args_str = ", ".join(f"{k}={v!r}" for k, v in args.items()) if args else ""
             label = f"{name}({args_str})" if args_str else name
+            _log(f"AI MCP start: {label}", "INFO")
             def _fn():
+                self._status_var.set(f"⬤ mcp… {name}")
                 self._chat.configure(state="normal")
                 self._chat.insert(tk.END, f"\n  ⚙ MCP → {label}\n", "tool")
+                self._chat.see(tk.END)
+                self._chat.configure(state="disabled")
+            _ui(_fn)
+
+        def on_tool_result(name: str, args: dict, ok: bool, detail: str) -> None:
+            args_str = ", ".join(f"{k}={v!r}" for k, v in args.items()) if args else ""
+            label = f"{name}({args_str})" if args_str else name
+            level = "INFO" if ok else "ERR"
+            direction = "←" if ok else "✖"
+            prefix = "✓ MCP" if ok else "✗ MCP"
+            _log(f"AI MCP {'done' if ok else 'failed'}: {label} | {detail}", level)
+            def _fn():
+                self._status_var.set(f"⬤ thinking… [{ACTIVE_BACKEND}]")
+                self._chat.configure(state="normal")
+                self._chat.insert(tk.END, f"  {prefix} {direction} {name}  {detail}\n", "tool" if ok else "error")
                 self._chat.see(tk.END)
                 self._chat.configure(state="disabled")
             _ui(_fn)
@@ -734,7 +742,7 @@ class AIPanel:
                 self._status_var.set("⬤ error")
             _ui(_fn)
 
-        self._client.ask(text, on_token, on_done, on_error, on_tool_call)
+        self._client.ask(text, on_token, on_done, on_error, on_tool_call, on_tool_result)
 
     def _set_controls(self, state: WidgetState) -> None:
         try:
@@ -808,4 +816,3 @@ if __name__ == "__main__":
     root.configure(bg="#080810")
     AIPanel(root, engine_module=None)
     root.mainloop()
-WidgetState = Literal["normal", "disabled"]

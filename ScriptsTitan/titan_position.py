@@ -44,6 +44,7 @@ class Position:
 
     # ── pricing ───────────────────────────────────────────────────────────────
     cur_price:            float = 0.0
+    cur_price_ts:         float = 0.0
 
     # ── strategy ──────────────────────────────────────────────────────────────
     conviction_detail:    str   = ""
@@ -423,7 +424,14 @@ class Position:
         if self.asset and self.entry_ts > 0.0:
             PRICES.ensure_history_range(self.asset, self.entry_ts, time.time())
         self.buy_trade.load_prices()
-        return
+        if self.price_history:
+            latest_ts, latest = self.price_history[-1]
+            self.cur_price = latest
+            self.cur_price_ts = latest_ts
+            entry = self.entry_price
+            if entry > 0:
+                pnl_pct = (latest - entry) / entry
+                self.peak_pnl_pct = max(self.peak_pnl_pct, pnl_pct)
 
     
 
@@ -434,6 +442,7 @@ class Position:
             "status":               self.status,
             "type":                 self.type,
             "cur_price":            self.cur_price,
+            "cur_price_ts":         self.cur_price_ts,
             "conviction_detail":    self.conviction_detail,
             "is_hft":               self.is_hft,
             "tracked_wallets":        self.tracked_wallets,
@@ -463,6 +472,7 @@ class Position:
             status=               str(d.get("status", "")),
             type=                 str(d.get("type", "")),
             cur_price=            float(d.get("cur_price") or 0.0),
+            cur_price_ts=         float(d.get("cur_price_ts") or 0.0),
             _bankroll=            float(d.get("bankroll") or 0.0),
             conviction_detail=    str(d.get("conviction_detail", "")),
             is_hft=               bool(d.get("is_hft", False)),

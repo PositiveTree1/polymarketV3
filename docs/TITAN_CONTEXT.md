@@ -272,11 +272,12 @@ TITAN follows an explicit philosophy: **follow the selected wallet out**.
 
 | Trigger | Behavior |
 |---|---|
-| Tracked wallet sells → `WALLET_EXIT_SELL=true` | Immediate paper-sell |
-| Profit target hit (`PROFIT_TARGET_PCT`, default 20%) | Sells even if wallet still holds |
-| Trailing stop | Activates at +15%, trails 10% from peak |
-| Stop loss (`STOP_LOSS_ENABLED`, default -30%) | Optional hard floor |
-| Min hold guard (`MIN_HOLD_MINUTES`) | Won't sell before this time regardless |
+| Min hold guard (`MIN_HOLD_MINUTES`) | Blocks all exits before this time |
+| Tracked wallet sells → `WALLET_EXIT_SELL=true` | Paper-sell after min-hold, but HFT/hedge exits and some early-noise exits are ignored |
+| Profit target hit (`PROFIT_TARGET_PCT`, default 40%) | Sells even if wallet still holds |
+| Stop loss (`STOP_LOSS_ENABLED`, default -30%) | Strategy/global hard floor |
+| Market resolving/resolved or expiring soon | Forced exit |
+| Catastrophic loss / stale trend reversal | Safety exits |
 | Exit cooldown (`EXIT_COOLDOWN_SECONDS`) | Blocks re-entry on same market for N minutes |
 
 ---
@@ -303,9 +304,9 @@ Tabs in order as shown in the notebook:
 |---|---|
 | SELECTOR | Wallet selector parameter editor. Live-reload selector config; shows selector tier thresholds. |
 | WALLETS | Selected wallet roster with score, WR, Wilson LB, PnL, TPH. Filterable by tier. |
-| SIGN. CRAFT | Signal builder parameter editor. Active builder checkboxes; per-builder param grids; Apply hot-reloads config. |
+| SIGN. CRAFT | Signal builder parameter editor (also: signal builder config, strategy params, builder config). Active builder checkboxes; per-builder param grids; Apply hot-reloads config. |
 | SIGNALS | Live treeview of all signals this cycle. Score, drift, wallet count, mode. |
-| ALERTS | Formatted detail for tradeable signals (ALERT/STRONG/HFT/CONVICTION). Auto-buy status shown. |
+| ALERTS | Formatted detail for tradeable signals (ALERT/STRONG/HFT/CONVICTION). Auto-buy status shown. MCP equivalent: `get_tradeable_signals` — returns same data structured for AI. |
 | POSITIONS | Open paper positions. Live P&L, hold time, wallet source. Double-click for detail popup. |
 | P&L | Equity curve graph. Stats grid (total PnL, win rate, expectancy). Trade history table. |
 | ANALYSIS | Cycle summary: signal counts by tier, elite roster, account stats. |

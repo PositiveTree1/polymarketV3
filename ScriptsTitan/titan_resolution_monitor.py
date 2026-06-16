@@ -38,6 +38,7 @@ import websockets
 import websockets.exceptions
 
 import titan_state as S
+from titan_monitor_job import start_monitored_thread
 from titan_state import _log
 
 WS_URI     = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -336,8 +337,13 @@ def start():
     Start the WebSocket resolution monitor as a background daemon thread.
     Called once from titan_engine.start() after load_state() and C.reload().
     """
-    t = threading.Thread(target=_thread_entry, daemon=True, name="titan-ws-monitor")
-    t.start()
+    t = start_monitored_thread(
+        job_name="ws_resolution_monitor",
+        target=_thread_entry,
+        warn_after=15.0,
+        thread_name="titan-ws-monitor",
+        log_label="WS monitor",
+    )
     _log("📡 WS resolution monitor started", "INFO")
     return t
 

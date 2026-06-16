@@ -125,8 +125,55 @@ Returns: same structure as `get_positions` plus exit fields (`exit_ts`, `pnl_usd
 
 ## Tools — Signals
 
+### `get_tradeable_signals` ⭐ primary tool for AI analysis
+**Use this first** when analysing what to trade, reviewing decisions, or reflecting on signal quality. It returns only the actionable signals (CONVICTION / ALERT / STRONG / HFT / ELITE_ONLY) — the same data rendered in the 🚨 ALERTS tab — enriched with full execution context in one call.
+
+Returns: list of alert dicts
+```
+tier                    str     CONVICTION / ALERT / STRONG / HFT / ELITE_ONLY
+score                   float   0–100
+strategy                str     consensus_basket | recent_form | drift_discount
+auto_bought             bool    True = position already open on this market
+cooldown_remaining_s    int     Seconds before re-entry allowed (0 = clear)
+exit_alert              bool    Whale selling detected on this signal
+
+market:
+  title                 str
+  outcome               str     YES / NO
+  url                   str     https://polymarket.com/event/<slug>
+  cur_price             float   Current price (0–1)
+  avg_entry             float   Tracked whale avg entry price
+  drift_pct             float   (cur − avg_entry) / avg_entry × 100
+  liquidity             float   USD liquidity in market
+  volume                float   USD volume
+  closes_in_h           float   Hours until market closes
+
+score_breakdown:
+  wallet_quality        float   /30  — quality of whales driving the signal
+  confluence            int     /18  — how many wallets agree
+  recency               int     /20  — how fresh the trades are
+  price_window          int     /15  — is price in the ideal 20–72¢ zone
+  market_quality        float   /10  — liquidity + volume quality
+  conviction            int     /5   — large trade / conviction bonus
+  exit_penalty          int     negative if whale exits detected
+  total                 float   /100
+
+sizing:
+  auto_size_usd         float   Kelly-sized recommended bet
+  bankroll_pct          float   % of current bankroll
+
+wallet_intel:
+  n_elite               int     Elite wallets backing this signal
+  n_verified            int     Total verified wallets
+  ver_flow_usd          float   Total verified-wallet cash flow
+  max_single_usd        float   Largest single whale trade
+  age_min               float   Minutes since newest contributing trade
+  elite_detail          list    Per-whale: name, win_rate, total_pnl, score,
+                                entry_price, cash, is_hft
+```
+
 ### `get_signals`
-Current live signals from the last engine cycle.
+Raw signals from the last engine cycle — all tiers including MEDIUM. Use for broad scanning; use `get_tradeable_signals` for decision-making.
 
 Inputs:
 ```
@@ -384,6 +431,9 @@ See [config/CONFIG_SIGNALS.md](config/CONFIG_SIGNALS.md).
 Per-strategy parameters for all 3 builders + global strategy settings.
 See [config/CONFIG_STRATEGIES.md](config/CONFIG_STRATEGIES.md).
 
+### `get_config_signal_builders`
+SIGN. CRAFT tab parameters (also: signal builder config, strategy params, builder config): `active_builders` list and full per-builder params for `consensus_basket`, `recent_form`, and `drift_discount`. This is the live source for the builder param grids shown in the UI.
+
 ### `get_config_risk`
 Position management, stop-loss, profit target, Kelly constants, timing.
 See [config/CONFIG_RISK.md](config/CONFIG_RISK.md).
@@ -440,6 +490,19 @@ strategy  str    recent_form | drift_discount | consensus_basket | open_book
 patch     dict   Applied directly to strategy block — any key accepted
 dry_run   bool
 ```
+
+### `update_config_signal_builders`
+Update SIGN. CRAFT builder parameters. Keys are validated against the builder's `*Params` dataclass — unknown keys are rejected.
+
+Inputs:
+```
+builder   str    consensus_basket | recent_form | drift_discount | active
+patch     dict   {key: new_value}
+dry_run   bool
+```
+
+When `builder="active"`, patch must be `{"active_builders": [...]}` to change which builders run.
+Changes hot-reload on the next engine cycle.
 
 ### `update_config_risk`
 Inputs:

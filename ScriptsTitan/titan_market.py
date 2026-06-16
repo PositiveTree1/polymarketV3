@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 from typing import Iterator
 import webbrowser
 import titan_state as S
+from titan_monitor_job import monitored_step
 
 
 @dataclass
@@ -1043,25 +1044,29 @@ def fetch_trades() -> list[WalletObservation]:
     hot_cutoff  = time.time() - C.HOT_HOURS  * 3600
     warm_cutoff = time.time() - C.WARM_HOURS * 3600
 
-    priority = _poll_vip_and_elite(hot_cutoff, warm_cutoff)
+    with monitored_step("fetch_trades.elite_vip_poll", warn_after=15.0):
+        priority = _poll_vip_and_elite(hot_cutoff, warm_cutoff)
     polled   = {t.wallet for t in priority}
 
-    watchlist_trades = _poll_watchlist(hot_cutoff, warm_cutoff, polled)
-    public = _fetch_public_feed(hot_cutoff, warm_cutoff)
+    with monitored_step("fetch_trades.watchlist_poll", warn_after=10.0):
+        watchlist_trades = _poll_watchlist(hot_cutoff, warm_cutoff, polled)
+    with monitored_step("fetch_trades.public_feed", warn_after=5.0):
+        public = _fetch_public_feed(hot_cutoff, warm_cutoff)
 
     best: dict = {}
     source_priority = {"hft_poll": 3, "elite_poll": 3, "vip_poll": 3,
                        "watchlist_poll": 2, "public_feed": 1}
-    for whaletrade in priority + watchlist_trades + public:
-        key = (whaletrade.wallet, whaletrade.cid, whaletrade.outcome)
-        if key not in best:
-            best[key] = whaletrade
-        else:
-            existing = best[key]
-            src_new = source_priority.get(whaletrade.source, 1)
-            src_old = source_priority.get(existing.source, 1)
-            if src_new > src_old or (src_new == src_old and whaletrade.ts > existing.ts):
+    with monitored_step("fetch_trades.merge_results", warn_after=2.0):
+        for whaletrade in priority + watchlist_trades + public:
+            key = (whaletrade.wallet, whaletrade.cid, whaletrade.outcome)
+            if key not in best:
                 best[key] = whaletrade
+            else:
+                existing = best[key]
+                src_new = source_priority.get(whaletrade.source, 1)
+                src_old = source_priority.get(existing.source, 1)
+                if src_new > src_old or (src_new == src_old and whaletrade.ts > existing.ts):
+                    best[key] = whaletrade
 
     return list(best.values())
 
@@ -1095,50 +1100,51 @@ def fetch_hft_spike_trades() -> list[WalletObservation]:
         return []
 
     results : list[WalletObservation] = []
-    for wallet, prof in hft_wallets.items():
-        avg_bet = prof.avg_bet
-        if avg_bet <= 0:
-            continue
-
-        raw = S.safe_get(f"{C.DATA_API}/trades", {
-            "user":         wallet,
-            "limit":        15,
-            "side":         "BUY",
-            "filterType":   "CASH",
-            "filterAmount": max(1.0, avg_bet * 0.5),
-        })
-        if not raw or not isinstance(raw, list):
-            time.sleep(0.05)
-            continue
-
-        for t in raw:
-            whaletrade : WalletObservation | None= _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, "hft_spike_poll")
-            if whaletrade is None:
-                continue
-            cash = whaletrade.cash
-
-            tph = prof.trades_per_hour
-            required_mult = HFT_SPIKE_MULTIPLIER_HIGH if tph > 200 else HFT_SPIKE_MULTIPLIER_LOW
-            if cash < avg_bet * required_mult:
+    with monitored_step("fetch_hft_spike_trades.wallet_poll", warn_after=3.0):
+        for wallet, prof in hft_wallets.items():
+            avg_bet = prof.avg_bet
+            if avg_bet <= 0:
                 continue
 
-            if cash < HFT_SPIKE_MIN_ABS_CASH:
+            raw = S.safe_get(f"{C.DATA_API}/trades", {
+                "user":         wallet,
+                "limit":        15,
+                "side":         "BUY",
+                "filterType":   "CASH",
+                "filterAmount": max(1.0, avg_bet * 0.5),
+            })
+            if not raw or not isinstance(raw, list):
+                time.sleep(0.05)
                 continue
 
-            if whaletrade.cid:
-                _seen_verified_cids.add(whaletrade.cid)
+            for t in raw:
+                whaletrade: WalletObservation | None = _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, "hft_spike_poll")
+                if whaletrade is None:
+                    continue
+                cash = whaletrade.cash
 
-            whaletrade.is_large_trade  = True
-            whaletrade.hft_spike_ratio = round(cash / avg_bet, 1)
-            whaletrade.source          = "hft_spike_poll"
-            results.append(whaletrade)
+                tph = prof.trades_per_hour
+                required_mult = HFT_SPIKE_MULTIPLIER_HIGH if tph > 200 else HFT_SPIKE_MULTIPLIER_LOW
+                if cash < avg_bet * required_mult:
+                    continue
 
-            name = prof.name or wallet[:10] + "…"
-            S._log(
+                if cash < HFT_SPIKE_MIN_ABS_CASH:
+                    continue
+
+                if whaletrade.cid:
+                    _seen_verified_cids.add(whaletrade.cid)
+
+                whaletrade.is_large_trade = True
+                whaletrade.hft_spike_ratio = round(cash / avg_bet, 1)
+                whaletrade.source = "hft_spike_poll"
+                results.append(whaletrade)
+
+                name = prof.name or wallet[:10] + "…"
+                S._log(
                 f"⚡ HFT SPIKE: {name} ${cash:,.0f} = {cash/avg_bet:.0f}x avg "
                 f"[{whaletrade.title[:35]}]",
                 "INFO"
-            )
+                )
 
         time.sleep(0.05)
 

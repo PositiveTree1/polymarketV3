@@ -29,7 +29,7 @@ All three interact. Tight position limits + conservative Kelly = very small expo
 | `MAX_POSITIONS_PER_WALLET` | `2` | int | A single elite wallet can appear in at most 2 open positions (recent_form + consensus_basket). |
 | `MAX_WATCHLIST_SIZE` | `400` | int | Maximum wallets in the active monitoring pool. |
 | `PROFIT_TARGET_PCT` | `0.40` | float (0–1) | Auto-sell at +40% gain even if the tracked wallet is still holding. Locks in gains. |
-| `WALLET_EXIT_SELL` | `true` | bool | Mirror tracked wallet exits immediately. The core "follow the tracked wallet" principle. |
+| `WALLET_EXIT_SELL` | `true` | bool | Mirror tracked wallet exits after the min-hold guard. Not every detected exit fires: HFT/hedge exits are ignored, and some early-loss noise exits are suppressed. |
 | `STOP_LOSS_ENABLED` | `true` | bool | **Must stay true.** Prior sessions without stop-losses saw −97%, −99% losses. |
 | `STOP_LOSS_PCT` | `-0.30` | float (negative) | Global stop-loss floor at −30%. Note: recent_form and drift_discount override to `null` per their strategy config. |
 
@@ -46,6 +46,11 @@ Each strategy can set its own `stop_loss_pct`. The per-strategy value takes prio
 - `drift_discount`: `null` (entry discount is protection)
 - `consensus_basket`: `−0.35` (soft stop — 35% loss triggers exit)
 - Global `STOP_LOSS_PCT`: `−0.30` applies only when strategy value is not null
+
+**Important behavior note:**
+- TITAN does not rely only on profit target and stop-loss.
+- It also checks tracked-wallet exits, market resolution/resolving state, expiring-soon markets, catastrophic loss, and stale trend reversal.
+- `MIN_HOLD_MINUTES` is checked first and blocks all exits until the hold threshold is reached.
 
 ---
 
@@ -169,14 +174,16 @@ Exits are checked every cycle for every open position:
 | Priority | Trigger | Condition | Action |
 |---|---|---|---|
 | 1 | Min hold guard | Position held < `MIN_HOLD_MINUTES` | Block all exits |
-| 2 | Market resolution | Price > 97¢ or < 3¢ | Immediate sell |
-| 3 | Market expiry | < 4h left | Sell |
-| 4 | Wallet exit | Tracked wallet sells ≥30% of position | Sell (if `WALLET_EXIT_SELL=true`) |
+| 2 | WebSocket resolution | Resolution monitor confirms market result | Immediate sell |
+| 3 | Market resolving | Market appears to be resolving | Sell |
+| 4 | Wallet exit | Tracked non-HFT/non-hedge wallet sells enough of the position | Sell (if `WALLET_EXIT_SELL=true`) |
 | 5 | Profit target | P&L ≥ `PROFIT_TARGET_PCT` | Sell (if `PROFIT_TARGET_ENABLED=true`) |
-| 6 | Trailing stop | Activated at +15%, trails 10% from peak | Sell on reversal |
-| 7 | Strategy stop-loss | P&L ≤ strategy `stop_loss_pct` | Sell |
-| 8 | Global stop-loss | P&L ≤ `STOP_LOSS_PCT` (−30%) | Sell |
-| 9 | Stale loser | Age > 30min AND drift < −8% | Sell |
+| 6 | Strategy/global stop-loss | P&L ≤ effective stop loss | Sell |
+| 7 | Expiring soon | Market hours left below the configured guard | Sell |
+| 8 | Resolution/gone fallback | Market fetch repeatedly fails but resolution or market-gone state is inferred | Sell |
+| 9 | Resolved loss | Fresh price near zero after hold time | Sell |
+| 10 | Catastrophic loss guard | P&L ≤ −70% after 3+ minutes | Sell |
+| 11 | Stale trend reversal | 45+ min old, 4-point downtrend, >8% drop, and losing >15% | Sell |
 
 ---
 

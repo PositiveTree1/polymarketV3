@@ -98,7 +98,7 @@ Kelly Sizing           ← fractional Kelly × score × confluence × tier multi
 Paper Positions        ← tracked with live P&L, tracked wallet exit monitoring
       │
       ▼
-Exit Logic             ← tracked wallet exits, profit target (+40%), stop-loss (per strategy)
+Exit Logic             ← min-hold guard, tracked wallet exits, profit target (+40%), stop-loss, market-resolution/time-based safety exits
 ```
 
 ---
@@ -112,6 +112,25 @@ Exit Logic             ← tracked wallet exits, profit target (+40%), stop-loss
 | `STRONG` | Score above STRONG_SCORE (62) | Displayed only |
 | `MEDIUM` | Lower score, informational | Displayed only |
 | `ELITE_ONLY` | Only elite wallets, no verified confluence | Displayed only |
+
+## Reading Tradeable Signals (ALERTS tab)
+
+**`get_tradeable_signals` is the primary tool for trade reflection and decision-making.** Call it before proposing any trade-related change. It returns only CONVICTION / ALERT / STRONG / HFT / ELITE_ONLY signals enriched with:
+
+- `auto_bought` — whether a position is already open (avoid double-entry)
+- `cooldown_remaining_s` — seconds before the market can be re-entered (0 = clear)
+- `exit_alert` — whale selling detected; signals that would normally be ALERT are downgraded to STRONG
+- `score_breakdown` — the 7-component score (wallet quality/confluence/recency/price window/market quality/conviction/exit penalty), essential for diagnosing why a signal scored high or low
+- `elite_detail` — per-whale win rate, total PnL, score, entry price and cash; tells you *who* is backing the signal and how credible they are
+- `sizing.auto_size_usd` + `bankroll_pct` — Kelly-sized bet recommendation
+
+**Typical analysis flow:**
+```
+get_tradeable_signals           ← what is tradeable right now and why
+get_positions                   ← what is already open
+get_strategy_stats              ← which builder is performing
+get_trade_stats                 ← win rate, expectancy, recent trend
+```
 
 ---
 
@@ -141,7 +160,7 @@ For detailed parameter descriptions see the `config/` docs above.
 ## How to Propose a Config Change
 
 1. Read current state: `get_snapshot` + `get_trade_stats` + `get_recent_errors`
-2. Read relevant config: e.g., `get_config_signals` for signal quality issues
+2. Read relevant config: e.g., `get_config_signals` for signal quality issues, `get_config_signal_builders` for per-builder/strategy params (SIGN. CRAFT tab)
 3. Identify the problem (too few signals / too many losses / wrong position sizes)
 4. Validate your change: `update_config_* ... dry_run=true`
 5. Apply: `update_config_* ... dry_run=false`

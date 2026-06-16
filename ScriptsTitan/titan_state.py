@@ -8,6 +8,7 @@ import requests
 import threading
 import os
 from collections import deque
+from contextlib import contextmanager
 from datetime import datetime
 from typing import TYPE_CHECKING, TypedDict
 import titan_config as C
@@ -122,6 +123,30 @@ def env() -> WalletEnv:
     return _wallet
 
 
+def _get_log_context_stack() -> list[str]:
+    stack = getattr(_local, "log_context_stack", None)
+    if stack is None:
+        stack = []
+        _local.log_context_stack = stack
+    return stack
+
+
+def get_log_context() -> str:
+    stack = _get_log_context_stack()
+    return stack[-1] if stack else ""
+
+
+@contextmanager
+def log_context(label: str):
+    stack = _get_log_context_stack()
+    stack.append(label)
+    try:
+        yield
+    finally:
+        if stack:
+            stack.pop()
+
+
 def get_watchlist() -> list[str]:
     """Return addresses currently marked watchable=True in wallet_cache."""
     return [w for w, p in _shared_wallet_cache.items() if p.watchable]
@@ -204,9 +229,12 @@ on_heartbeat      = None
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-def _log(msg: str, level: str = "INFO") -> None:
+def _log(msg: str, level: str = "INFO", *, terminal: bool = False) -> None:
     ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{ts}] [{level:5}] {msg}"
+    context = get_log_context()
+    prefix = f"[{context}] " if context else ""
+    decorated_msg = f"{prefix}{msg}"
+    line = f"[{ts}] [{level:5}] {prefix}{msg}"
     if level == "VERB":
         # Verbose HTTP traffic — separate file only, never pollutes main log or UI
         try:
@@ -224,22 +252,15 @@ def _log(msg: str, level: str = "INFO") -> None:
     except Exception:
         pass
     if on_log:
-        on_log(msg, level)
+        on_log(decorated_msg, level, terminal)
     else:
-        print(line)
+        if terminal:
+            print(line, flush=True)
 
 
 def log_important(msg: str) -> None:
-    """Print to stdout AND write to titan_server.log. Use for startup/shutdown lines."""
-    ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{ts}] {msg}"
-    print(line, flush=True)
-    try:
-        with open(SERVER_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
-    _log(msg, "INFO")
+    """Write via the shared logger and mirror to terminal."""
+    _log(msg, "INFO", terminal=True)
 
 
 def safe_get(url: str, params: dict | None = None, retries: int = 3, timeout: int = 12, quiet: bool = False) -> list | dict | None:

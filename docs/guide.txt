@@ -5,20 +5,26 @@ because a wallet bought. You
 exit when THEY sell.
 
   WALLET_EXIT_SELL=true
-    → Mirror their exit. No
-      questions asked.
+    → Mirror tracked-wallet exits
+      after the min-hold guard,
+      but ignore HFT / hedge exits
+      and some early-loss noise.
 
-  STOP_LOSS_ENABLED=false
-    → No stop fires unless
-      the wallet exits first.
+  STOP_LOSS_ENABLED=true
+    → Strategy/global stop can
+      fire even if the wallet
+      has not sold yet.
 
-  PROFIT_TARGET_PCT=0.20
+  PROFIT_TARGET_PCT=0.40
     → Take profit even if
       wallet still holds.
       (protects vs bagholder)
 
-  Trailing stop activates
-  at +15%, trails 10% from peak.
+  Other exits also exist:
+    → market resolving/resolved
+    → expiring soon
+    → catastrophic loss guard
+    → stale trend reversal
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 TWO SIGNAL TYPES

@@ -137,7 +137,7 @@ All settings live in the repo-root `titan_config.json`. You can edit it:
 | `MIN_ELITE_CONFLUENCE` | `2` | Minimum number of elite wallets on a signal |
 | `MIN_ENTRY_PRICE` | `0.20` | Only enter markets priced above 20¢ |
 | `MAX_ENTRY_PRICE` | `0.72` | Only enter markets priced below 72¢ |
-| `PROFIT_TARGET_PCT` | `0.20` | Auto-exit at +20% |
+| `PROFIT_TARGET_PCT` | `0.40` | Auto-exit at +40% |
 | `STOP_LOSS_PCT` | `-0.30` | Hard stop at −30% |
 | `WALLET_EXIT_SELL` | `true` | Mirror selected wallet exits immediately |
 | `MAX_OPEN_POSITIONS` | *(set in json)* | Max simultaneous open positions |
@@ -231,12 +231,13 @@ Signals are grouped by `(market, outcome)`. Each one is scored 0–100:
 
 TITAN's philosophy: **follow the wallet out**.
 
-1. If the wallet that triggered the buy **sells** → immediate exit (`WALLET_EXIT_SELL`)
-2. Profit target hit (+20% default) → exit even if wallet still holds
-3. Trailing stop activates at +15%, trails 10% from peak
-4. Hard stop loss at −30% (optional, toggleable)
-5. Min hold guard prevents premature exits
-6. Cooldown blocks re-entry on the same market after a close
+1. Min hold guard blocks all exits before `MIN_HOLD_MINUTES`
+2. If tracked wallets that justified the entry **sell enough** → exit (`WALLET_EXIT_SELL`), with filters for HFT/hedge exits and some early-loss noise
+3. Profit target hit (+40% default) → exit even if wallets still hold
+4. Hard stop loss at strategy/global threshold → exit even if wallets still hold
+5. Market resolving/resolved or expiring soon → exit
+6. Catastrophic loss and stale trend-reversal guards can also force an exit
+7. Cooldown blocks re-entry on the same market after a close
 
 ---
 

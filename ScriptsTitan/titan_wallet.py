@@ -409,8 +409,8 @@ class WinRateData(TypedDict):
     avg_profit:         float
     avg_bet:            float
     trades_per_hour:    float
-    recent_pnl_30d:     float
-    recent_pnl_7d:      float
+    recent_pnl_30d:     float | None
+    recent_pnl_7d:      float | None
 
 
 
@@ -661,13 +661,17 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
 
     loaded_trade_pnl = total_redeem_value - sum(_cash(t) for t in trades_raw)
 
-    recent_pnl_30d = (
+    recent_pnl_30d: float | None = (
         sum(float(r.get("usdcSize", 0) or 0) for r in redeems_30d) -
         sum(_cash(t) for t in trades_30d)
+        if first_loaded_trade_ts is not None and first_loaded_trade_ts <= days_30
+        else None
     )
-    recent_pnl_7d = (
+    recent_pnl_7d: float | None = (
         sum(float(r.get("usdcSize", 0) or 0) for r in redeems_7d) -
         sum(_cash(t) for t in trades_7d)
+        if first_loaded_trade_ts is not None and first_loaded_trade_ts <= days_7
+        else None
     )
 
     trade_by_key = {}
@@ -745,8 +749,8 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
             "source": "redeem_window_fallback",
             "avg_profit": avg_profit, "avg_bet": round(avg_bet, 2),
             "trades_per_hour": round(trades_per_hour, 2),
-            "recent_pnl_30d": round(recent_pnl_30d, 2),
-            "recent_pnl_7d":  round(recent_pnl_7d, 2),
+            "recent_pnl_30d": round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
+            "recent_pnl_7d":  round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
         }
 
     resolved_keys    = all_won | lost_keys
@@ -784,8 +788,8 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
             "wilson_lb": wb * 0.5, "source": "open_positions_proxy",
             "avg_profit": avg_profit, "avg_bet": round(avg_bet, 2),
             "trades_per_hour": round(trades_per_hour, 2),
-            "recent_pnl_30d": round(recent_pnl_30d, 2),
-            "recent_pnl_7d":  round(recent_pnl_7d, 2),
+            "recent_pnl_30d": round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
+            "recent_pnl_7d":  round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
         }
 
     wr = wins / total
@@ -833,8 +837,7 @@ def _log_wallet_change(before: Wallet | None, after: Wallet, fail_reasons: list[
             msg, level = f"⬇ {tag_before}→{tag_after} {name} ({addr[:12]}…) | {reasons_str} | {stats_str}", "WARN"
     else:
         msg, level = f"~ {tag_before}→{tag_after} {name} ({addr[:12]}…) | {stats_str}", "INFO"
-    print(f"[WALLET] {msg}", flush=True)
-    S._log(msg, level)
+    S._log(f"[WALLET] {msg}", level, terminal=True)
 
 
 def get_compute_and_store_wallet(wallet: str) -> Wallet:

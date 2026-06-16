@@ -32,25 +32,12 @@ _LOG_DIR.mkdir(exist_ok=True)
 from titan_state import SERVER_LOG_FILE as _LOG_FILE  # single source of truth
 
 def _log(msg: str, level: str = "INFO") -> None:
-    from datetime import datetime
     import titan_state as _S
-    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level:5}] {msg}"
-    try:
-        with open(_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
     _S._log(msg, level)
 
 def _print(msg: str) -> None:
-    from datetime import datetime
-    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
-    print(line)
-    try:
-        with open(_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
+    import titan_state as _S
+    _S._log(msg, "INFO", terminal=True)
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
@@ -342,8 +329,10 @@ def _dispatch(body: dict, sid: str | None, api: TitanAPI) -> dict | None:
         try:
             result = method_fn(**arguments)
         except TypeError as e:
+            _log(f"MCP invalid arguments: tool={tool_name} args={arguments} error={e}", "ERR")
             return _err(rid, -32602, f"Invalid arguments for {tool_name}: {e}")
         except Exception as e:
+            _log(f"MCP tool error: tool={tool_name} args={arguments} error={e}", "ERR")
             return _err(rid, -32603, f"Tool error: {e}")
 
         if result is None:
@@ -539,13 +528,14 @@ def _wire_events(api: TitanAPI) -> None:
         from datetime import datetime
         level = payload.get("level", "INFO")
         msg   = payload.get("data", "")
+        terminal = bool(payload.get("terminal", False))
         line  = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level:5}] {msg}"
         try:
             with open(_LOG_FILE, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
         except Exception:
             pass
-        if str(level).upper() in {"ERR", "ERROR", "CRITICAL"}:
+        if terminal or str(level).upper() in {"ERR", "ERROR", "CRITICAL"}:
             print(line, flush=True)
         _sessions.broadcast({
             "jsonrpc": "2.0",

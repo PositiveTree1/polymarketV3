@@ -10,6 +10,7 @@ from typing import cast
 import titan_state as S
 import titan_db as DB
 import titan_prices
+from titan_monitor_job import start_monitored_thread
 from titan_prices import PricesCacheSrv
 from titan_config import STATE_FILE, STATE_DB, BANKROLL_START, MAX_WATCHLIST_SIZE
 from titan_wallet import Wallet, WalletsCacheSrv
@@ -50,7 +51,13 @@ def save_wallet_roster():
 
 
 def save_wallet_roster_async():
-    threading.Thread(target=save_wallet_roster, daemon=True).start()
+    start_monitored_thread(
+        job_name="save_wallet_roster",
+        target=save_wallet_roster,
+        warn_after=5.0,
+        thread_name="titan-save-wallet-roster",
+        log_label="Wallet roster save",
+    )
 
 
 def load_state() -> None:
@@ -364,8 +371,7 @@ def _refresh_elite_ver_wallets() -> None:
     stale_before = time.time() - _STARTUP_ELITE_VER_REFRESH_MAX_AGE_S
 
     def _startup(msg: str) -> None:
-        print(f"[STARTUP] {msg}", flush=True)
-        S._log(f"[STARTUP] {msg}", "INFO")
+        S._log(f"[STARTUP] {msg}", "INFO", terminal=True)
 
     def _fmt_date(ts: float | None) -> str:
         if not ts or ts <= 0.0:

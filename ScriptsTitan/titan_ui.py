@@ -73,6 +73,13 @@ def _load_guide_text():
 _GUIDE = _load_guide_text()
 
 
+def _price_age(ts: float) -> str:
+    if ts <= 0:
+        return "—"
+    from datetime import datetime
+    return datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+
+
 @dataclass
 class UiRefreshData:
     pnl: PnlSummaryDict | None = None
@@ -532,10 +539,10 @@ def run_ui(api: TitanBackend) -> None:
                   f"{_cfg.get("MIN_HOLD_MINUTES", 15)}min hold guard | {_cfg.get("EXIT_COOLDOWN_SECONDS", 300)//60}min cooldown",
              fg="#334455", bg="#001820", font=mono_sm).pack(side="left", padx=4)
     
-    pos_cols = ("Market","Side","WEntry$","Entry$","Now$","P&L%","P&L$","Bet$","Hold","Bought From","Score","Status")
+    pos_cols = ("Market","Side","WEntry$","Entry$","Now$","P&L%","P&L$","Bet$","Hold","Bought From","Updated","Status")
     pos_tree = ttk.Treeview(tab_positions, columns=pos_cols, show="headings", height=9)
     pw = {"Market":300,"Side":100,"WEntry$":72,"Entry$":72,"Now$":72,
-          "P&L%":70,"P&L$":72,"Bet$":60,"Hold":50,"Bought From":180,"Score":55,"Status":120}
+          "P&L%":70,"P&L$":72,"Bet$":60,"Hold":50,"Bought From":180,"Updated":65,"Status":120}
     for c in pos_cols:
         pos_tree.heading(c, text=c)
         pos_tree.column(c, width=pw[c], anchor="w" if c in ("Market","Bought From") else "center")
@@ -1660,6 +1667,27 @@ def run_ui(api: TitanBackend) -> None:
                 widget.yview_moveto(top_fraction)
         except Exception:
             pass
+
+    def _is_listbox_scrolled_to_end(widget: tk.Listbox) -> bool:
+        try:
+            return float(widget.yview()[1]) >= 0.999
+        except Exception:
+            return True
+
+    def _listbox_top_scroll_fraction(widget: tk.Listbox) -> float:
+        try:
+            return float(widget.yview()[0])
+        except Exception:
+            return 0.0
+
+    def _restore_listbox_scroll(widget: tk.Listbox, *, was_at_end: bool, top_fraction: float) -> None:
+        try:
+            if was_at_end:
+                widget.see(tk.END)
+            else:
+                widget.yview_moveto(top_fraction)
+        except Exception:
+            pass
     
     
     def log(msg, level="INFO"):
@@ -2464,6 +2492,16 @@ def run_ui(api: TitanBackend) -> None:
         for frame in _sb_builder_frames.values():
             frame.pack_forget()
         _sb_builder_frames[bid].pack(fill="both", expand=True, padx=8, pady=4)
+
+    # ── header ────────────────────────────────────────────────────────────────
+    sb_header = tk.Frame(tab_sb, bg="#080810", pady=4)
+    sb_header.pack(fill="x", padx=12)
+    tk.Label(sb_header,
+             text="🔨 SIGN. CRAFT — Signal Builder Config",
+             fg="#556677", bg="#080810", font=mono, anchor="w").pack(side="left")
+    tk.Label(sb_header,
+             text="(also: signal builder, strategy params, builder config)",
+             fg="#334455", bg="#080810", font=mono, anchor="w").pack(side="left", padx=(12, 0))
 
     # ── toolbar ───────────────────────────────────────────────────────────────
     sb_toolbar = tk.Frame(tab_sb, bg="#0d0d1a", pady=6)
@@ -3616,7 +3654,7 @@ def run_ui(api: TitanBackend) -> None:
                     f"${pos.bet:.2f}",
                     f"{hold_min:.0f}m",
                     whale_str[:30],
-                    f"{pos.score:.0f}",
+                    _price_age(pos.cur_price_ts),
                     ws_str,
                 ), tags=(tag,))
                 _open_tree_items[iid] = pos
@@ -3792,7 +3830,7 @@ def run_ui(api: TitanBackend) -> None:
     # ═══════════════════════════════════════════════════════════════════════════════
     #  ENGINE CALLBACKS
     # ═══════════════════════════════════════════════════════════════════════════════
-    def on_log_cb(msg, level="INFO"):
+    def on_log_cb(msg: str, level: str = "INFO", terminal: bool = False):
         root.after(0, lambda: log(msg, level))
         if level == "ERR" and telegram_notifier is not None:
             threading.Thread(target=telegram_notifier.notify_error, args=(msg,), daemon=True).start()
@@ -3875,9 +3913,11 @@ def run_ui(api: TitanBackend) -> None:
     _last_rendered_cli_log: list[str] = [""]
 
     def _fill_log_listbox(lb: tk.Listbox, lines: list[str]) -> None:
+        was_at_end = _is_listbox_scrolled_to_end(lb)
+        top_fraction = _listbox_top_scroll_fraction(lb)
         lb.delete(0, tk.END)
         lb.insert(tk.END, *lines)
-        lb.see(tk.END)
+        _restore_listbox_scroll(lb, was_at_end=was_at_end, top_fraction=top_fraction)
 
     def _render_logs(logs: str) -> None:
         srv_lines = logs.splitlines()[-600:]
@@ -4070,17 +4110,16 @@ def run_ui(api: TitanBackend) -> None:
     # ═══════════════════════════════════════════════════════════════════════════════
     def fast_price_updater():
         from titan_market import fetch_position_price_fast
-        import titan_state as _ts_mut
         import time
         _last_equity_record = [0.0]
         while True:
             try:
-                positions = list(_ts_mut.env().open_positions.items())
+                positions = list(_open_positions_cache or [])
                 if positions:
                     updated = False
-                    for key, pos in positions:
-                        cid = pos.cid or key[0]
-                        outcome = pos.outcome or key[1]
+                    for pos in positions:
+                        cid = pos.cid
+                        outcome = pos.outcome
                         asset = pos.asset
                         fast_p = fetch_position_price_fast(cid, asset, outcome)
                         if fast_p is not None and fast_p != pos.cur_price:

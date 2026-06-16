@@ -66,6 +66,36 @@ class TitanAPI:
                 self._telegram = None
                 self._telegram_enabled = False
 
+    def _refresh_open_position_marks(self) -> None:
+        import titan_state as _TS
+        from titan_market import fetch_position_price_fast
+        from titan_trader import _get_current_price
+        from titan_prices import PRICES
+
+        env = _TS.env()
+        now_ts = time.time()
+        for pos_key, pos in list(env.open_positions.items()):
+            pos.load_prices()
+            cid = pos.cid or pos_key[0]
+            outcome = pos.outcome or pos_key[1]
+            asset = pos.asset
+            fast_price = fetch_position_price_fast(cid, asset, outcome)
+            if fast_price is not None:
+                fetched_ts = time.time()
+            else:
+                fast_price, _, fetched_ts = _get_current_price(pos)
+
+            if fetched_ts:
+                pos.cur_price = fast_price
+                pos.cur_price_ts = fetched_ts
+                last_ts = pos.price_history[-1][0] if pos.price_history else 0.0
+                if (now_ts - last_ts) >= 1800:
+                    pos.price_history.append((now_ts, fast_price))
+                    if len(pos.price_history) > 2880:
+                        del pos.price_history[:-2880]
+                    if asset:
+                        PRICES.ingest(asset, [(now_ts, fast_price)])
+
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -132,6 +162,7 @@ class TitanAPI:
     def get_positions(self) -> list[Position]:
         import titan_state as _TS
         from titan_persistence import ensure_linked_wallets_cached
+        self._refresh_open_position_marks()
         env = _TS.env()
         positions = sorted(
             env.open_positions.values(),
@@ -162,7 +193,6 @@ class TitanAPI:
                 )
                 dead_wallets.extend(recovered_dead_wallets)
             pos.buy_trade.dead_wallets = list(dict.fromkeys(dead_wallets))
-            pos.load_prices()
         return positions
 
     @mcp_tool(
@@ -198,6 +228,104 @@ class TitanAPI:
         from titan_signals import load_signal_prices_many
         filtered = [s for s in self._last_signals if s.score >= min_score]
         return load_signal_prices_many(filtered)
+
+    @mcp_tool(
+        description=(
+            "Returns the ALERTS tab view: tradeable signals (CONVICTION / ALERT / STRONG / HFT / ELITE_ONLY) "
+            "enriched with execution context. This is the primary tool for AI trade reflection and decision-making. "
+            "Each entry includes: tier, score, strategy, score breakdown (wallet/confluence/recency/price/market/conviction/exit), "
+            "auto_bought flag (whether a position is already open on this market), "
+            "cooldown_remaining_s (seconds before this market can be re-entered, 0 if clear), "
+            "exit_alert (whale selling detected on this signal), "
+            "elite_wallet_detail (per-wallet: name, win_rate, total_pnl, score, entry_price, cash, is_hft), "
+            "market info (title, outcome, current price, whale avg entry, drift, liquidity, volume, closes_in_h), "
+            "auto_size_usd and bankroll_pct for the recommended bet. "
+            "Use this before get_signals when you want actionable trade context, not raw signal data."
+        ),
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def get_tradeable_signals(self) -> list[dict]:
+        import time as _time
+        import titan_state as _TS
+        from titan_signals import load_signal_prices_many
+
+        env     = _TS.env()
+        bankroll = env.paper_bankroll
+        active_cids   = env.active_market_cids
+        cooldown_cids = env.cooldown_cids
+        wallet_cache  = env.wallet_cache
+        now_t = _time.time()
+
+        tradeable_tiers = {"CONVICTION", "ALERT", "STRONG", "HFT", "ELITE_ONLY"}
+        signals = load_signal_prices_many(
+            [s for s in self._last_signals if s.tier in tradeable_tiers]
+        )
+
+        result: list[dict] = []
+        for s in signals:
+            mkt = s.mkt
+
+            cd_ts = cooldown_cids.get(s.cid, 0.0)
+            from titan_config import EXIT_COOLDOWN_SECONDS
+            cooldown_remaining = max(0.0, EXIT_COOLDOWN_SECONDS - (now_t - cd_ts)) if cd_ts else 0.0
+
+            elite_detail: list[dict] = []
+            for addr, obs in list((s.elite_ver or {}).items())[:5]:
+                wp = wallet_cache.get(addr)
+                elite_detail.append({
+                    "name":        (wp.name if wp else None) or addr[:14] + "…",
+                    "win_rate":    round(wp.win_rate, 3) if wp else None,
+                    "total_pnl":   round(wp.total_pnl, 2) if wp else None,
+                    "score":       round(wp.score, 3) if wp else None,
+                    "entry_price": round(obs.price, 4),
+                    "cash":        round(obs.cash, 2),
+                    "is_hft":      bool(wp.hft) if wp else False,
+                })
+
+            bd = s.bd or {}
+            result.append({
+                "tier":                s.tier,
+                "score":               round(s.score, 1),
+                "strategy":            s.strategy,
+                "auto_bought":         s.cid in active_cids,
+                "cooldown_remaining_s": round(cooldown_remaining),
+                "exit_alert":          bool(s.exits_detected),
+                "market": {
+                    "title":        s.title,
+                    "outcome":      s.outcome,
+                    "url":          f"https://polymarket.com/event/{mkt.slug}" if mkt and mkt.slug else None,
+                    "cur_price":    round(s.cur, 4),
+                    "avg_entry":    round(s.avg_entry, 4),
+                    "drift_pct":    round(s.drift * 100, 1),
+                    "liquidity":    round(mkt.liq, 0) if mkt else None,
+                    "volume":       round(mkt.volume, 0) if mkt else None,
+                    "closes_in_h":  round(float(mkt.hrs_left), 1) if mkt and mkt.hrs_left is not None else None,
+                },
+                "score_breakdown": {
+                    "wallet_quality": round(bd.get("wallet", 0), 1),
+                    "confluence":     bd.get("conf", 0),
+                    "recency":        bd.get("rec", 0),
+                    "price_window":   bd.get("opp", 0),
+                    "market_quality": round(bd.get("mkt", 0), 1),
+                    "conviction":     bd.get("bonus", 0),
+                    "exit_penalty":   bd.get("exit_penalty", 0),
+                    "total":          round(bd.get("total", 0), 1),
+                },
+                "sizing": {
+                    "auto_size_usd":  round(s.bet, 2),
+                    "bankroll_pct":   round(s.bet / max(bankroll, 0.01) * 100, 1),
+                },
+                "wallet_intel": {
+                    "n_elite":        s.n_elite,
+                    "n_verified":     s.n_ver,
+                    "ver_flow_usd":   round(s.ver_flow, 2),
+                    "max_single_usd": round(s.max_bet_cash or 0, 2),
+                    "age_min":        round(s.age_h * 60, 1),
+                    "elite_detail":   elite_detail,
+                },
+            })
+
+        return result
 
     @mcp_tool(
         description=(
@@ -276,6 +404,7 @@ class TitanAPI:
     def get_pnl_summary(self) -> PnlSummaryDict:
         import titan_state as _TS
         from titan_config import BANKROLL_START
+        self._refresh_open_position_marks()
         env = _TS.env()
         return {
             "bankroll": env.paper_bankroll,
@@ -316,6 +445,7 @@ class TitanAPI:
     def get_portfolio_overview(self) -> PortfolioOverviewDict:
         import titan_state as _TS
         from titan_config import BANKROLL_START
+        self._refresh_open_position_marks()
         env = _TS.env()
         open_value = sum(
             (pos.cur_price or pos.entry_price) * pos.shares
@@ -799,6 +929,79 @@ class TitanAPI:
 
     @mcp_tool(
         description=(
+            "Returns signal builder (SIGN. CRAFT) configuration: active_builders list and per-builder params. "
+            "consensus_basket: min_elite_confluence=1, min_score=50, price 0.20-0.72, max_signal_age_h=0.5, "
+            "max_positions=5, max_bet_abs=1.2, stop_loss_pct=-0.35, opposition_ratio_block=0.6, conviction_portfolio_pct=0.005. "
+            "recent_form: max_tph=20, min_pnl_30d=0, min_pnl_7d=-50, min_score=42, price 0.18-0.78, "
+            "max_signal_age_h=0.75, max_positions=4, stop_loss_pct=null. "
+            "drift_discount: min_discount_pct=0.04, max_discount_pct=0.12, max_signal_age_h=6.0, "
+            "price 0.20-0.72, max_positions=3, require_still_holding_check=true, stop_loss_pct=null."
+        ),
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+    )
+    def get_config_signal_builders(self) -> dict:
+        cfg = self._read_cfg()
+        sb = cfg.get("signal_builders", {})
+        return {
+            "active_builders": sb.get("active_builders", []),
+            "builders":        sb.get("builders", {}),
+        }
+
+    @mcp_tool(
+        description=(
+            "Update signal builder (SIGN. CRAFT) parameters. "
+            "builder: consensus_basket | recent_form | drift_discount. "
+            "patch: {key: new_value} — only existing keys accepted. "
+            "To enable/disable a builder use key 'enabled'. "
+            "To change active_builders list use builder='active' and patch={'active_builders': [...]}. "
+            "dry_run=true previews without saving. Returns {ok, errors, applied}."
+        ),
+        input_schema={
+            "builder": {"type": "string", "description": "consensus_basket | recent_form | drift_discount | active"},
+            "patch": {"type": "object", "description": "Key/value pairs to update"},
+            "dry_run": {"type": "boolean", "description": "Validate only, do not save"},
+        },
+        annotations={"readOnlyHint": False, "destructiveHint": False},
+    )
+    def update_config_signal_builders(self, builder: str, patch: dict, dry_run: bool = False) -> dict:
+        from titan_signal_builder import _PARAMS_REGISTRY
+        from dataclasses import fields as _fields
+
+        known_builders = set(_PARAMS_REGISTRY.keys())
+
+        if builder == "active":
+            if "active_builders" not in patch:
+                return {"ok": False, "errors": ["patch must contain 'active_builders' key"], "applied": {}}
+            val = patch["active_builders"]
+            if not isinstance(val, list):
+                return {"ok": False, "errors": ["active_builders must be a list"], "applied": {}}
+            unknown = [b for b in val if b not in known_builders]
+            if unknown:
+                return {"ok": False, "errors": [f"unknown builder(s): {unknown}"], "applied": {}}
+            cfg = self._read_cfg()
+            if not dry_run:
+                cfg.setdefault("signal_builders", {})["active_builders"] = val
+                self._write_cfg(cfg, f"signal_builders/active_builders {val}")
+            return {"ok": True, "errors": [], "applied": patch}
+
+        if builder not in known_builders:
+            return {"ok": False, "errors": [f"builder must be one of {sorted(known_builders)} or 'active'"], "applied": {}}
+
+        params_cls = _PARAMS_REGISTRY[builder]
+        valid_keys = {f.name for f in _fields(params_cls)}
+        errors = [f"unknown key {k!r} in builder {builder!r}" for k in patch if k not in valid_keys]
+        if errors:
+            return {"ok": False, "errors": errors, "applied": {}}
+
+        cfg = self._read_cfg()
+        if not dry_run:
+            target = cfg.setdefault("signal_builders", {}).setdefault("builders", {}).setdefault(builder, {})
+            target.update(patch)
+            self._write_cfg(cfg, f"signal_builders/{builder} {patch}")
+        return {"ok": True, "errors": [], "applied": patch}
+
+    @mcp_tool(
+        description=(
             "Update position management and risk parameters. "
             "group: position_management | timing. "
             "patch: {key: new_value} — only existing keys accepted. "
@@ -1138,8 +1341,8 @@ class TitanAPI:
     def _on_heartbeat(self, payload: dict) -> None:
         self._emit("titan/heartbeat", payload)
 
-    def _on_log(self, msg: str, level: str = "INFO") -> None:
-        self._emit("notifications/message", {"level": level, "data": msg})
+    def _on_log(self, msg: str, level: str = "INFO", terminal: bool = False) -> None:
+        self._emit("notifications/message", {"level": level, "data": msg, "terminal": terminal})
         if str(level).upper() in {"ERR", "ERROR", "CRITICAL"}:
             self._notify_telegram("notify_error", msg)
 
@@ -1153,6 +1356,38 @@ class TitanAPI:
         self._notify_telegram("notify_sell", pos, pnl_usdc, pnl_pct)
 
     # ── snapshot builders (moved from titan_ui.py) ────────────────────────────
+
+    def _snapshot_position_wallets(self, pos) -> list[str]:
+        import titan_state as _TS
+
+        wallet_cache = _TS.env().wallet_cache
+        labels: list[str] = []
+        seen_wallets: set[str] = set()
+
+        elite_wallets = list(pos.elite_wallets)
+        preferred_names = list(pos.wallet_names)
+        tracked_wallets = list(pos.tracked_wallets)
+
+        for index, wallet_addr in enumerate(elite_wallets):
+            wallet_key = str(wallet_addr).lower()
+            if not wallet_key or wallet_key in seen_wallets:
+                continue
+            seen_wallets.add(wallet_key)
+            cached_wallet = wallet_cache.get(wallet_key)
+            preferred_name = preferred_names[index] if index < len(preferred_names) else ""
+            display_name = preferred_name or (cached_wallet.name if cached_wallet is not None else "")
+            labels.append(f"{display_name}<{wallet_addr}>" if display_name else str(wallet_addr))
+
+        for wallet_addr in tracked_wallets:
+            wallet_key = str(wallet_addr).lower()
+            if not wallet_key or wallet_key in seen_wallets:
+                continue
+            seen_wallets.add(wallet_key)
+            cached_wallet = wallet_cache.get(wallet_key)
+            display_name = cached_wallet.name if cached_wallet is not None else ""
+            labels.append(f"{display_name}<{wallet_addr}>" if display_name else str(wallet_addr))
+
+        return labels
 
     def _build_snapshot_compressed(self) -> str:
         import time as _t
@@ -1174,7 +1409,7 @@ class TitanAPI:
             f"SessionPnL=${_w().session_pnl:+.4f}  TotalPnL=${br - BANKROLL_START:+.4f}",
             f"  Cycles={_w().cycle_count}  OpenPos={len(_w().open_positions)}  "
             f"Cooldowns={len(_w().cooldown_cids)}  Watchlist={len(_TS.get_watchlist())}  "
-            f"Elites={sum(1 for p in _w().wallet_cache.values() if p.get('elite'))}",
+            f"Elites={sum(1 for p in _w().wallet_cache.values() if p.elite)}",
             f"  Trades={st.sell_count}({st.win_count}W/{st.loss_count}L) WR={st.win_rate*100:.0f}%",
             "",
         ]
@@ -1188,7 +1423,7 @@ class TitanAPI:
                 pnl_pct  = (cur - entry) / max(entry, 0.001) * 100
                 pnl_abs  = (cur - entry) * pos.shares
                 held_min = (_t.time() - pos.entry_ts) / 60 if pos.entry_ts else 0.0
-                wallets   = pos.elite_names or [w[:10]+"…" for w in pos.elite_wallets]
+                wallets = self._snapshot_position_wallets(pos)
                 lines.append(
                     f"  [{pos.tier}|{pos.score:.0f}pt|{'HFT' if pos.is_hft else '-'}] "
                     f"{pos.title[:60]} [{outcome}] "
@@ -1218,15 +1453,15 @@ class TitanAPI:
         lines.append("")
 
         elites = sorted(
-            [(w, p) for w, p in _w().wallet_cache.items() if p.get("elite")],
-            key=lambda x: x[1].get("total_pnl", 0), reverse=True
+            [(w, p) for w, p in _w().wallet_cache.items() if p.elite],
+            key=lambda x: x[1].total_pnl, reverse=True
         )
         lines.append(f"[ELITE ROSTER ({len(elites)})]")
         for w, p in elites:
             lines.append(
-                f"  {p.get('name', w[:12]):<24} WR={p.get('win_rate',0)*100:.0f}%  "
-                f"PnL=${p.get('total_pnl',0):+,.0f}  Score={p.get('score',0):.2f}  "
-                f"TPH={p.get('trades_per_hour',0):.1f}  {'⚡HFT' if p.get('hft') else ''}"
+                f"  {p.name or w[:12]:<24} WR={p.win_rate*100:.0f}%  "
+                f"PnL=${p.total_pnl:+,.0f}  Score={p.score:.2f}  "
+                f"TPH={p.trades_per_hour:.1f}  {'⚡HFT' if p.hft else ''}"
             )
         lines.append("")
 
@@ -1275,7 +1510,7 @@ class TitanAPI:
             f"  Open Positions  : {len(_w().open_positions)}",
             f"  Cooldowns       : {len(_w().cooldown_cids)}",
             f"  Watchlist       : {len(_TS.get_watchlist())}",
-            f"  Elite Count     : {sum(1 for p in _w().wallet_cache.values() if p.get('elite'))}",
+            f"  Elite Count     : {sum(1 for p in _w().wallet_cache.values() if p.elite)}",
             "└─────────────────────────────────────────────────────────────────────┘", "",
         ]
 
@@ -1288,7 +1523,7 @@ class TitanAPI:
                 pnl_pct  = (cur - entry) / max(entry, 0.001) * 100
                 pnl_abs  = (cur - entry) * pos.shares
                 held_min = (_t.time() - pos.entry_ts) / 60 if pos.entry_ts else 0.0
-                wallets   = pos.elite_names or [w[:10]+"…" for w in pos.elite_wallets]
+                wallets = self._snapshot_position_wallets(pos)
                 lines += [
                     f"  [{pos.tier}] {pos.title[:60]}",
                     f"    Outcome: {outcome}  Score: {pos.score:.0f}  HFT: {'YES' if pos.is_hft else 'NO'}",
@@ -1323,16 +1558,16 @@ class TitanAPI:
         lines += ["└─────────────────────────────────────────────────────────────────────┘", ""]
 
         elites = sorted(
-            [(w, p) for w, p in _w().wallet_cache.items() if p.get("elite")],
-            key=lambda x: x[1].get("total_pnl", 0), reverse=True
+            [(w, p) for w, p in _w().wallet_cache.items() if p.elite],
+            key=lambda x: x[1].total_pnl, reverse=True
         )
         lines.append(f"┌─ ELITE ROSTER ({len(elites)} wallets) ──────────────────────────────────────────┐")
         for w, p in elites:
-            name = p.get("name", w[:12])
+            name = p.name or w[:12]
             lines.append(
-                f"  {name:<24} WR:{p.get('win_rate',0)*100:.0f}%  "
-                f"PnL:${p.get('total_pnl',0):+,.0f}  Score:{p.get('score',0):.2f}  "
-                f"TPH:{p.get('trades_per_hour',0):.1f}  {'⚡HFT' if p.get('hft') else ''}"
+                f"  {name:<24} WR:{p.win_rate*100:.0f}%  "
+                f"PnL:${p.total_pnl:+,.0f}  Score:{p.score:.2f}  "
+                f"TPH:{p.trades_per_hour:.1f}  {'⚡HFT' if p.hft else ''}"
             )
         lines += ["└─────────────────────────────────────────────────────────────────────┘", ""]
 

@@ -29,6 +29,7 @@ import titan_state as S
 from titan_state import _log, safe_get
 
 import titan_db as DB
+from titan_monitor_job import monitored_step, start_monitored_thread
 from titan_persistence import load_state, save_state, save_wallet_roster, save_wallet_roster_async
 from titan_wallet  import (get_compute_and_store_wallet, get_elite_wallets, discover_new_wallets,
                            scan_top_market_holders, get_wallet_performance_summary,
@@ -90,17 +91,38 @@ def _rescore_watchlist():
 
 def analyse(trades: list, is_hft_loop: bool = False) -> None:
     S.env().cycle_count += 1
+    step_warn_after = 3.0 if is_hft_loop else 10.0
 
     if S.env().cycle_count % DISCOVERY_INTERVAL_CYCLES == 0:
-        threading.Thread(target=discover_new_wallets, daemon=True).start()
+        start_monitored_thread(
+            job_name="wallet_discovery",
+            target=discover_new_wallets,
+            warn_after=10.0,
+            log_label="Wallet discovery",
+        )
     if S.env().cycle_count % 5 == 0:
-        threading.Thread(target=scan_top_market_holders, daemon=True).start()
+        start_monitored_thread(
+            job_name="market_holder_scan",
+            target=scan_top_market_holders,
+            warn_after=10.0,
+            log_label="Market holder scan",
+        )
     if S.env().cycle_count % 20 == 2:
-        threading.Thread(target=_rescore_watchlist, daemon=True).start()
+        start_monitored_thread(
+            job_name="watchlist_rescore",
+            target=_rescore_watchlist,
+            warn_after=10.0,
+            log_label="Watchlist rescore",
+        )
 
     # v10: Refresh recent form scores (6h TTL) for Recent Form strategy
     if S.env().cycle_count % 50 == 3:
-        threading.Thread(target=_refresh_recent_form_scores, daemon=True).start()
+        start_monitored_thread(
+            job_name="recent_form_refresh",
+            target=_refresh_recent_form_scores,
+            warn_after=10.0,
+            log_label="Recent form refresh",
+        )
 
     # Score wallets seen in the feed
     from titan_market import WalletObservation as _WO
@@ -119,33 +141,34 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
         a, b = parts
         return a and b and a[0].isupper() and b[0].isupper() and a.isalpha() and b.isalpha()
 
-    for w in feed_wallets:
-        p = get_compute_and_store_wallet(w)
-        trade_name = next(
-            (t.name for t in trades
-             if t.wallet.lower() == w and t.name and not t.name.endswith("…")),
-            None
-        )
-        if trade_name:
-            current = p.name
-            current_real = current and not current.endswith("…") and not _is_auto(current)
-            if not _is_auto(trade_name) or not current_real:
-                p.name = trade_name
-                S.env().wallet_cache[w] = p
+    with monitored_step("analyse.wallet_scoring", warn_after=step_warn_after):
+        for w in feed_wallets:
+            p = get_compute_and_store_wallet(w)
+            trade_name = next(
+                (t.name for t in trades
+                 if t.wallet.lower() == w and t.name and not t.name.endswith("…")),
+                None
+            )
+            if trade_name:
+                current = p.name
+                current_real = current and not current.endswith("…") and not _is_auto(current)
+                if not _is_auto(trade_name) or not current_real:
+                    p.name = trade_name
+                    S.env().wallet_cache[w] = p
 
-        cached = S.env().wallet_cache.get(w)
-        if cached:
-            if not p.recent_pnl_30d and cached.recent_pnl_30d:
-                p.recent_pnl_30d = cached.recent_pnl_30d
-            if not p.recent_pnl_7d and cached.recent_pnl_7d:
-                p.recent_pnl_7d = cached.recent_pnl_7d
-            if not p.recent_ts and cached.recent_ts:
-                p.recent_ts = cached.recent_ts
+            cached = S.env().wallet_cache.get(w)
+            if cached:
+                if not p.recent_pnl_30d and cached.recent_pnl_30d:
+                    p.recent_pnl_30d = cached.recent_pnl_30d
+                if not p.recent_pnl_7d and cached.recent_pnl_7d:
+                    p.recent_pnl_7d = cached.recent_pnl_7d
+                if not p.recent_ts and cached.recent_ts:
+                    p.recent_ts = cached.recent_ts
 
-        wallets[w] = p
-        if p.verified:  ver_count  += 1
-        if p.elite:     elite_count += 1
-        time.sleep(0.04)
+            wallets[w] = p
+            if p.verified:  ver_count  += 1
+            if p.elite:     elite_count += 1
+            time.sleep(0.04)
 
     # CRITICAL FIX: Inject all known elite/verified wallets from cache into the
     # wallets dict. Without this, HFT fast loop cycles only see 1-3 wallets
@@ -172,19 +195,21 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
         for key, pos in S.env().open_positions.items()
     }
     wallet_exits = {}
-    if cid_to_wallet_sets:
-        wallet_exits = check_wallet_exist(cid_to_wallet_sets, entry_times)
-    elif S.env().open_positions:
-        rebuilt = {}
-        for key, pos in S.env().open_positions.items():
-            cid = pos.cid or key[0]
-            lwallets = set(pos.elite_wallets + pos.tracked_wallets)
-            if lwallets:
-                rebuilt[cid] = lwallets
-        if rebuilt:
-            wallet_exits = check_wallet_exist(rebuilt, entry_times)
+    with monitored_step("analyse.wallet_exit_check", warn_after=step_warn_after):
+        if cid_to_wallet_sets:
+            wallet_exits = check_wallet_exist(cid_to_wallet_sets, entry_times)
+        elif S.env().open_positions:
+            rebuilt = {}
+            for key, pos in S.env().open_positions.items():
+                cid = pos.cid or key[0]
+                lwallets = set(pos.elite_wallets + pos.tracked_wallets)
+                if lwallets:
+                    rebuilt[cid] = lwallets
+            if rebuilt:
+                wallet_exits = check_wallet_exist(rebuilt, entry_times)
 
-    signals, rejects = build_signals(trades, wallets, wallet_exits)
+    with monitored_step("analyse.build_signals", warn_after=step_warn_after):
+        signals, rejects = build_signals(trades, wallets, wallet_exits)
 
     # v10: Break down signal count by strategy for the cycle log
     strat_counts: dict = {}
@@ -227,7 +252,8 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
                 else:
                     _log(f"  ❌ Signal expired: {ps.outcome} {ps.title[:45]} — age={age_h:.1f}h, no trades in feed this cycle", "DIAG")
 
-    trade_events = auto_trade(signals, wallet_exits)
+    with monitored_step("analyse.auto_trade", warn_after=step_warn_after):
+        trade_events = auto_trade(signals, wallet_exits)
     for ev_type, msg, _color in trade_events:
         level = "TRADE" if ev_type in ("OPEN", "CLOSE") else "WARN"
         _log(msg, level)
@@ -276,6 +302,20 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
 
     if S.on_cycle_complete:
         S.on_cycle_complete(signals, wallets, rejects, trades)
+
+
+# def _position_price_loop():
+#     from titan_trader import _get_current_price
+#     while True:
+#         try:
+#             for _key, pos in list(S.env().open_positions.items()):
+#                 cur, _, fetched_ts = _get_current_price(pos)
+#                 if fetched_ts:
+#                     pos.cur_price = cur
+#                     pos.cur_price_ts = fetched_ts
+#         except Exception as e:
+#             _log(f"position price loop error: {e}", "WARN")
+#         time.sleep(5)
 
 
 def _heartbeat_loop():
@@ -357,8 +397,13 @@ def _hft_watchdog():
         if C.HFT_ENABLED:
             if _running is None or not _running.is_alive():
                 S.log_important("⚡ HFT watchdog: starting HFT fast loop")
-                _running = threading.Thread(target=_hft_fast_loop, daemon=True)
-                _running.start()
+                _running = start_monitored_thread(
+                    job_name="hft_fast_loop",
+                    target=_hft_fast_loop,
+                    warn_after=float(_HFT_FAST_CYCLE),
+                    thread_name="titan-hft-fast-loop",
+                    log_label="HFT loop",
+                )
         else:
             if _running is not None and _running.is_alive():
                 S.log_important("⚡ HFT watchdog: waiting for HFT fast loop to stop…")
@@ -445,14 +490,41 @@ def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycl
     except Exception as _e:
         _log(f"⚠ WS resolution monitor failed to start: {_e}", "WARN")
 
-    t_refresh = threading.Thread(target=_run_startup_wallet_refresh, daemon=True)
-    t_main = threading.Thread(target=run_loop, daemon=True)
-    t_hft  = threading.Thread(target=_hft_watchdog, daemon=True)
-    t_hb   = threading.Thread(target=_heartbeat_loop, daemon=True)
-    t_refresh.start()
-    t_main.start()
-    t_hft.start()
-    t_hb.start()
+    t_refresh = start_monitored_thread(
+        job_name="startup_wallet_refresh",
+        target=_run_startup_wallet_refresh,
+        warn_after=30.0,
+        thread_name="titan-startup-wallet-refresh",
+        log_label="Startup refresh",
+    )
+    t_main = start_monitored_thread(
+        job_name="main_loop",
+        target=run_loop,
+        warn_after=float(CYCLE_SECONDS),
+        thread_name="titan-main-loop",
+        log_label="Main",
+    )
+    t_hft = start_monitored_thread(
+        job_name="hft_watchdog",
+        target=_hft_watchdog,
+        warn_after=float(_HFT_FAST_CYCLE) * 2.0,
+        thread_name="titan-hft-watchdog",
+        log_label="HFT watchdog",
+    )
+    start_monitored_thread(
+        job_name="heartbeat_loop",
+        target=_heartbeat_loop,
+        warn_after=12.0,
+        thread_name="titan-heartbeat-loop",
+        log_label="Heartbeat",
+    )
+    # start_monitored_thread(
+    #     job_name="position_price_loop",
+    #     target=_position_price_loop,
+    #     warn_after=10.0,
+    #     thread_name="titan-position-price",
+    #     log_label="Position price",
+    # )
     return t_main
 
 

@@ -86,7 +86,8 @@ def _try_fetch_resolution_price(cid: str, asset: str, outcome: str) -> float | N
 def _get_current_price(pos: Position) -> tuple:
     """
     Two-stage price fetch for open positions.
-    Returns (price, is_resolving).
+    Returns (price, is_resolving, fetched_ts) where fetched_ts is time.time() when
+    a live price was received from Polymarket, or 0.0 when falling back to stale.
     """
     from titan_market import fetch_position_price_fast
     cid     = pos.cid
@@ -99,7 +100,7 @@ def _get_current_price(pos: Position) -> tuple:
     if fast_price is not None:
         resolving = fast_price <= 0.03 or fast_price >= 0.97
         pos.market_fail_count = 0
-        return fast_price, resolving
+        return fast_price, resolving, time.time()
 
     cached = S.market_cache.get(cid)
     if cached and (time.time() - cached.ts) > C.MARKET_TTL:
@@ -108,7 +109,7 @@ def _get_current_price(pos: Position) -> tuple:
     mkt, err = get_market(cid, title, asset=asset, slug=pos.slug, event_slug=pos.event_slug, persist=True)
     if not mkt:
         pos.market_fail_count += 1
-        return stale_price, False
+        return stale_price, False, 0.0
 
     pos.market_fail_count = 0
     resolving = is_market_resolving(mkt)
@@ -117,12 +118,12 @@ def _get_current_price(pos: Position) -> tuple:
         ap = mkt.asset_to_price
         if asset in ap:
             price = ap[asset]
-            if price <= 0.03: return price, True
-            if price >= 0.97: return price, True
-            return price, resolving
+            if price <= 0.03: return price, True, time.time()
+            if price >= 0.97: return price, True, time.time()
+            return price, resolving, time.time()
 
     cur = get_outcome_price(mkt, outcome, asset=asset)
-    return cur, resolving
+    return cur, resolving, time.time()
 
 
 
@@ -389,8 +390,10 @@ def auto_trade(signals: list[Signal], wallet_exits: dict) -> list[tuple[str, str
         if hold_minutes < C.MIN_HOLD_MINUTES:
             continue
 
-        cur, resolving = _get_current_price(pos)
-        pos.cur_price = cur
+        cur, resolving, fetched_ts = _get_current_price(pos)
+        if fetched_ts:
+            pos.cur_price = cur
+            pos.cur_price_ts = fetched_ts
 
         pos.price_history.append((now_t, cur))
         if len(pos.price_history) > 1440:
@@ -408,6 +411,7 @@ def auto_trade(signals: list[Signal], wallet_exits: dict) -> list[tuple[str, str
                 ws_price = ws_res.get("price", cur)
                 cur = ws_price
                 pos.cur_price = cur
+                pos.cur_price_ts = now_t
                 pnl_pct = (cur - entry) / max(entry, 0.001)
                 reason = f"WS_RESOLVED price={cur:.4f} via={ws_res.get('event_type','?')}"
                 S._log(
@@ -492,6 +496,7 @@ def auto_trade(signals: list[Signal], wallet_exits: dict) -> list[tuple[str, str
                     if real_p is not None:
                         cur = real_p
                         pos.cur_price = cur
+                        pos.cur_price_ts = now_t
                         pnl_pct = (cur - entry) / max(entry, 0.001)
                         if real_p <= 0.03 or real_p >= 0.97:
                             reason = f"MARKET_RESOLVED_CONFIRMED cur={cur:.3f}"
@@ -517,6 +522,7 @@ def auto_trade(signals: list[Signal], wallet_exits: dict) -> list[tuple[str, str
                         else:
                             cur = pos.entry_price
                             pos.cur_price = cur
+                            pos.cur_price_ts = now_t
                             pnl_pct = 0.0
                             S._log(
                                 f"  ⚠ MARKET_GONE with no real price — exiting at entry "
