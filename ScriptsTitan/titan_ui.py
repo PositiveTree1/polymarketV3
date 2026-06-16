@@ -1088,8 +1088,14 @@ def run_ui(api: TitanBackend) -> None:
             ("Avg Bet",     f"${whale.avg_bet:,.0f}",                                           "#ffaa44"),
             ("Avg Profit",  f"${avg_profit:+.1f}", "#00ff88" if avg_profit >= 0 else "#ff5555"),
             ("Alpha/Trade", f"${alpha_pt:+.1f}",   "#00ff88" if alpha_pt >= 0 else "#ff5555"),
-            ("30d PnL",     f"${(whale.recent_pnl_30d or 0.0):+,.0f}",                        "#88ccff"),
-            ("7d PnL",      f"${(whale.recent_pnl_7d or 0.0):+,.0f}",                         "#88ccff"),
+            ("30d PnL",     f"${whale.recent_pnl_30d:+,.0f}" if whale.recent_pnl_30d is not None else "N/A", "#88ccff"),
+            ("7d PnL",      f"${whale.recent_pnl_7d:+,.0f}"  if whale.recent_pnl_7d  is not None else "N/A", "#88ccff"),
+            ("First Trade",
+             datetime.fromtimestamp(whale.first_loaded_trade_ts).strftime("%Y-%m-%d %H:%M") if whale.first_loaded_trade_ts else "N/A",
+             "#aaaacc"),
+            ("Last Trade",
+             datetime.fromtimestamp(whale.last_loaded_trade_ts).strftime("%Y-%m-%d %H:%M")  if whale.last_loaded_trade_ts  else "N/A",
+             "#aaaacc"),
         ]
 
         grid_row = 0
