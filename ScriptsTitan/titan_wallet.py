@@ -602,34 +602,35 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
     v10: Also computes recent_pnl_30d and recent_pnl_7d for Recent Form strategy.
     """
     _limit = C.ACTIVITY_LIMIT or 500
+
+    ### Redeems trades
     redeems = S.safe_get(f"{C.DATA_API}/activity", {
         "user": wallet, "type": "REDEEM",
         "limit": _limit, "sortBy": "TIMESTAMP", "sortDirection": "DESC",
     }) or []
     if isinstance(redeems, dict):
         redeems = redeems.get("data", [])
-
-    won_cids   = set()
-    won_assets = set()
+    redeem_keys = set()
     total_redeem_value = 0.0
     for r in redeems:
         cid   = r.get("conditionId") or ""
         asset = r.get("asset") or ""
-        if cid:   won_cids.add(cid)
-        if asset: won_assets.add(asset)
+        if cid or asset:
+            redeem_keys.add((cid, asset))
         total_redeem_value += float(r.get("usdcSize") or r.get("size") or 0)
 
-    trades_raw = S.safe_get(f"{C.DATA_API}/activity", {
+    ### Buy trades
+    buy_trades = S.safe_get(f"{C.DATA_API}/activity", {
         "user": wallet, "type": "TRADE", "side": "BUY",
         "limit": _limit, "sortBy": "TIMESTAMP", "sortDirection": "DESC",
     }) or []
-    if isinstance(trades_raw, dict):
-        trades_raw = trades_raw.get("data", [])
-    loaded_trade_count = len(trades_raw)
+    if isinstance(buy_trades, dict):
+        buy_trades = buy_trades.get("data", [])
+    loaded_trade_count = len(buy_trades)
     trade_load_limited = loaded_trade_count >= _limit
     loaded_trade_ts = [
         float(t.get("timestamp") or 0.0)
-        for t in trades_raw
+        for t in buy_trades
         if float(t.get("timestamp") or 0.0) > 0.0
     ]
     first_loaded_trade_ts = min(loaded_trade_ts) if loaded_trade_ts else None
@@ -637,8 +638,8 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
 
     # Estimate trades_per_hour from timestamp spread
     trades_per_hour = 0.0
-    if len(trades_raw) >= 10:
-        ts_list = sorted([float(t.get("timestamp") or 0) for t in trades_raw if t.get("timestamp")], reverse=True)
+    if len(buy_trades) >= 10:
+        ts_list = sorted([float(t.get("timestamp") or 0) for t in buy_trades if t.get("timestamp")], reverse=True)
         if len(ts_list) >= 2:
             span_hours = (ts_list[0] - ts_list[-1]) / 3600
             if span_hours > 0:
@@ -649,8 +650,8 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
     days_30 = now_t - 30 * 86400
     days_7  = now_t - 7  * 86400
 
-    trades_30d = [t for t in trades_raw if float(t.get("timestamp") or 0) >= days_30]
-    trades_7d  = [t for t in trades_raw if float(t.get("timestamp") or 0) >= days_7]
+    trades_30d = [t for t in buy_trades if float(t.get("timestamp") or 0) >= days_30]
+    trades_7d  = [t for t in buy_trades if float(t.get("timestamp") or 0) >= days_7]
 
     redeems_30d = [r for r in redeems if float(r.get("timestamp") or 0) >= days_30]
     redeems_7d  = [r for r in redeems if float(r.get("timestamp") or 0) >= days_7]
@@ -659,7 +660,7 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
         v = float(t.get("usdcSize") or 0) or float(t.get("size") or 0) * float(t.get("price") or 0)
         return v
 
-    loaded_trade_pnl = total_redeem_value - sum(_cash(t) for t in trades_raw)
+    loaded_trade_pnl = total_redeem_value - sum(_cash(t) for t in buy_trades)
 
     recent_pnl_30d: float | None = (
         sum(float(r.get("usdcSize", 0) or 0) for r in redeems_30d) -
@@ -674,62 +675,63 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
         else None
     )
 
-    trade_by_key = {}
+    trade_by_pos = {}
     total_spent  = 0.0
-    for t in trades_raw:
+    for t in buy_trades:
         cid   = t.get("conditionId") or ""
         asset = t.get("asset") or ""
         cash  = float(t.get("usdcSize") or 0) or float(t.get("size") or 0) * float(t.get("price") or 0)
         total_spent += cash
-        for key in [cid, asset]:
-            if key and key not in trade_by_key:
-                trade_by_key[key] = {"cash": cash, "cid": cid, "asset": asset}
+        pos_key = (cid, asset)
+        if pos_key != ("", "") and pos_key not in trade_by_pos:
+            trade_by_pos[pos_key] = {"cash": cash, "cid": cid, "asset": asset}
 
+    ### Current Positions
     positions_raw = S.safe_get(f"{C.DATA_API}/positions", {
-        "user": wallet, "limit": 500,
+        "user": wallet, "limit": _limit,
         "sortBy": "CURRENT", "sortDirection": "ASC",
     }) or []
     if isinstance(positions_raw, dict):
         positions_raw = positions_raw.get("data", [])
 
-    price_by_key = {}
+    current_price_by_pos = {}
     for p in positions_raw:
         entry = {
             "cur":        float(p.get("curPrice", 0.5) or 0.5),
             "redeemable": p.get("redeemable", False),
             "cashPnl":    float(p.get("cashPnl", 0) or 0),
         }
-        for k in [p.get("conditionId") or "", p.get("asset") or ""]:
-            if k:
-                price_by_key[k] = entry
+        cid = p.get("conditionId") or ""
+        asset = p.get("asset") or ""
+        if cid or asset:
+            current_price_by_pos[(cid, asset)] = entry
 
-    all_won   = won_cids | won_assets
-    lost_keys = set()
-    for key, td in trade_by_key.items():
-        if td["cid"] in all_won or td["asset"] in all_won:
+    lost_positions = set()
+    for pos_key, td in trade_by_pos.items():
+        if pos_key in redeem_keys:
             continue
-        pos = price_by_key.get(key)
+        pos = current_price_by_pos.get(pos_key)
         if pos:
             cur      = pos["cur"]
             cash_pnl = pos.get("cashPnl", 0)
             if cur <= 0.02:
-                lost_keys.add(key)
+                lost_positions.add(pos_key)
             elif pos.get("redeemable") and cash_pnl < 0:
-                lost_keys.add(key)
+                lost_positions.add(pos_key)
             elif cash_pnl < -1.0 and cur < 0.10:
-                lost_keys.add(key)
+                lost_positions.add(pos_key)
 
-    wins   = len(all_won)
-    losses = len(lost_keys)
+    wins   = len(redeem_keys)
+    losses = len(lost_positions)
     total  = wins + losses
 
     # When no matches between REDEEM and BUY trades (window mismatch: wallet traded >LIMIT times),
     # fall back to using REDEEM count as wins against total open positions.
-    if total == 0 and len(all_won) > 0 and len(positions_raw) > 0:
+    if total == 0 and len(redeem_keys) > 0 and len(positions_raw) > 0:
         n_open = len(positions_raw)
-        wins   = len(all_won)
+        wins   = len(redeem_keys)
         total  = wins + n_open
-        avg_bet = total_spent / len(trade_by_key) if trade_by_key else 0
+        avg_bet = total_spent / len(trade_by_pos) if trade_by_pos else 0
         if avg_bet == 0:
             open_costs = [float(p.get("initialValue", 0) or p.get("currentValue", 0) or 0) for p in positions_raw]
             open_costs = [s for s in open_costs if s > 0]
@@ -753,9 +755,9 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
             "recent_pnl_7d":  round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
         }
 
-    resolved_keys    = all_won | lost_keys
-    resolved_spend   = sum(td["cash"] for k, td in trade_by_key.items() if k in resolved_keys)
-    n_res_with_spend = sum(1 for k in resolved_keys if k in trade_by_key)
+    resolved_keys    = redeem_keys | lost_positions
+    resolved_spend   = sum(td["cash"] for k, td in trade_by_pos.items() if k in resolved_keys)
+    n_res_with_spend = sum(1 for k in resolved_keys if k in trade_by_pos)
     avg_bet = resolved_spend / n_res_with_spend if n_res_with_spend > 0 else 0
 
     if total > 0 and resolved_spend > 0:
@@ -763,8 +765,8 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
     else:
         avg_profit = -1
 
-    if avg_bet == 0 and trade_by_key:
-        avg_bet = total_spent / len(trade_by_key)
+    if avg_bet == 0 and trade_by_pos:
+        avg_bet = total_spent / len(trade_by_pos)
 
     if total == 0:
         n_open    = len(positions_raw)
@@ -802,7 +804,7 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
         "first_loaded_trade_ts": first_loaded_trade_ts,
         "last_loaded_trade_ts": last_loaded_trade_ts,
         "win_rate": round(wr, 4), "wilson_lb": round(wb, 4),
-        "source": "resolved_history",
+        "source": "redeems + inferred losses from current positions",
         "avg_profit": avg_profit,
         "avg_bet":    round(avg_bet, 2),
         "trades_per_hour": round(trades_per_hour, 2),
