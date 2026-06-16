@@ -1342,6 +1342,14 @@ class TitanAPI:
         self._emit("titan/heartbeat", payload)
 
     def _on_log(self, msg: str, level: str = "INFO", terminal: bool = False) -> None:
+        from datetime import datetime
+        import titan_state as _TS
+        line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level:5}] {msg}"
+        try:
+            with open(_TS.SERVER_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
         self._emit("notifications/message", {"level": level, "data": msg, "terminal": terminal})
         if str(level).upper() in {"ERR", "ERROR", "CRITICAL"}:
             self._notify_telegram("notify_error", msg)

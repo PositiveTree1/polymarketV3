@@ -806,8 +806,8 @@ def fetch_real_winrate(wallet: str) -> WinRateData:
         "avg_profit": avg_profit,
         "avg_bet":    round(avg_bet, 2),
         "trades_per_hour": round(trades_per_hour, 2),
-        "recent_pnl_30d": round(recent_pnl_30d, 2),
-        "recent_pnl_7d":  round(recent_pnl_7d, 2),
+        "recent_pnl_30d": round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
+        "recent_pnl_7d":  round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
     }
 
 

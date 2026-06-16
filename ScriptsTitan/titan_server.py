@@ -529,13 +529,8 @@ def _wire_events(api: TitanAPI) -> None:
         level = payload.get("level", "INFO")
         msg   = payload.get("data", "")
         terminal = bool(payload.get("terminal", False))
-        line  = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level:5}] {msg}"
-        try:
-            with open(_LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-        except Exception:
-            pass
         if terminal or str(level).upper() in {"ERR", "ERROR", "CRITICAL"}:
+            line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level:5}] {msg}"
             print(line, flush=True)
         _sessions.broadcast({
             "jsonrpc": "2.0",
@@ -606,11 +601,12 @@ def _rotate_server_log() -> None:
         shutil.move(str(log), str(log.parent / f"titan_server_{ts}.log"))
 
 
-def run_server(api: TitanAPI, host: str = "127.0.0.1", port: int = 8765, token: str | None = None) -> None:
+def run_server(api: TitanAPI, host: str = "127.0.0.1", port: int = 8765, token: str | None = None, wire_events: bool = True) -> None:
     tool_count = len(_build_tool_list(api))
     _print(f"MCP {_PROTO_VERSION}  {host}:{port}  tools={tool_count}  auth={'yes' if token else 'no'}")
 
-    _wire_events(api)
+    if wire_events:
+        _wire_events(api)
 
     class _ThreadingServer(ThreadingMixIn, HTTPServer):
         daemon_threads = True
@@ -637,5 +633,6 @@ if __name__ == "__main__":
     args = p.parse_args()
 
     _api = TitanAPI(enable_telegram=True)
+    _wire_events(_api)
     _api.start()
-    run_server(_api, host=args.host, port=args.port, token=args.token)
+    run_server(_api, host=args.host, port=args.port, token=args.token, wire_events=False)

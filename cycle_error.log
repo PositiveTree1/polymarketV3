@@ -12,6 +12,6 @@ Traceback (most recent call last):
     wr_data            = fetch_real_winrate(wallet)
                          ^^^^^^^^^^^^^^^^^^^^^^^^^^
   File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_wallet.py", line 809, in fetch_real_winrate
-    "recent_pnl_30d": round(recent_pnl_30d, 2),
+    "recent_pnl_30d": round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
                       ^^^^^^^^^^^^^^^^^^^^^^^^
 TypeError: type NoneType doesn't define __round__ method
