@@ -84,7 +84,7 @@ def _rescore_watchlist():
             time.sleep(0.15)
         except Exception as e:
             _log(f"Re-score failed for {w}: {e}", "ERR")
-    new_elite = sum(1 for profile in S.env().wallet_cache.values() if profile.elite)
+    new_elite = sum(1 for profile in S.env().wallet_cache.values() if profile.is_elite)
     _log(f"♻ Re-score done | {new_elite} elite total", "DATA")
     save_wallet_roster_async()
 
@@ -166,8 +166,8 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
                     p.recent_ts = cached.recent_ts
 
             wallets[w] = p
-            if p.verified:  ver_count  += 1
-            if p.elite:     elite_count += 1
+            if p.is_verified:  ver_count  += 1
+            if p.is_elite:     elite_count += 1
             time.sleep(0.04)
 
     # CRITICAL FIX: Inject all known elite/verified wallets from cache into the
@@ -176,10 +176,10 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
     # even when the spiking wallet IS elite and well-known.
     # We don't re-fetch them (too slow) — just pass the cached profile.
     for w, cached_profile in S.env().wallet_cache.items():
-        if w not in wallets and (cached_profile.elite or cached_profile.verified):
+        if w not in wallets and (cached_profile.is_elite or cached_profile.is_verified):
             wallets[w] = cached_profile
-            if cached_profile.verified: ver_count  += 1
-            if cached_profile.elite:    elite_count += 1
+            if cached_profile.is_verified: ver_count  += 1
+            if cached_profile.is_elite:    elite_count += 1
 
     if S.env().cycle_count % 10 == 0:
         elite_ws = get_elite_wallets()
@@ -568,7 +568,7 @@ def get_system_snapshot() -> str:
         )
     lines += ["", "[ELITE ROSTER]"]
     elites = sorted(
-        [(w, p) for w, p in S.env().wallet_cache.items() if p.elite],
+        [(w, p) for w, p in S.env().wallet_cache.items() if p.is_elite],
         key=lambda x: x[1].total_pnl, reverse=True
     )
     for w, p in elites[:15]:

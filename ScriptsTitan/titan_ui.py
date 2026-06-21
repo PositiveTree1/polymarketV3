@@ -1025,16 +1025,14 @@ def run_ui(api: TitanBackend) -> None:
         score      = whale.score
         total_pnl  = whale.total_pnl
         pnl_color  = "#00ff55" if total_pnl >= 0 else "#ff5555"
-        verified   = whale.verified
-        elite      = whale.elite
         hft        = whale.hft
         vip        = whale.vip
-        icon       = "🔥" if elite else ("✅" if verified else "👁")
+        icon       = "🔥" if whale.is_elite else ("✅" if whale.is_verified else "👁")
 
         hf = tk.Frame(win, bg="#0a0a20", pady=8)
         hf.pack(fill="x", padx=8, pady=(8, 0))
         tk.Label(hf, text=f"{icon} {whale_name}{' ⭐VIP' if vip else ''}{' ⚡HFT' if hft else ''}",
-                 fg="#00aaff" if verified or elite else "#aaaaaa", bg="#0a0a20",
+                 fg="#00aaff" if whale.is_verified else "#aaaaaa", bg="#0a0a20",
                  font=bold11, wraplength=730, justify="left").pack(anchor="w", padx=12)
         tk.Label(hf, text=f"Wallet: {wallet}",
                  fg="#8899bb", bg="#0a0a20", font=mono9, wraplength=730,
@@ -1069,7 +1067,7 @@ def run_ui(api: TitanBackend) -> None:
 
         global_cells = [
             ("Score",    f"{score:.2f}",                                                       "#ffdd44"),
-            ("Status",   "ELITE" if elite else ("VERIFIED" if verified else "WATCH / REJECT"), "#ff8844"),
+            ("Status",   whale.status.display(), "#ff8844"),
             ("Type",     type_label,                                                            "#aaaacc"),
             ("LB Rank",  f"#{whale.lb_rank:,}" if whale.lb_rank else "—",                     "#aaaacc"),
             ("Portfolio",f"${whale.total_value:,.0f}",                                         "#00aaff"),
@@ -1112,12 +1110,10 @@ def run_ui(api: TitanBackend) -> None:
         info_f.pack(fill="x", padx=8, pady=(0, 6))
         tk.Label(info_f, text="DETAILS", fg="#00ff88", bg="#060615", font=bold9).pack(anchor="w", padx=4, pady=(4, 2))
         detail_lines = [
-            f"  Verified: {'yes' if verified else 'no'}",
-            f"  Elite: {'yes' if elite else 'no'}",
+            f"  Status: {whale.status.display()}",
             f"  VIP: {'yes' if vip else 'no'}",
             f"  HFT: {'yes' if hft else 'no'}",
             f"  Sports bot: {'yes' if sports_bot else 'no'}",
-            f"  Watchable: {'yes' if whale.watchable else 'no'}",
         ]
         if whale.fail_reasons:
             detail_lines.append(f"  Fail reasons: {', '.join(str(x) for x in whale.fail_reasons[:8])}")
@@ -3683,18 +3679,15 @@ def run_ui(api: TitanBackend) -> None:
         _whale_tree_items.clear()
         def _wallet_sort_key(item: tuple[str, "Wallet"]) -> tuple[int, float]:
             p = item[1]
-            if p.dead:        tier_rank = -1
-            elif p.elite:     tier_rank = 0
-            elif p.verified: tier_rank = 1
-            elif p.watchable: tier_rank = 2
-            else:            tier_rank = 3
+            if p.dead:           tier_rank = -1
+            else:                tier_rank = -int(p.status)
             return (tier_rank, -p.score)
 
         for w, p in sorted(all_wallets.items(), key=_wallet_sort_key):
-            if p.total_pnl < 0 and not (p.dead or p.elite or p.watchable): continue
-            if p.score <= 0.10 and not (p.dead or p.watchable):   continue
-            if filt == "ELITE" and not p.elite:        continue
-            if filt == "VER"   and not p.verified:     continue
+            if p.total_pnl < 0 and not (p.dead or p.is_watchable): continue
+            if p.score <= 0.10 and not (p.dead or p.is_watchable): continue
+            if filt == "ELITE" and not p.is_elite:        continue
+            if filt == "VER"   and not p.is_verified:     continue
             if filt == "HFT"   and not p.hft:          continue
             if filt == "VIP"   and not p.vip:          continue
 
@@ -3747,8 +3740,8 @@ def run_ui(api: TitanBackend) -> None:
         analysis_txt.configure(state="normal")
         analysis_txt.delete("1.0", tk.END)
         ts     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        ver    = {w: p for w, p in wallets.items() if p.verified}
-        elites = {w.addr: w for w in wallets.values() if w.elite}
+        ver    = {w: p for w, p in wallets.items() if p.is_verified}
+        elites = {w.addr: w for w in wallets.values() if w.is_elite}
         hot_t  = sum(1 for t in trades if isinstance(t, dict) and t.get("window") == "hot")
         hft_t  = sum(1 for t in trades if isinstance(t, dict) and t.get("source") in ("hft_spike_poll",))
         total_pnl = trade_stats["sum_pnl"]
@@ -3828,7 +3821,7 @@ def run_ui(api: TitanBackend) -> None:
         for r in rejects:
             diag_txt.insert(tk.END, r + "\n\n")
     
-        failed = [(w, p) for w, p in wallets.items() if not p.verified]
+        failed = [(w, p) for w, p in wallets.items() if not p.is_verified]
         failed.sort(key=lambda x: x[1].score, reverse=True)
         diag_txt.insert(tk.END, f"\n{'═'*72}\n  FAILED WALLETS (top 20)\n{'═'*72}\n")
         for w, p in failed[:20]:
@@ -4093,8 +4086,8 @@ def run_ui(api: TitanBackend) -> None:
 
         sig_var.set(f"Sigs: {len(signal_rows)}")
         roster_wallets = wallets
-        n_ver = sum(1 for p in roster_wallets.values() if p.verified)
-        n_elite = sum(1 for p in roster_wallets.values() if p.elite)
+        n_ver = sum(1 for p in roster_wallets.values() if p.is_verified)
+        n_elite = sum(1 for p in roster_wallets.values() if p.is_elite)
         ver_var.set(f"Ver: {n_ver}")
         elite_var.set(f"Elite: {n_elite}")
 

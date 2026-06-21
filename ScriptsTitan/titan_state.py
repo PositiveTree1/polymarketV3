@@ -149,7 +149,7 @@ def log_context(label: str):
 
 def get_watchlist() -> list[str]:
     """Return addresses currently marked watchable=True in wallet_cache."""
-    return [w for w, p in _shared_wallet_cache.items() if p.watchable]
+    return [w for w, p in _shared_wallet_cache.items() if p.is_watchable]
 
 def __getattr__(name):
     if hasattr(_wallet, name):

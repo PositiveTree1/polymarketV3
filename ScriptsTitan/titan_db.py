@@ -248,6 +248,19 @@ def _migrate_add_columns(cx: sqlite3.Connection) -> None:
         cx.execute("ALTER TABLE watchlist ADD COLUMN watchable INTEGER NOT NULL DEFAULT 1")
     if "profile_json" not in wl_cols:
         cx.execute("ALTER TABLE watchlist ADD COLUMN profile_json TEXT")
+    if "status" not in wl_cols:
+        cx.execute("ALTER TABLE watchlist ADD COLUMN status INTEGER NOT NULL DEFAULT 1")
+        # Backfill from existing data: elite=3, verified=2, watchable=1, else=0
+        cx.execute("""
+            UPDATE watchlist SET status = CASE
+                WHEN json_extract(profile_json, '$.status') IS NOT NULL
+                    THEN CAST(json_extract(profile_json, '$.status') AS INTEGER)
+                WHEN json_extract(profile_json, '$.elite') = 1 THEN 3
+                WHEN json_extract(profile_json, '$.verified') = 1 THEN 2
+                WHEN watchable = 1 THEN 1
+                ELSE 0
+            END
+        """)
 
     existing = {row[1] for row in cx.execute("PRAGMA table_info(trade_history)").fetchall()}
     if "asset" not in existing:
@@ -503,23 +516,25 @@ def upsert_wallet_profile(addr: str, profile: dict) -> None:
     if not _DB_PATH:
         return
     now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    watchable = 1 if profile.get("watchable") or profile.get("verified") else 0
+    status_val = int(profile.get("status", 1 if (profile.get("watchable") or profile.get("verified")) else 0))
+    watchable = 1 if status_val >= 1 else 0
     blob = json.dumps(profile)
     with _connect() as cx:
         cx.execute(
             """
-            INSERT INTO watchlist (address, added_at, watchable, profile_json)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO watchlist (address, added_at, watchable, status, profile_json)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(address) DO UPDATE SET
                 watchable    = excluded.watchable,
+                status       = excluded.status,
                 profile_json = excluded.profile_json
             """,
-            (addr.lower(), now, watchable, blob),
+            (addr.lower(), now, watchable, status_val, blob),
         )
 
 
 def load_watchable_wallets(limit: int) -> dict[str, dict | None]:
-    """Return watchable=1 addresses up to limit, ordered by score DESC.
+    """Return status>=WATCH(1) addresses up to limit, ordered by score DESC.
     Value is a raw dict if profile_json exists, else None. Caller uses Wallet.from_db() to hydrate.
     """
     if not _DB_PATH:
@@ -529,7 +544,7 @@ def load_watchable_wallets(limit: int) -> dict[str, dict | None]:
             """
             SELECT address, profile_json
             FROM watchlist
-            WHERE watchable=1
+            WHERE status >= 1
             ORDER BY COALESCE(json_extract(profile_json, '$.score'), 0) DESC
             LIMIT ?
             """,
@@ -548,12 +563,12 @@ def load_watchable_wallets(limit: int) -> dict[str, dict | None]:
 
 
 def clear_wallet_profile(addr: str) -> None:
-    """Remove profile_json and mark watchable=0 for a wallet that failed verification."""
+    """Remove profile_json and mark status=REJECTED(0) for a wallet that failed verification."""
     if not _DB_PATH:
         return
     with _connect() as cx:
         cx.execute(
-            "UPDATE watchlist SET watchable=0, profile_json=NULL WHERE address=?",
+            "UPDATE watchlist SET watchable=0, status=0, profile_json=NULL WHERE address=?",
             (addr.lower(),),
         )
 
@@ -569,16 +584,16 @@ def purge_non_watchable(keep_seed: set[str] | None = None) -> int:
     seeds = {a.lower() for a in (keep_seed or set())}
     with _connect() as cx:
         # Clear stale profiles on non-watchable rows (left over from old code)
-        cx.execute("UPDATE watchlist SET profile_json=NULL WHERE watchable=0")
+        cx.execute("UPDATE watchlist SET profile_json=NULL WHERE status=0")
         # Delete stub rows (no profile, not a seed)
         if seeds:
             placeholders = ",".join("?" * len(seeds))
             rows = cx.execute(
-                f"DELETE FROM watchlist WHERE watchable=0 AND profile_json IS NULL AND address NOT IN ({placeholders})",
+                f"DELETE FROM watchlist WHERE status=0 AND profile_json IS NULL AND address NOT IN ({placeholders})",
                 list(seeds),
             )
         else:
-            rows = cx.execute("DELETE FROM watchlist WHERE watchable=0 AND profile_json IS NULL")
+            rows = cx.execute("DELETE FROM watchlist WHERE status=0 AND profile_json IS NULL")
         return rows.rowcount
 
 
@@ -586,10 +601,11 @@ def set_watchable(addr: str, flag: bool) -> None:
     if not _DB_PATH:
         return
     now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    status_val = 1 if flag else 0
     with _connect() as cx:
         cx.execute(
-            "INSERT INTO watchlist (address, added_at, watchable) VALUES (?, ?, ?) ON CONFLICT(address) DO UPDATE SET watchable=excluded.watchable",
-            (addr.lower(), now, 1 if flag else 0),
+            "INSERT INTO watchlist (address, added_at, watchable, status) VALUES (?, ?, ?, ?) ON CONFLICT(address) DO UPDATE SET watchable=excluded.watchable, status=excluded.status",
+            (addr.lower(), now, status_val, status_val),
         )
 
 

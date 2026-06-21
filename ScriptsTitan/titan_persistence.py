@@ -41,7 +41,7 @@ def save_wallet_roster():
     try:
         saved = 0
         for addr, wallet in S.env().wallet_cache.items():
-            if wallet.verified or wallet.watchable:
+            if wallet.is_watchable:
                 DB.upsert_wallet_profile(addr, wallet.to_db_dict())
                 saved += 1
         if saved:
@@ -275,14 +275,13 @@ def _make_dead_wallet(addr: str, preferred_name: str, reason: str, base_wallet: 
         else:
             display_name = addr[:10] + "…"
     dead_name = display_name if display_name.upper().startswith("DEAD WALLET") else f"DEAD WALLET {display_name}"
-    base = base_wallet if base_wallet is not None else Wallet.make_stub(addr, "dead_wallet", watchable=True)
+    from titan_wallet import WalletTier as _WT
+    base = base_wallet if base_wallet is not None else Wallet.make_stub(addr, "dead_wallet", status=_WT.WATCH)
     dead_wallet = replace(
         base,
         name=dead_name,
         ts=time.time(),
-        watchable=True,
-        verified=False,
-        elite=False,
+        status=_WT.WATCH,
         dead=True,
         detail=f"DEAD WALLET: {reason}",
         fail_reasons=["dead_wallet"],
@@ -323,8 +322,9 @@ def ensure_linked_wallets_cached(
                 dead_wallets.append(wallet_key)
                 stats["dead"] += 1
                 continue
-            if not cached_wallet.watchable:
-                pinned_wallet = replace(cached_wallet, watchable=True)
+            if not cached_wallet.is_watchable:
+                from titan_wallet import WalletTier as _WT
+                pinned_wallet = replace(cached_wallet, status=max(cached_wallet.status, _WT.WATCH))
                 S.env().wallet_cache[wallet_key] = pinned_wallet
                 DB.upsert_wallet_profile(wallet_key, pinned_wallet.to_db_dict())
                 stats["pinned_watchable"] += 1
@@ -350,8 +350,9 @@ def ensure_linked_wallets_cached(
             dead_wallets.append(wallet_key)
             stats["dead"] += 1
             continue
-        if not wallet.watchable:
-            pinned_wallet = replace(wallet, watchable=True)
+        if not wallet.is_watchable:
+            from titan_wallet import WalletTier as _WT
+            pinned_wallet = replace(wallet, status=max(wallet.status, _WT.WATCH))
             S.env().wallet_cache[wallet_key] = pinned_wallet
             DB.upsert_wallet_profile(wallet_key, pinned_wallet.to_db_dict())
             stats["pinned_watchable"] += 1
@@ -380,9 +381,9 @@ def _refresh_elite_ver_wallets() -> None:
 
     targets = [
         (addr, p) for addr, p in S.env().wallet_cache.items()
-        if (p.elite or p.verified) and p.ts <= stale_before
+        if p.is_verified and p.ts <= stale_before
     ]
-    elite_ver_total = sum(1 for p in S.env().wallet_cache.values() if p.elite or p.verified)
+    elite_ver_total = sum(1 for p in S.env().wallet_cache.values() if p.is_verified)
     fresh_count = elite_ver_total - len(targets)
     if not targets:
         _startup(f"ELITE/VER startup refresh summary: fresh={fresh_count} refresh=0 total={elite_ver_total}")
@@ -396,7 +397,7 @@ def _refresh_elite_ver_wallets() -> None:
         name = p.name or addr[:14] + "..."
         try:
             refreshed = get_compute_and_store_wallet(addr)
-            if refreshed.watchable or refreshed.verified:
+            if refreshed.is_watchable:
                 DB.upsert_wallet_profile(addr, refreshed.to_db_dict())
             tier_after = refreshed.tier()
             tier_change = f" {tier_before}=>{tier_after}" if tier_before != tier_after else f" {tier_after}"
@@ -435,7 +436,7 @@ def _load_wallets_from_db() -> None:
                 if wallet.ts < 0.0:
                     wallet.ts = 0.0
                 display = wallet.name if wallet.name and not wallet.name.startswith("0x") else f"{addr[:14]}…"
-                S._log(f"📂 LOAD {display} {wallet.tier()} elite={wallet.elite} verified={wallet.verified} watchable={wallet.watchable}", "DIAG")
+                S._log(f"📂 LOAD {display} {wallet.status.display()}", "DIAG")
                 S.env().wallet_cache[addr] = wallet
                 with_profile += 1
             else:

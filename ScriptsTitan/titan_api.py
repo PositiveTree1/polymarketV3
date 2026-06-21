@@ -387,9 +387,9 @@ class TitanAPI:
             ) else wallet.name
             if search_lower and search_lower not in display_name.lower() and not w.lower().startswith(search_lower):
                 continue
-            if tier == "elite"     and not wallet.elite:     continue
-            if tier == "verified"  and not wallet.verified:  continue
-            if tier == "watchable" and not wallet.watchable: continue
+            if tier == "elite"     and not wallet.is_elite:     continue
+            if tier == "verified"  and not wallet.is_verified:  continue
+            if tier == "watchable" and not wallet.is_watchable: continue
             if tier == "vip"       and w.lower() not in vip_wallets: continue
             out = replace(wallet, name=display_name, vip=w.lower() in vip_wallets)
             results.append(out)
@@ -808,7 +808,7 @@ class TitanAPI:
         now_unwatchable = 0
         reclassified = 0
 
-        updates: list[tuple[int, str]] = []
+        updates: list[tuple] = []
         profile_updates: list[tuple[str, str]] = []
         vip_wallets = {wallet.lower() for wallet in _C.VIP_WALLETS}
         vip_names = _C.VIP_WALLET_NAMES
@@ -819,23 +819,12 @@ class TitanAPI:
             except Exception:
                 continue
 
-            raw = {
-                "win_rate":        prof.get("win_rate", 0.0),
-                "wilson_lb":       prof.get("wilson_lb", 0.0),
-                "n_resolved":      prof.get("n_resolved", 0),
-                "total_pnl":       prof.get("total_pnl", 0.0),
-                "total_value":     prof.get("total_value", 0.0),
-                "avg_profit":      prof.get("avg_profit", 0.0),
-                "avg_bet":         prof.get("avg_bet", 0.0),
-                "trades_per_hour": prof.get("trades_per_hour", 0.0),
-                "alpha_per_trade": prof.get("alpha_per_trade", 0.0),
-                "n_pos":           prof.get("n_pos", 0),
-                "pnl_pct":         prof.get("pnl_pct", 0.0),
-            }
-            score = sel.score(raw)
-            watchable, verified, elite, fail_reasons = sel.is_selected(raw, score)
+            from titan_wallet import Wallet as _Wallet, WalletTier as _WT
+            w_obj = _Wallet.from_db(addr, prof)
+            score = sel.score(w_obj)
+            status, fail_reasons = sel.is_selected(w_obj, score)
 
-            new_watchable = 1 if (watchable or verified) else 0
+            new_watchable = 1 if status >= _WT.WATCH else 0
             if new_watchable != old_watchable:
                 reclassified += 1
                 if new_watchable:
@@ -844,9 +833,10 @@ class TitanAPI:
                     now_unwatchable += 1
 
             prof["score"]        = round(score, 5)
-            prof["verified"]     = verified
-            prof["watchable"]    = bool(watchable or verified)
-            prof["elite"]        = elite
+            prof["status"]       = int(status)
+            prof["verified"]     = status >= _WT.VERIFIED
+            prof["watchable"]    = status >= _WT.WATCH
+            prof["elite"]        = status == _WT.ELITE
             prof["vip"]          = addr.lower() in vip_wallets
             vip_name = vip_names.get(addr.lower(), "")
             current_name = str(prof.get("name") or "")
@@ -854,12 +844,13 @@ class TitanAPI:
                 prof["name"] = vip_name
             prof["fail_reasons"] = fail_reasons
             if addr in _S.env().wallet_cache:
-                _S.env().wallet_cache[addr] = prof
-            updates.append((new_watchable, addr))
+                updated_w = _Wallet.from_db(addr, prof)
+                _S.env().wallet_cache[addr] = updated_w
+            updates.append((new_watchable, int(status), addr))
             profile_updates.append((_json.dumps(prof), addr))
 
         with _DB._connect() as cx:
-            cx.executemany("UPDATE watchlist SET watchable=? WHERE address=?", updates)
+            cx.executemany("UPDATE watchlist SET watchable=?, status=? WHERE address=?", updates)
             cx.executemany("UPDATE watchlist SET profile_json=? WHERE address=?", profile_updates)
 
         _S._log(f"reeval_wallets: {reclassified} reclassified ({now_watchable} gained, {now_unwatchable} lost) of {len(rows)} total", "INFO")
@@ -1433,7 +1424,7 @@ class TitanAPI:
             f"SessionPnL=${_w().session_pnl:+.4f}  TotalPnL=${br - BANKROLL_START:+.4f}",
             f"  Cycles={_w().cycle_count}  OpenPos={len(_w().open_positions)}  "
             f"Cooldowns={len(_w().cooldown_cids)}  Watchlist={len(_TS.get_watchlist())}  "
-            f"Elites={sum(1 for p in _w().wallet_cache.values() if p.elite)}",
+            f"Elites={sum(1 for p in _w().wallet_cache.values() if p.is_elite)}",
             f"  Trades={st.sell_count}({st.win_count}W/{st.loss_count}L) WR={st.win_rate*100:.0f}%",
             "",
         ]
@@ -1477,7 +1468,7 @@ class TitanAPI:
         lines.append("")
 
         elites = sorted(
-            [(w, p) for w, p in _w().wallet_cache.items() if p.elite],
+            [(w, p) for w, p in _w().wallet_cache.items() if p.is_elite],
             key=lambda x: x[1].total_pnl, reverse=True
         )
         lines.append(f"[ELITE ROSTER ({len(elites)})]")
@@ -1534,7 +1525,7 @@ class TitanAPI:
             f"  Open Positions  : {len(_w().open_positions)}",
             f"  Cooldowns       : {len(_w().cooldown_cids)}",
             f"  Watchlist       : {len(_TS.get_watchlist())}",
-            f"  Elite Count     : {sum(1 for p in _w().wallet_cache.values() if p.elite)}",
+            f"  Elite Count     : {sum(1 for p in _w().wallet_cache.values() if p.is_elite)}",
             "└─────────────────────────────────────────────────────────────────────┘", "",
         ]
 
@@ -1582,7 +1573,7 @@ class TitanAPI:
         lines += ["└─────────────────────────────────────────────────────────────────────┘", ""]
 
         elites = sorted(
-            [(w, p) for w, p in _w().wallet_cache.items() if p.elite],
+            [(w, p) for w, p in _w().wallet_cache.items() if p.is_elite],
             key=lambda x: x[1].total_pnl, reverse=True
         )
         lines.append(f"┌─ ELITE ROSTER ({len(elites)} wallets) ──────────────────────────────────────────┐")

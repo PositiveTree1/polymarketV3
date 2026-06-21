@@ -863,7 +863,7 @@ def _poll_wallet_trades(wallet: str, limit: int, min_cash: float,
 def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list[WalletObservation]:
     elite_addrs = set()
     for e in S.wallets:
-        elite_addrs.update(a.lower() for a, p in e.wallet_cache.items() if p.elite)
+        elite_addrs.update(a.lower() for a, p in e.wallet_cache.items() if p.is_elite)
     vip_addrs   = {a.lower() for a in VIP_WALLETS}
     all_to_poll = elite_addrs | vip_addrs
 
@@ -878,7 +878,7 @@ def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list[WalletObs
             (e.wallet_cache[wallet] for e in S.wallets if wallet in e.wallet_cache),
             get_compute_and_store_wallet(wallet),
         )
-        is_elite = prof.elite
+        is_elite = prof.is_elite
         hft      = prof.is_hft()
         avg_bet  = prof.avg_bet
 
@@ -914,7 +914,7 @@ def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) 
     e = S.env()
     for w in S.get_watchlist():
         prof = e.wallet_cache.get(w)
-        if w not in already_polled and prof is not None and prof.verified:
+        if w not in already_polled and prof is not None and prof.is_verified:
             candidates.add(w)
     candidates = list(candidates)[:50]
 

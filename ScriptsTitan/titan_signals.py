@@ -401,7 +401,7 @@ def check_wallet_exist(cid_to_wallet_sets: dict, entry_times: dict | None = None
                 exits[cid].append(wallet)
                 prof   = S.env().wallet_cache.get(wallet)
                 w_name = (prof.name if prof is not None else None) or wallet[:10]
-                tag    = "🔥" if (prof and prof.elite) else "✅" if (prof and prof.verified) else "👁"
+                tag    = "🔥" if (prof and prof.is_elite) else "✅" if (prof and prof.is_verified) else "👁"
                 size_str = f" ${sell_cash:.0f}" if sell_cash > 0 else ""
                 S.env().WHALE_EXIT_HISTORY.append(
                     f"[{time.strftime('%H:%M')}] {tag} {w_name} SOLD{size_str}"

@@ -70,8 +70,8 @@ class WalletSelector(ABC):
         """Return composite 0-1 score for a wallet."""
 
     @abstractmethod
-    def is_selected(self, wallet: "Wallet", score: float) -> tuple[bool, bool, bool, list[str]]:
-        """Return (watchable, verified, elite, fail_reasons)."""
+    def is_selected(self, wallet: "Wallet", score: float) -> tuple["WalletTier", list[str]]:
+        """Return (status, fail_reasons)."""
 
     # Fetch candidate wallet addresses from large recent buy trades and leaderboard
     # snapshots, returning a de-duplicated input set for later evaluation. This
@@ -231,7 +231,8 @@ class PerformanceSelector(WalletSelector):
             p.weight_alpha          * min(1.0, max(0.0, wallet.avg_profit) / 50)
         )
 
-    def is_selected(self, wallet: "Wallet", score: float) -> tuple[bool, bool, bool, list[str]]:
+    def is_selected(self, wallet: "Wallet", score: float) -> tuple["WalletTier", list[str]]:
+        from titan_wallet import WalletTier
         p          = self.p
         wr         = wallet.win_rate
         wb         = wallet.wilson_lb
@@ -247,9 +248,9 @@ class PerformanceSelector(WalletSelector):
 
         hft_detected = tph >= p.hft_tph_threshold or (avg_bet > 0 and avg_bet < 50 and n_res > 100)
         if hft_detected and not p.hft_enabled:
-            return False, False, False, ["HFT_DISABLED"]
+            return WalletTier.REJECTED, ["HFT_DISABLED"]
 
-        watchable = (
+        watchable_ok = (
             wr    >= p.min_win_rate_watch and
             wb    >= p.wilson_min_watch   and
             n_res >= p.min_resolved_bets  and
@@ -267,26 +268,26 @@ class PerformanceSelector(WalletSelector):
             roi_ok  = avg_profit >= p.min_avg_profit and bet_ok
             port_ok = cur >= p.min_portfolio_or_pnl or pnl >= p.min_portfolio_or_pnl
 
-        verified = (
-            watchable and
+        verified_ok = (
+            watchable_ok and
             wr >= p.min_win_rate_ver and
             wb >= p.wilson_min_ver   and
             roi_ok and port_ok
         )
 
-        if watchable and not roi_ok:
+        if watchable_ok and not roi_ok:
             fail_reasons.append(
                 f"ROI: avg_profit=${avg_profit:.1f}<${p.min_avg_profit}"
                 + (f", avg_bet=${avg_bet:.0f}<${p.min_avg_bet:.0f}" if avg_bet > 0 and avg_bet < p.min_avg_bet else "")
             )
-        if watchable and not port_ok:
+        if watchable_ok and not port_ok:
             fail_reasons.append(f"PORT: cur=${cur:,.0f} pnl=${pnl:+,.0f}")
-        if watchable and wr < p.min_win_rate_ver:
+        if watchable_ok and wr < p.min_win_rate_ver:
             fail_reasons.append(f"VER_WR {wr*100:.0f}%<{p.min_win_rate_ver*100:.0f}%")
 
         portfolio_proxy = max(cur, pnl)
-        elite = (
-            verified and
+        elite_ok = (
+            verified_ok and
             pnl             >= p.elite_min_pnl      and
             portfolio_proxy >= p.elite_min_portfolio and
             score           >= p.elite_min_score     and
@@ -294,7 +295,7 @@ class PerformanceSelector(WalletSelector):
             apt             >= p.elite_alpha_per_trade
         )
 
-        if verified and not elite:
+        if verified_ok and not elite_ok:
             reasons: list[str] = []
             if pnl             < p.elite_min_pnl:      reasons.append(f"PnL ${pnl:+,.0f}<${p.elite_min_pnl:,.0f}")
             if portfolio_proxy < p.elite_min_portfolio: reasons.append(f"Port ${portfolio_proxy:,.0f}<${p.elite_min_portfolio:,.0f}")
@@ -304,7 +305,11 @@ class PerformanceSelector(WalletSelector):
             if reasons:
                 fail_reasons.append("NOT_ELITE: " + ", ".join(reasons))
 
-        return watchable, verified, elite, fail_reasons
+        if elite_ok:        status = WalletTier.ELITE
+        elif verified_ok:   status = WalletTier.VERIFIED
+        elif watchable_ok:  status = WalletTier.WATCH
+        else:               status = WalletTier.REJECTED
+        return status, fail_reasons
 
     def is_sports_bot(self, name: str, tph: float) -> bool:
         p = self.p

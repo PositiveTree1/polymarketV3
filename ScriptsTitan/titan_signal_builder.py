@@ -101,9 +101,9 @@ class ConsensusBasketBuilder(SignalBuilderBase):
                 next(iter(by_w.values())).title
             )
 
-            elite_wallets    = {w: t for w, t in by_w.items() if wallets.get(w, _EMPTY_W).elite}
+            elite_wallets    = {w: t for w, t in by_w.items() if wallets.get(w, _EMPTY_W).is_elite}
             verified_wallets = {w: t for w, t in by_w.items()
-                                if wallets.get(w, _EMPTY_W).verified and w not in elite_wallets}
+                                if wallets.get(w, _EMPTY_W).is_verified and w not in elite_wallets}
 
             _any_hft_trade_tagged = any(
                 t.is_large_trade or _hft_spike_ratio_value(t) > 0
@@ -118,7 +118,7 @@ class ConsensusBasketBuilder(SignalBuilderBase):
                     if w in elite_wallets:
                         continue
                     prof = wallets.get(w, _EMPTY_W)
-                    if not (prof.is_hft() or prof.verified):
+                    if not (prof.is_hft() or prof.is_verified):
                         continue
                     elite_wallets[w] = t
 
@@ -136,7 +136,7 @@ class ConsensusBasketBuilder(SignalBuilderBase):
                 if other_cid == cid and other_outcome != outcome:
                     for t in other_group:
                         w = t.wallet
-                        if wallets.get(w, _EMPTY_W).elite or wallets.get(w, _EMPTY_W).verified:
+                        if wallets.get(w, _EMPTY_W).is_elite or wallets.get(w, _EMPTY_W).is_verified:
                             opposite_elite_cash += t.cash
                     break
 
@@ -405,7 +405,7 @@ class RecentFormBuilder(SignalBuilderBase):
         for t in trades:
             w = t.wallet
             prof = wallets.get(w, _EMPTY_W)
-            if not prof.verified and not prof.elite:
+            if not prof.is_verified and not prof.is_elite:
                 continue
             if not prof.is_recent_form_qualified(min_pnl_30d, min_pnl_7d, max_tph):
                 continue
@@ -512,9 +512,9 @@ class RecentFormBuilder(SignalBuilderBase):
                 avg_recent_wr = max(0.50, min(0.75, 0.55 + avg_pnl / 10000))
 
             elite_wallets_rf = {w: t for w, t in rf_qualified.items()
-                                if wallets.get(w, _EMPTY_W).elite}
+                                if wallets.get(w, _EMPTY_W).is_elite}
             verified_wallets_rf = {w: t for w, t in rf_qualified.items()
-                                   if wallets.get(w, _EMPTY_W).verified and w not in elite_wallets_rf}
+                                   if wallets.get(w, _EMPTY_W).is_verified and w not in elite_wallets_rf}
             all_ver = {**elite_wallets_rf, **verified_wallets_rf}
 
             scoring_elites = elite_wallets_rf if elite_wallets_rf else rf_qualified
@@ -608,8 +608,8 @@ class DriftDiscountBuilder(SignalBuilderBase):
 
         verified_trades = [
             t for t in trades
-            if wallets.get(t.wallet, _EMPTY_W).verified or
-               wallets.get(t.wallet, _EMPTY_W).elite
+            if wallets.get(t.wallet, _EMPTY_W).is_verified or
+               wallets.get(t.wallet, _EMPTY_W).is_elite
         ]
 
         if not verified_trades:
@@ -632,9 +632,9 @@ class DriftDiscountBuilder(SignalBuilderBase):
                 next(iter(by_w.values())).title
             )
 
-            elite_wallets = {w: t for w, t in by_w.items() if wallets.get(w, _EMPTY_W).elite}
+            elite_wallets = {w: t for w, t in by_w.items() if wallets.get(w, _EMPTY_W).is_elite}
             verified_wallets = {w: t for w, t in by_w.items()
-                               if wallets.get(w, _EMPTY_W).verified and w not in elite_wallets}
+                               if wallets.get(w, _EMPTY_W).is_verified and w not in elite_wallets}
             all_ver = {**elite_wallets, **verified_wallets}
 
             if not all_ver:

@@ -42,6 +42,7 @@ import titan_db as DB
 
 
 class WalletTier(IntEnum):
+    ERROR    = -1
     REJECTED = 0
     WATCH    = 1
     VERIFIED = 2
@@ -53,10 +54,25 @@ class WalletTier(IntEnum):
             WalletTier.VERIFIED: "✅VER",
             WalletTier.WATCH:    "👁WATCH",
             WalletTier.REJECTED: "❌REJ",
+            WalletTier.ERROR:    "⚠ERR",
         }[self]
-    
+
     def __str__(self) -> str:
         return self.display()
+
+
+def _status_from_dict(d: dict) -> "WalletTier":
+    """Derive WalletTier from a DB/wire dict. Prefers 'status' key; falls back to legacy bools."""
+    raw = d.get("status")
+    if raw is not None:
+        try:
+            return WalletTier(int(raw))
+        except (ValueError, KeyError):
+            pass
+    if d.get("elite"):    return WalletTier.ELITE
+    if d.get("verified"): return WalletTier.VERIFIED
+    if d.get("watchable"): return WalletTier.WATCH
+    return WalletTier.REJECTED
 
 
 @dataclass
@@ -90,9 +106,7 @@ class Wallet:
     trades_per_hour:    float
 
     # ── flags ─────────────────────────────────────────────────────────────────
-    verified:           bool
-    watchable:          bool
-    elite:              bool
+    status:             WalletTier
     hft:                bool
     vip:                bool
     sports_bot:         bool
@@ -159,14 +173,23 @@ class Wallet:
             return False
         return self.recent_pnl_30d >= min_pnl_30d and self.recent_pnl_7d >= min_pnl_7d
 
+    @property
+    def is_watchable(self) -> bool:
+        return self.status >= WalletTier.WATCH
+
+    @property
+    def is_verified(self) -> bool:
+        return self.status >= WalletTier.VERIFIED
+
+    @property
+    def is_elite(self) -> bool:
+        return self.status == WalletTier.ELITE
+
     def tier(self) -> WalletTier:
-        if self.elite:     return WalletTier.ELITE
-        if self.verified:  return WalletTier.VERIFIED
-        if self.watchable: return WalletTier.WATCH
-        return WalletTier.REJECTED
+        return self.status
 
     def tag(self) -> str:
-        return self.tier().display() + (" ⚡HFT" if self.hft else "")
+        return self.status.display() + (" ⚡HFT" if self.hft else "")
         
     def reclassify(self, sel) -> "Wallet":
         from dataclasses import replace as _replace
@@ -181,20 +204,17 @@ class Wallet:
             avg_profit=avg_profit,
             alpha_per_trade=round(apt, 2),
         ) if avg_profit != self.avg_profit or round(apt, 2) != self.alpha_per_trade else self
-        score, watchable, verified, elite, hft, sports_bot, fail_reasons = w.apply_selector(sel)
+        score, status, hft, sports_bot, fail_reasons = w.apply_selector(sel)
         est_tag    = "~" if avg_profit_estimated else ""
         hft_tag    = " ⚡HFT" if hft else ""
         sports_tag = " 🏈SPORTS" if sports_bot else ""
         rf_tag     = f" RF30d:${self.recent_pnl_30d:+.0f}" if self.recent_pnl_30d is not None else ""
-        tier_disp  = (WalletTier.ELITE if elite else WalletTier.VERIFIED if verified else WalletTier.WATCH if watchable else WalletTier.REJECTED).display()
         return _replace(
             self,
             score=round(score, 5),
             avg_profit=avg_profit,
             alpha_per_trade=round(apt, 2),
-            verified=verified,
-            watchable=watchable,
-            elite=elite,
+            status=status,
             hft=hft,
             sports_bot=sports_bot,
             fail_reasons=fail_reasons,
@@ -203,16 +223,16 @@ class Wallet:
                 f"Res:{self.n_resolved} Port:${self.total_value:,.0f} PnL:${self.total_pnl:+,.0f}({self.pnl_pct:+.1f}%) "
                 f"AvgProfit:{est_tag}${avg_profit:.1f} AvgBet:${self.avg_bet:.0f} "
                 f"AlphaPT:${apt:.1f} TPH:{self.trades_per_hour:.1f} [{self.wr_source}] "
-                f"{tier_disp}{hft_tag}{sports_tag}{rf_tag}"
+                f"{status.display()}{hft_tag}{sports_tag}{rf_tag}"
             ),
         )
 
-    def apply_selector(self, sel) -> "tuple[float, bool, bool, bool, bool, bool, list[str]]":
-        """Returns (score, watchable, verified, elite, hft, sports_bot, fail_reasons)."""
+    def apply_selector(self, sel) -> "tuple[float, WalletTier, bool, bool, list[str]]":
+        """Returns (score, status, hft, sports_bot, fail_reasons)."""
         from titan_selector import PerformanceSelector
         if sel is not None:
             score = sel.score(self)
-            watchable, verified, elite, fail_reasons = sel.is_selected(self, score)
+            status, fail_reasons = sel.is_selected(self, score)
             hft        = sel.is_hft(self.trades_per_hour, self.avg_bet, self.n_resolved) if isinstance(sel, PerformanceSelector) else False
             sports_bot = sel.is_sports_bot(self.name, self.trades_per_hour) if isinstance(sel, PerformanceSelector) else False
         else:
@@ -226,12 +246,14 @@ class Wallet:
                 0.10 * min(1.0, max(0, self.avg_profit) / 50)
             )
             fail_reasons = []
-            watchable    = self.win_rate >= 0.53 and wb >= 0.45 and self.n_resolved >= 10 and self.total_pnl >= 0
-            verified     = watchable and self.win_rate >= 0.56 and wb >= 0.49
-            elite        = False
-            hft          = C.HFT_ENABLED and self.trades_per_hour >= HFT_MIN_TRADES_PER_HOUR
-            sports_bot   = False
-        return score, watchable, verified, elite, hft, sports_bot, fail_reasons
+            watchable_ok = self.win_rate >= 0.53 and wb >= 0.45 and self.n_resolved >= 10 and self.total_pnl >= 0
+            verified_ok  = watchable_ok and self.win_rate >= 0.56 and wb >= 0.49
+            if verified_ok:   status = WalletTier.VERIFIED
+            elif watchable_ok: status = WalletTier.WATCH
+            else:              status = WalletTier.REJECTED
+            hft        = C.HFT_ENABLED and self.trades_per_hour >= HFT_MIN_TRADES_PER_HOUR
+            sports_bot = False
+        return score, status, hft, sports_bot, fail_reasons
 
     def to_wire(self) -> dict[str, Any]:
         """Produce the API wire dict (TrackedWalletDict shape). Only call at JSON boundary."""
@@ -258,9 +280,10 @@ class Wallet:
             "avg_profit":           self.avg_profit,
             "avg_bet":              self.avg_bet,
             "trades_per_hour":      self.trades_per_hour,
-            "verified":             self.verified,
-            "watchable":            self.watchable,
-            "elite":                self.elite,
+            "status":               int(self.status),
+            "verified":             self.is_verified,
+            "watchable":            self.is_watchable,
+            "elite":                self.is_elite,
             "hft":                  self.hft,
             "vip":                  self.vip,
             "sports_bot":           self.sports_bot,
@@ -306,9 +329,7 @@ class Wallet:
             avg_profit=float(d.get("avg_profit") or 0.0),
             avg_bet=float(d.get("avg_bet") or 0.0),
             trades_per_hour=float(d.get("trades_per_hour") or 0.0),
-            verified=bool(d.get("verified") or False),
-            watchable=bool(d.get("watchable") or False),
-            elite=bool(d.get("elite") or False),
+            status=_status_from_dict(d),
             hft=bool(d.get("hft") or False),
             vip=bool(d.get("vip") or False),
             sports_bot=bool(d.get("sports_bot") or False),
@@ -323,7 +344,7 @@ class Wallet:
         )
 
     @classmethod
-    def make_stub(cls, addr: str, detail: str, *, watchable: bool = True) -> "Wallet":
+    def make_stub(cls, addr: str, detail: str, *, status: WalletTier = WalletTier.WATCH) -> "Wallet":
         is_vip = addr.lower() in {a.lower() for a in C.VIP_WALLETS}
         return cls(
             addr=addr,
@@ -348,9 +369,7 @@ class Wallet:
             avg_profit=0.0,
             avg_bet=0.0,
             trades_per_hour=0.0,
-            verified=False,
-            watchable=watchable,
-            elite=False,
+            status=status,
             hft=False,
             vip=is_vip,
             sports_bot=False,
@@ -875,7 +894,7 @@ def get_compute_and_store_wallet(wallet: str) -> Wallet:
             cached.ts = now_t - WALLET_TTL + 60
             S.env().wallet_cache[wallet] = cached
             return cached
-        null = Wallet.make_stub(wallet, "No data", watchable=False)
+        null = Wallet.make_stub(wallet, "No data", status=WalletTier.ERROR)
         null.ts   = now_t
         null.name = keep_name or (wallet[:10] + "…")
         null.vip  = is_vip
@@ -942,7 +961,7 @@ def get_compute_and_store_wallet(wallet: str) -> Wallet:
         score=0.0, win_rate=wr, wilson_lb=wb, alpha_per_trade=0.0, wr_source=wr_src,
         n_resolved=n_res, n_pos=n_pos, total_value=cur, total_pnl=pnl, pnl_pct=pct,
         avg_pos_size=avg_sz, avg_profit=avg_profit, avg_bet=avg_bet, trades_per_hour=round(tph, 2),
-        verified=False, watchable=False, elite=False, hft=False, vip=is_vip, sports_bot=False, dead=False,
+        status=WalletTier.REJECTED, hft=False, vip=is_vip, sports_bot=False, dead=False,
         recent_pnl_30d=round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
         recent_pnl_7d=round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
         recent_ts=now_t, lb_rank=lb_rank, lb_vol=lb_vol, detail="", fail_reasons=[],
@@ -953,14 +972,14 @@ def get_compute_and_store_wallet(wallet: str) -> Wallet:
 
     _changed = cached is None or any(
         getattr(result, k) != getattr(cached, k)
-        for k in ("elite", "verified", "watchable", "score", "win_rate", "wilson_lb",
+        for k in ("status", "score", "win_rate", "wilson_lb",
                   "total_pnl", "name", "hft", "vip", "sports_bot", "dead", "recent_pnl_30d", "recent_pnl_7d",
                   "loaded_trade_count", "trade_load_limited", "first_loaded_trade_ts", "last_loaded_trade_ts", "ts")
     )
     S.env().wallet_cache[wallet] = result
-    if result.watchable and _changed:
+    if result.is_watchable and _changed:
         DB.upsert_wallet_profile(wallet, result.to_db_dict())
-    elif not result.watchable and cached is not None and cached.watchable:
+    elif not result.is_watchable and cached is not None and cached.is_watchable:
         DB.clear_wallet_profile(wallet)
     return result
 
@@ -1004,10 +1023,10 @@ class WalletsCache:
     # ── queries ───────────────────────────────────────────────────────────────
 
     def get_elite(self) -> list[str]:
-        return [addr for addr, w in self._data.items() if w.elite]
+        return [addr for addr, w in self._data.items() if w.is_elite]
 
     def get_watchlist(self) -> list[str]:
-        return [addr for addr, w in self._data.items() if w.watchable]
+        return [addr for addr, w in self._data.items() if w.is_watchable]
 
     def ingest(self, addr: str, wallet: Wallet) -> None:
         """Store a wallet from wire data. Client-side entry point — no DB write."""
@@ -1041,9 +1060,9 @@ class WalletsCacheSrv(WalletsCache):
                 updated += 1
 
             self._data[addr] = result
-            if result.watchable:
+            if result.is_watchable:
                 DB.upsert_wallet_profile(addr, result.to_db_dict())
-            elif not result.watchable and w.watchable:
+            elif not result.is_watchable and w.is_watchable:
                 DB.clear_wallet_profile(addr)
 
         S.log_important(f"🎯 reclassify_all done: {updated} wallet(s) changed out of {len(self._data)}")
@@ -1055,7 +1074,7 @@ class WalletsCacheSrv(WalletsCache):
         stale_threshold = now_t - 6 * 3600
         refreshed = 0
         for addr, profile in list(self._data.items()):
-            if not profile.verified:
+            if not profile.is_verified:
                 continue
             if profile.recent_ts >= stale_threshold:
                 continue
@@ -1105,7 +1124,7 @@ def discover_new_wallets() -> None:
     discovered = 0
     for w in list(new_cands)[:25]:
         prof = get_compute_and_store_wallet(w)
-        if prof.verified:
+        if prof.is_verified:
             discovered += 1
             tag = prof.tag()
             S._log(
@@ -1119,11 +1138,12 @@ def discover_new_wallets() -> None:
     wl = S.get_watchlist()
     if len(wl) > MAX_WATCHLIST_SIZE:
         import titan_db as DB
-        verified_set = {w for w in wl if (p := S.env().wallet_cache.get(w)) and p.verified}
+        verified_set = {w for w in wl if (p := S.env().wallet_cache.get(w)) and p.is_verified}
         unverified   = [w for w in wl if w not in verified_set]
         keep_unver   = max(0, MAX_WATCHLIST_SIZE - len(verified_set))
         for w in unverified[keep_unver:]:
-            S.env().wallet_cache[w].watchable = False
+            from dataclasses import replace as _r
+            S.env().wallet_cache[w] = _r(S.env().wallet_cache[w], status=WalletTier.REJECTED)
             DB.set_watchable(w, False)
         S._log(f"🧹 Watchlist pruned to {MAX_WATCHLIST_SIZE} ({len(unverified[keep_unver:])} toggled off)", "DATA")
 
@@ -1156,9 +1176,9 @@ def scan_top_market_holders() -> None:
         added = 0
         for w in list(new_cands)[:20]:
             prof = get_compute_and_store_wallet(w)
-            if prof.watchable:
+            if prof.is_watchable:
                 added += 1
-                if prof.verified:
+                if prof.is_verified:
                     tag = prof.tag()
                     S._log(f"🆕 {tag} from market scan: {w[:14]}…", "INFO")
             time.sleep(0.12)
