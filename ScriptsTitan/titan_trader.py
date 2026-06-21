@@ -395,7 +395,8 @@ def auto_trade(signals: list[Signal], wallet_exits: dict) -> list[tuple[str, str
             pos.cur_price = cur
             pos.cur_price_ts = fetched_ts
 
-        pos.price_history.append((now_t, cur))
+        from titan_position import _append_price_point
+        _append_price_point(pos.price_history, now_t, cur)
         if len(pos.price_history) > 1440:
             del pos.price_history[:-1440]
         PRICES.add_point(pos.asset, now_t, cur)

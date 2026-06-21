@@ -136,6 +136,7 @@ def init_db(db_path: str) -> None:
         _migrate_add_columns(cx)
         _migrate_price_history_table(cx)
         scanned_rows, updated_rows = _migrate_strip_signal_embedded_market_data(cx)
+        deleted = _compact_price_history(cx)
     if updated_rows:
         cleanup_line = f"Signal cleanup: scanned={scanned_rows} updated={updated_rows}"
         try:
@@ -267,6 +268,24 @@ def _migrate_add_columns(cx: sqlite3.Connection) -> None:
             WHERE price IS NULL
             """
         )
+
+
+def _compact_price_history(cx: sqlite3.Connection) -> int:
+    """Delete middle points of price plateaux — keep only first and last ts per contiguous run."""
+    cur = cx.execute("""
+        DELETE FROM price_history
+        WHERE (asset, ts) IN (
+            SELECT asset, ts FROM (
+                SELECT asset, ts,
+                    LAG(price)  OVER (PARTITION BY asset ORDER BY ts) AS prev_price,
+                    LEAD(price) OVER (PARTITION BY asset ORDER BY ts) AS next_price,
+                    price
+                FROM price_history
+            )
+            WHERE prev_price = price AND next_price = price
+        )
+    """)
+    return cur.rowcount
 
 
 def _price_history_uses_asset_key(cx: sqlite3.Connection) -> bool:
@@ -588,6 +607,7 @@ def save_signals(signals: list["Signal"], ts: float) -> None:
             continue
         rows.append((now, now, json.dumps(sanitized, default=str), signal.cid))
     with _connect() as cx:
+        cx.execute("UPDATE signals SET live = 0 WHERE live = 1")
         cx.executemany("INSERT INTO signals (recorded_at, ts, data, live, cid) VALUES (?, ?, ?, 1, ?)", rows)
 
 

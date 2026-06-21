@@ -14,6 +14,19 @@ if TYPE_CHECKING:
     from titan_trade import TradeRecord
 
 
+def _append_price_point(history: list[tuple[float, float]], ts: float, price: float) -> None:
+    """Append (ts, price) keeping only first+last of each plateau to avoid redundant runs."""
+    if not history:
+        history.append((ts, price))
+        return
+    if history[-1][1] == price:
+        # Same value — slide the end-of-plateau marker forward
+        history[-1] = (ts, price)
+        return
+    # Price changed — always append the new point
+    history.append((ts, price))
+
+
 def _trade_to_dict(trade: "TradeRecord | None") -> "dict | None":
     if trade is None:
         return None

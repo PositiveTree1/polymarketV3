@@ -113,8 +113,8 @@ class TitanClient:
         except (json.JSONDecodeError, TypeError):
             return text_value
 
-    def _post(self, body: dict) -> dict:
-        self._ready.wait(timeout=6)
+    def _post(self, body: dict, timeout: float = 8.0) -> dict:
+        self._ready.wait(timeout=4)
         data = json.dumps(body).encode()
         req = urllib.request.Request(
             f"{self._base_url}/mcp",
@@ -123,7 +123,7 @@ class TitanClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 if not self._sid:
                     self._sid = resp.headers.get("MCP-Session-Id")
                 payload = json.loads(resp.read())
@@ -227,6 +227,7 @@ class TitanClient:
 
     def _start_sse(self) -> None:
         self._sse_running = True
+        self._sse_conn = None
         self._sse_thread = threading.Thread(target=self._sse_loop, daemon=True, name="titan-sse")
         self._sse_thread.start()
 
@@ -250,12 +251,16 @@ class TitanClient:
         if not host:
             raise RuntimeError("Invalid MCP URL, missing hostname")
         
-        conn = http.client.HTTPConnection(host, port, timeout=None)
+        conn = http.client.HTTPConnection(host, port, timeout=30)
+        self._sse_conn = conn
         try:
             conn.request("GET", parsed.path or "/mcp", headers=headers)
             resp = conn.getresponse()
             if resp.status != 200:
                 raise RuntimeError(f"SSE HTTP {resp.status}")
+            # Switch to no timeout for long-lived SSE reads — connect already succeeded
+            if conn.sock:
+                conn.sock.settimeout(None)
             _log(f"SSE stream connected ({self._base_url})")
             buf = ""
             while self._sse_running:
@@ -278,6 +283,7 @@ class TitanClient:
                         pass
                     buf = ""
         finally:
+            self._sse_conn = None
             conn.close()
 
     _LOGGABLE_EVENTS  = {"titan/position_open", "titan/position_close", "titan/cycle_complete"}
@@ -303,6 +309,11 @@ class TitanClient:
 
     def stop(self) -> None:
         self._sse_running = False
+        if self._sse_conn is not None:
+            try:
+                self._sse_conn.close()
+            except Exception:
+                pass
 
     def status(self) -> dict:
         return self._call_tool("status")  # type: ignore[return-value]

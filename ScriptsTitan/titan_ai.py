@@ -14,7 +14,7 @@ from titan_protocol import TitanBackend
 # ── ai config (persisted) ─────────────────────────────────────────────────────
 _AI_CONFIG_PATH = Path(__file__).parent.parent / "titan_ai_config.json"
 
-_DEFAULT_LOCAL_MODELS = ["qwen/qwen3.6-35b-a3b", "gemma@q4_k_xl", "gemma@q8_0", "gemma@q5_k_m"]
+_DEFAULT_LOCAL_MODELS = ["qwen/qwen3.6-35b-a3b", "qwen3.6-27b-pure-with-mtp","gemma@q4_k_xl", "gemma@q8_0", "gemma@q5_k_m", "gpt-oss-20b"]
 
 def _load_ai_config() -> dict:
     if _AI_CONFIG_PATH.exists():
@@ -33,7 +33,7 @@ def _save_ai_config(cfg: dict) -> None:
 _ai_config = _load_ai_config()
 
 # ── backends ──────────────────────────────────────────────────────────────────
-ACTIVE_BACKEND = "local"   # "ollama" | "groq" | "openai" | "gemini" | "local"
+ACTIVE_BACKEND = "llamacpp"   # "ollama" | "groq" | "openai" | "gemini" | "local" | "llamacpp"
 
 BACKENDS: dict[str, dict] = {
     "groq": {
@@ -64,6 +64,12 @@ BACKENDS: dict[str, dict] = {
         "base_url": "http://localhost:11434/api/chat",
         "model":    "gemma4:e4b",
     },
+    "llamacpp": {
+        "type":     "openai_compat",
+        "base_url": "http://localhost:8090/v1",
+        "api_key":  "not-needed",
+        "model":    "qwen3.6-27b-IQ4_XS-pure-with-MTP",
+    },
 }
 
 _backend    = BACKENDS[ACTIVE_BACKEND]
@@ -72,55 +78,146 @@ MODEL       = _backend["model"]
 TITAN_MCP_URL = os.environ.get("TITAN_MCP_URL", "http://127.0.0.1:8765")
 TOOL_LOOP_MAX_STEPS = 6
 
+REASONING_LEVELS: dict[str, float] = {
+    "off":  0.0,
+    "low":  0.3,
+    "med":  0.6,
+    "high": 0.8,
+    "max":  1.0,
+}
+_reasoning_effort: float = 0.0
+
+# ── llama.cpp slot KV-cache manager ──────────────────────────────────────────
+
+_LLAMACPP_SLOT_CACHE_FILE = "titan_base.bin"
+_LLAMACPP_DOCS_ROOT = Path(__file__).parent.parent / "docs"
+
+def _load_titan_docs() -> str:
+    parts: list[str] = []
+    priority = ["TITAN_AI_GUIDE.md", "TITAN_CONTEXT.md", "TITAN_STRATEGIES.md"]
+    loaded: set[str] = set()
+    for name in priority:
+        p = _LLAMACPP_DOCS_ROOT / name
+        if p.exists():
+            parts.append(f"=== {name} ===\n{p.read_text(encoding='utf-8', errors='ignore')}")
+            loaded.add(name)
+    for p in sorted(_LLAMACPP_DOCS_ROOT.glob("*.md")):
+        if p.name not in loaded:
+            parts.append(f"=== {p.name} ===\n{p.read_text(encoding='utf-8', errors='ignore')}")
+    return "\n\n".join(parts)
+
+
+class LlamaCppSlotCache:
+    def __init__(self, base_url: str, slot_id: int = 0, cache_file: str = _LLAMACPP_SLOT_CACHE_FILE):
+        self._base_url   = base_url.rstrip("/")
+        self._slot_id    = slot_id
+        self._cache_file = cache_file
+        self._warmed     = False
+        self._lock       = threading.Lock()
+
+    def _slot_action(self, action: str) -> bool:
+        url = f"{self._base_url.replace('/v1', '')}/slots/{self._slot_id}?action={action}"
+        try:
+            resp = requests.post(url, json={"filename": self._cache_file}, timeout=30)
+            return resp.status_code == 200
+        except Exception as e:
+            _log(f"Slot {action} failed: {e}", "ERR")
+            return False
+
+    def _do_warmup(self) -> bool:
+        warmup_messages = list(_FIXED_PREFIX)  # must be identical to prefix used in every real request
+        url = f"{self._base_url}/chat/completions"
+        payload = {
+            "model": BACKENDS["llamacpp"]["model"],
+            "messages": warmup_messages,
+            "stream": False,
+            "temperature": 0,
+            "max_tokens": 1,
+            "id_slot": self._slot_id,
+        }
+        try:
+            resp = requests.post(url, json=payload, timeout=300)
+            return resp.status_code == 200
+        except Exception as e:
+            _log(f"Slot warmup failed: {e}", "ERR")
+            return False
+
+    def ensure_warm(self) -> bool:
+        with self._lock:
+            if self._warmed:
+                return True
+            _log("LlamaCpp: warming up slot cache with Titan docs…", "INF")
+            if not self._do_warmup():
+                _log("LlamaCpp: warmup request failed", "ERR")
+                return False
+            if self._slot_action("save"):
+                _log(f"LlamaCpp: slot cache saved → {self._cache_file}", "INF")
+                self._warmed = True
+                return True
+            _log("LlamaCpp: slot save failed", "ERR")
+            return False
+
+    def restore(self) -> bool:
+        return self._slot_action("restore")
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._warmed = False
+
+
+_llamacpp_slot_cache: LlamaCppSlotCache | None = None
+
+def _get_llamacpp_slot_cache() -> LlamaCppSlotCache:
+    global _llamacpp_slot_cache
+    if _llamacpp_slot_cache is None:
+        _llamacpp_slot_cache = LlamaCppSlotCache(BACKENDS["llamacpp"]["base_url"])
+    return _llamacpp_slot_cache
+
 # ── design tokens ─────────────────────────────────────────────────────────────
 BG_DARK  = "#080810"; BG_MID   = "#0d0d1a"; BG_LIGHT  = "#13132a"
 BG_INPUT = "#060612"; FG_MAIN  = "#cccccc"; FG_ACCENT = "#00ff88"
 FG_USER  = "#00aaff"; FG_AI    = "#ccffee"; FG_SYS    = "#556655"
 FG_WARN  = "#ffaa00"; FG_ERR   = "#ff4444"; BORDER    = "#1a2a4a"
 
-SYSTEM_PROMPT = """\
+SYSTEM_PROMPT_STATIC = """\
 You are TITAN AI, a quantitative trading analyst for the TITAN Polymarket paper-trading engine.
-Parse the [LIVE SYSTEM SNAPSHOT] carefully. Answer questions about positions, P&L,
-signals, and wallets. Be concise, sharp, and data-first. Under 400 words.
+Be concise, sharp, and data-first. Under 400 words.
 
-You have access to a live TITAN MCP server. Always prefer calling MCP tools for fresh
-data rather than relying on the snapshot alone. The full list of available tools is
-appended below — use it to answer questions accurately.
-
-When asked about a specific wallet by name, always call get_tracked_wallets(search="name")
-rather than loading the full roster — it filters server-side and returns instantly.
-
-A knowledge base of documentation is available via two tools:
-  get_docs()         — lists all available docs with descriptions
-  read_doc(path)     — returns the full content of a doc
-
-At the start of every session, call read_doc("TITAN_AI_GUIDE.md") to load the
-entry point. It contains the architecture overview, signal tiers, known loss
-patterns, and links to all other docs. Then call the specific config or strategy
-doc before proposing any parameter change.
+Rules:
+- Always prefer MCP tools for fresh data. The snapshot in each user message is a compact summary — use tools for detail.
+- For a specific wallet call get_tracked_wallets(search="<name or address>").
+- For documentation call get_docs() to list files, then read_doc(path) to read one.
+- The snapshot is prepended to every user message as [SNAPSHOT]…[QUESTION]. Do not mention the snapshot structure to the user.\
 """
 
+_SYSTEM_PROMPT_MCP: str = ""   # frozen once after MCP tools are loaded
+_FIXED_PREFIX: list[dict] = []  # frozen prefix sent first on every request; llamacpp saves this as a KV-cache slot
 
-def _save_ai_request_snapshot(messages: list[dict]) -> None:
-    log_dir = "Logs"
-    os.makedirs(log_dir, exist_ok=True)
-    fname = os.path.join(log_dir, f"titan_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
-    lines = [
-        f"TIMESTAMP: {datetime.now().isoformat(timespec='seconds')}",
-        f"BACKEND: {ACTIVE_BACKEND}",
-        f"MODEL: {MODEL}",
-        "",
-        "[OUTBOUND AI MESSAGES]",
-        "",
+
+def _build_frozen_system_prompt(tool_names: str) -> str:
+    return SYSTEM_PROMPT_STATIC + f"\n\nMCP TOOLS: {tool_names}"
+
+
+def _build_fixed_prefix(system_prompt: str) -> list[dict]:
+    docs = _load_titan_docs()
+    return [
+        {"role": "system",    "content": system_prompt},
+        {"role": "user",      "content": f"[TITAN KNOWLEDGE BASE — read and index this for the session]\n\n{docs}"},
+        {"role": "assistant", "content": "Knowledge base loaded. Ready for questions."},
     ]
-    for i, msg in enumerate(messages, start=1):
-        role = str(msg.get("role", "")).upper()
-        content = str(msg.get("content", ""))
-        lines.append(f"--- MESSAGE {i} [{role}] ---")
-        lines.append(content)
-        lines.append("")
-    with open(fname, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines).rstrip() + "\n")
+
+
+def _save_ai_request_log(payload: dict, log_path: str) -> None:
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+    except Exception as e:
+        _log(f"AI request log save failed: {e}", "ERR")
+
+
+def _make_log_path() -> str:
+    os.makedirs("Logs", exist_ok=True)
+    return os.path.join("Logs", f"titan_ai_request_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
 
 
 def _json_dump(value) -> str:
@@ -170,10 +267,14 @@ class TitanMCPBridge:
 
 # ── unified ask function ──────────────────────────────────────────────────────
 
-def _ask_openai_compat(messages: list[dict], on_token, on_done, on_error) -> None:
+def _ask_openai_compat(messages: list[dict], on_token, on_done, on_error, log_path: str = "") -> None:
     url     = _backend["base_url"].rstrip("/") + "/chat/completions"
     headers = {"Authorization": f"Bearer {_backend['api_key']}", "Content-Type": "application/json"}
     payload = {"model": MODEL, "messages": messages, "stream": True, "temperature": 0.2}
+    if _reasoning_effort > 0.0:
+        payload["reasoning_effort"] = _reasoning_effort
+    if log_path:
+        _save_ai_request_log(payload, log_path)
     try:
         resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=120)
         if resp.status_code != 200:
@@ -185,7 +286,8 @@ def _ask_openai_compat(messages: list[dict], on_token, on_done, on_error) -> Non
                 continue
             raw = line.decode("utf-8").removeprefix("data: ")
             try:
-                tok = json.loads(raw)["choices"][0]["delta"].get("content", "")
+                delta = json.loads(raw)["choices"][0]["delta"]
+                tok = delta.get("content", "")
                 if tok:
                     full += tok
                     on_token(tok)
@@ -196,13 +298,17 @@ def _ask_openai_compat(messages: list[dict], on_token, on_done, on_error) -> Non
         on_error(str(e))
 
 
-def _openai_chat_once(messages: list[dict], tools: list[dict] | None = None) -> dict:
+def _openai_chat_once(messages: list[dict], tools: list[dict] | None = None, log_path: str = "") -> dict:
     url = _backend["base_url"].rstrip("/") + "/chat/completions"
     headers = {"Authorization": f"Bearer {_backend['api_key']}", "Content-Type": "application/json"}
     payload = {"model": MODEL, "messages": messages, "stream": False, "temperature": 0.2}
+    if _reasoning_effort > 0.0:
+        payload["reasoning_effort"] = _reasoning_effort
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    if log_path:
+        _save_ai_request_log(payload, log_path)
     resp = requests.post(url, headers=headers, json=payload, timeout=120)
     if resp.status_code != 200:
         raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:400]}")
@@ -213,17 +319,19 @@ def _openai_chat_once(messages: list[dict], tools: list[dict] | None = None) -> 
     return choices[0].get("message") or {}
 
 
-def _ollama_chat_once(messages: list[dict], tools: list[dict] | None = None) -> dict:
+def _ollama_chat_once(messages: list[dict], tools: list[dict] | None = None, log_path: str = "") -> dict:
     payload = {
         "model": MODEL,
         "messages": messages,
         "stream": False,
-        "think": False,
+        "think": _reasoning_effort > 0.0,
         "keep_alive": -1,
         "options": {"num_ctx": 8192, "temperature": 0.2, "top_k": 20, "num_predict": 1024},
     }
     if tools:
         payload["tools"] = tools
+    if log_path:
+        _save_ai_request_log(payload, log_path)
     resp = requests.post(_backend["base_url"], json=payload, timeout=120)
     if resp.status_code != 200:
         raise RuntimeError(f"Ollama HTTP {resp.status_code}: {resp.text[:400]}")
@@ -302,7 +410,7 @@ def _append_ollama_tool_roundtrip(messages: list[dict], assistant_msg: dict, too
         })
 
 
-def _dispatch_with_titan_tools(messages: list[dict], bridge: TitanMCPBridge, on_token, on_done, on_error, on_tool_call=None) -> bool:
+def _dispatch_with_titan_tools(messages: list[dict], bridge: TitanMCPBridge, on_token, on_done, on_error, on_tool_call=None, log_path: str = "") -> bool:
     if _btype not in {"openai_compat", "ollama"}:
         return False
 
@@ -313,15 +421,18 @@ def _dispatch_with_titan_tools(messages: list[dict], bridge: TitanMCPBridge, on_
             raise RuntimeError("No read-only Titan MCP tools are available")
 
         final_text = ""
+        first = True
         for _ in range(TOOL_LOOP_MAX_STEPS):
+            lp = log_path if first else ""
+            first = False
             if _btype == "ollama":
-                assistant_msg = _ollama_chat_once(tool_messages, tools)
+                assistant_msg = _ollama_chat_once(tool_messages, tools, log_path=lp)
                 tool_calls = _message_tool_calls(assistant_msg)
                 if tool_calls:
                     _append_ollama_tool_roundtrip(tool_messages, assistant_msg, tool_calls, bridge, on_tool_call)
                     continue
             else:
-                assistant_msg = _openai_chat_once(tool_messages, tools)
+                assistant_msg = _openai_chat_once(tool_messages, tools, log_path=lp)
                 tool_calls = _message_tool_calls(assistant_msg)
                 if tool_calls:
                     _append_openai_tool_roundtrip(tool_messages, assistant_msg, tool_calls, bridge, on_tool_call)
@@ -378,13 +489,15 @@ def _ask_gemini(messages: list[dict], on_token, on_done, on_error) -> None:
         on_error(str(e))
 
 
-def _ask_ollama(messages: list[dict], on_token, on_done, on_error) -> None:
+def _ask_ollama(messages: list[dict], on_token, on_done, on_error, log_path: str = "") -> None:
     url     = _backend["base_url"]
     payload = {
         "model": MODEL, "messages": messages, "stream": True,
-        "think": False, "keep_alive": -1,
+        "think": _reasoning_effort > 0.0, "keep_alive": -1,
         "options": {"num_ctx": 8192, "temperature": 0.2, "top_k": 20, "num_predict": 1024},
     }
+    if log_path:
+        _save_ai_request_log(payload, log_path)
     try:
         resp = requests.post(url, json=payload, stream=True, timeout=120)
         if resp.status_code != 200:
@@ -411,13 +524,119 @@ def _ask_ollama(messages: list[dict], on_token, on_done, on_error) -> None:
         on_error(str(e))
 
 
-def _dispatch(messages: list[dict], on_token, on_done, on_error) -> None:
+def _dispatch(messages: list[dict], on_token, on_done, on_error, log_path: str = "") -> None:
     if _btype == "ollama":
-        _ask_ollama(messages, on_token, on_done, on_error)
+        _ask_ollama(messages, on_token, on_done, on_error, log_path=log_path)
     elif _btype == "gemini":
         _ask_gemini(messages, on_token, on_done, on_error)
     else:
-        _ask_openai_compat(messages, on_token, on_done, on_error)
+        _ask_openai_compat(messages, on_token, on_done, on_error, log_path=log_path)
+
+
+# ── snapshot trimmer ─────────────────────────────────────────────────────────
+
+def _trim_snapshot(snapshot: str) -> str:
+    import re
+    sections: dict[str, list[str]] = {}
+    current = ""
+    for line in snapshot.splitlines():
+        m = re.match(r"^\[([A-Z][A-Z /()0-9]*)\]", line)
+        if m and not line.strip().startswith("[BUY") and not line.strip().startswith("[WIN") and not line.strip().startswith("[LOSS"):
+            current = m.group(1)
+            sections.setdefault(current, [])
+        else:
+            sections.setdefault(current, []).append(line)
+
+    parts: list[str] = []
+
+    # ACCOUNT — keep as-is
+    if "" in sections:
+        parts.extend(sections[""])
+    for key in ("ACCOUNT",):
+        if key in sections:
+            parts.append(f"[{key}]")
+            parts.extend(sections[key])
+
+    # OPEN POSITIONS — keep all
+    if "OPEN POSITIONS" in sections:
+        parts.append("[OPEN POSITIONS]")
+        parts.extend(sections["OPEN POSITIONS"])
+
+    # SIGNALS — deduplicate by market+outcome, keep top 20 by score, ALERT+ only
+    if "SIGNALS" in sections:
+        sig_lines = [l for l in sections["SIGNALS"] if l.strip().startswith("#")]
+        seen: set[str] = set()
+        kept: list[str] = []
+        for line in sig_lines:
+            m = re.search(r"\[(CONVICTION|ALERT|STRONG|HFT)\|(\d+)\](.+?)(?:Price=|$)", line)
+            if not m:
+                continue
+            tier, score, rest = m.group(1), int(m.group(2)), m.group(3).strip()
+            if tier not in ("CONVICTION", "ALERT"):
+                continue
+            key = re.sub(r"\s+", " ", rest[:60])
+            if key in seen:
+                continue
+            seen.add(key)
+            kept.append((score, line))
+        kept.sort(key=lambda x: x[0], reverse=True)
+        parts.append(f"[SIGNALS (top {min(20, len(kept))} unique ALERT+)]")
+        for _, line in kept[:20]:
+            parts.append(line)
+
+    # REJECTIONS — top 10 only, no detail
+    if "REJECTIONS" in sections:
+        rej_lines = [l for l in sections["REJECTIONS"] if l.strip() and not l.strip().startswith("↳")]
+        parts.append(f"[REJECTIONS (top 10 of {len(rej_lines)})]")
+        parts.extend(rej_lines[:10])
+
+    # ELITE ROSTER — keep as-is
+    if "ELITE ROSTER" in sections:
+        parts.append(f"[ELITE ROSTER]")
+        parts.extend(sections["ELITE ROSTER"])
+
+    # TRADE HISTORY — drop entirely (use get_trade_history MCP tool if needed)
+
+    return "\n".join(parts)
+
+
+# ── conversation persistence ───────────────────────────────────────────────────
+
+_CONV_DIR = Path(__file__).parent.parent / "ai_conversations"
+
+
+class ConversationStore:
+    def __init__(self, directory: Path = _CONV_DIR):
+        self._dir = directory
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, conv_id: str) -> Path:
+        return self._dir / f"{conv_id}.json"
+
+    def new_id(self) -> str:
+        return datetime.now().strftime("conv_%Y%m%d_%H%M%S")
+
+    def save(self, conv_id: str, title: str, messages: list[dict]) -> None:
+        data = {"id": conv_id, "title": title, "messages": messages}
+        try:
+            self._path(conv_id).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            _log(f"Conversation save failed: {e}", "ERR")
+
+    def load(self, conv_id: str) -> tuple[str, list[dict]]:
+        data = json.loads(self._path(conv_id).read_text(encoding="utf-8"))
+        return data["title"], data.get("messages", [])
+
+    def list_conversations(self) -> list[tuple[str, str]]:
+        """Returns [(conv_id, title), ...] newest first."""
+        result: list[tuple[str, str]] = []
+        for p in sorted(self._dir.glob("conv_*.json"), reverse=True):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                result.append((data["id"], data["title"]))
+            except Exception:
+                continue
+        return result
 
 
 # ── AI client ─────────────────────────────────────────────────────────────────
@@ -425,70 +644,107 @@ def _dispatch(messages: list[dict], on_token, on_done, on_error) -> None:
 class TitanAIClient:
     def __init__(self, engine_module: TitanBackend | None = None):
         self._engine: TitanBackend | None = engine_module
-        self._messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
         self._lock = threading.Lock()
         self._mcp = TitanMCPBridge()
+        self._store = ConversationStore()
+        self._conv_id: str = self._store.new_id()
+        self._title: str = self._conv_id
+        self._messages: list[dict] = []
 
-    def _build_system_prompt(self) -> str:
+    @property
+    def conv_id(self) -> str:
+        return self._conv_id
+
+    @property
+    def title(self) -> str:
+        return self._title
+
+    def _ensure_system_prompt(self) -> str:
+        global _SYSTEM_PROMPT_MCP, _FIXED_PREFIX
+        if _SYSTEM_PROMPT_MCP:
+            return _SYSTEM_PROMPT_MCP
         try:
             tools = self._mcp.available_tools()
-            tool_lines = "\n".join(
-                f"  {t['name']}: {t.get('description', '').splitlines()[0]}"
-                for t in tools
-            )
-            tool_section = f"\nAVAILABLE MCP TOOLS ({len(tools)}):\n{tool_lines}\n"
+            names = ", ".join(t["name"] for t in tools)
+            _SYSTEM_PROMPT_MCP = _build_frozen_system_prompt(names)
         except Exception as exc:
-            tool_section = f"\n(MCP tool list unavailable: {exc})\n"
-        return SYSTEM_PROMPT + tool_section
+            _SYSTEM_PROMPT_MCP = _build_frozen_system_prompt(f"(MCP unavailable: {exc})")
+        _FIXED_PREFIX = _build_fixed_prefix(_SYSTEM_PROMPT_MCP)
+        return _SYSTEM_PROMPT_MCP
 
     def _build_request_messages(self, full_msg: str) -> list[dict]:
-        history: list[dict] = []
-        for message in self._messages:
-            if message.get("role") == "system":
-                continue
-            history.append(dict(message))
-        return [{"role": "system", "content": self._build_system_prompt()}, *history, {"role": "user", "content": full_msg}]
+        self._ensure_system_prompt()
+        history = [dict(m) for m in self._messages]
+        if _FIXED_PREFIX:
+            return [*_FIXED_PREFIX, *history, {"role": "user", "content": full_msg}]
+        return [{"role": "system", "content": _SYSTEM_PROMPT_MCP}, *history, {"role": "user", "content": full_msg}]
 
+    def _save(self) -> None:
+        self._store.save(self._conv_id, self._title, list(self._messages))
+
+    def new_conversation(self) -> str:
+        with self._lock:
+            self._conv_id = self._store.new_id()
+            self._title = self._conv_id
+            self._messages = []
+        return self._conv_id
+
+    def load_conversation(self, conv_id: str) -> list[dict]:
+        title, messages = self._store.load(conv_id)
+        with self._lock:
+            self._conv_id = conv_id
+            self._title = title
+            self._messages = list(messages)
+        return list(messages)
+
+    def list_conversations(self) -> list[tuple[str, str]]:
+        return self._store.list_conversations()
 
     def ask(self, user_msg: str, on_token, on_done, on_error, on_tool_call=None) -> None:
         snapshot = ""
         if self._engine is not None:
             try:
-                snapshot = self._engine.get_snapshot(compressed=True)
+                snapshot = _trim_snapshot(self._engine.get_snapshot(compressed=True))
             except Exception as exc:
                 snapshot = f"(snapshot error: {exc})"
 
-        full_msg = f"[LIVE SYSTEM SNAPSHOT]\n{snapshot}\n\n[USER QUESTION]\n{user_msg}"
+        full_msg = f"[SNAPSHOT]\n{snapshot}\n\n[QUESTION]\n{user_msg}"
 
         with self._lock:
-            if len(self._messages) > 21:
-                self._messages = [self._messages[0]] + self._messages[-10:]
-            snapshot_messages = self._build_request_messages(full_msg)
+            if len(self._messages) > 20:
+                self._messages = self._messages[-10:]
+            # auto-title: first user message (truncated)
+            if not self._messages:
+                self._title = user_msg[:60].replace("\n", " ")
+            request_messages = self._build_request_messages(full_msg)
+
+        log_path = _make_log_path()
 
         def _run():
-            try:
-                _save_ai_request_snapshot(snapshot_messages)
-            except Exception as e:
-                _log(f"AI snapshot save failed: {e}", "ERR")
+            if ACTIVE_BACKEND == "llamacpp":
+                slot = _get_llamacpp_slot_cache()
+                if slot.ensure_warm():
+                    slot.restore()
 
             def _done(full: str):
                 with self._lock:
-                    self._messages.append({"role": "user", "content": user_msg})
+                    self._messages.append({"role": "user", "content": full_msg})
                     self._messages.append({"role": "assistant", "content": full})
+                self._save()
                 on_done()
 
             def _err(msg: str):
                 on_error(msg)
 
-            if _dispatch_with_titan_tools(snapshot_messages, self._mcp, on_token, _done, _err, on_tool_call):
+            if _dispatch_with_titan_tools(request_messages, self._mcp, on_token, _done, _err, on_tool_call, log_path=log_path):
                 return
-            _dispatch(snapshot_messages, on_token, _done, _err)
+            _dispatch(request_messages, on_token, _done, _err, log_path=log_path)
 
         threading.Thread(target=_run, daemon=True).start()
 
     def clear_history(self) -> None:
         with self._lock:
-            self._messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            self._messages = []
 
 
 # ── UI panel ──────────────────────────────────────────────────────────────────
@@ -520,6 +776,17 @@ class AIPanel:
         bk_menu["menu"].config(bg=BG_MID, fg=FG_MAIN)
         bk_menu.pack(side="left", padx=4)
 
+        # thinking / reasoning effort selector (pack left before status label)
+        self._think_var = tk.StringVar(value="off")
+        tk.Label(hdr, text="think:", fg=FG_SYS, bg=BG_MID, font=mono_sm).pack(side="left", padx=(6, 0))
+        think_menu = tk.OptionMenu(hdr, self._think_var, *REASONING_LEVELS.keys())
+        self._think_var.trace_add("write", self._on_think_changed)
+        think_menu.config(bg=BG_LIGHT, fg=FG_WARN, font=mono_sm, relief="flat",
+                          activebackground=BG_MID, highlightthickness=0, width=4)
+        think_menu["menu"].config(bg=BG_MID, fg=FG_MAIN)
+        think_menu.pack(side="left", padx=2)
+
+        # status label packed last so it doesn't crowd out left-packed widgets
         self._status_var = tk.StringVar(value=f"⬤ {ACTIVE_BACKEND}/{MODEL}")
         tk.Label(hdr, textvariable=self._status_var, fg=FG_SYS, bg=BG_MID, font=mono_sm).pack(side="right", padx=8)
 
@@ -545,6 +812,20 @@ class AIPanel:
                   relief="flat", padx=4, command=self._save_new_local_model).pack(side="left", padx=2)
 
         self._update_model_row_visibility()
+
+        # conversation row
+        conv_row = tk.Frame(frame, bg=BG_MID, pady=2)
+        conv_row.pack(fill="x")
+        tk.Button(conv_row, text="+ NEW", bg="#1a1a30", fg=FG_ACCENT, font=mono_sm,
+                  relief="flat", padx=6, command=self._new_conversation).pack(side="left", padx=(8, 4))
+        self._conv_var = tk.StringVar(value=self._client.title)
+        self._conv_menu = tk.OptionMenu(conv_row, self._conv_var, self._client.title)
+        self._conv_var.trace_add("write", self._on_conv_selected)
+        self._conv_menu.config(bg=BG_LIGHT, fg=FG_MAIN, font=mono_sm, relief="flat",
+                               activebackground=BG_MID, highlightthickness=0, width=30)
+        self._conv_menu["menu"].config(bg=BG_MID, fg=FG_MAIN)
+        self._conv_menu.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self._refresh_conv_menu()
 
         btn_bar = tk.Frame(frame, bg=BG_MID, pady=3)
         btn_bar.pack(fill="x")
@@ -607,6 +888,11 @@ class AIPanel:
         self._client.clear_history()
         self._status_var.set(f"⬤ {name}/{MODEL}")
         self._write_system(f"🔀 Switched to {name} / {MODEL}")
+
+    def _on_think_changed(self, *_args: str) -> None:
+        global _reasoning_effort
+        _reasoning_effort = REASONING_LEVELS[self._think_var.get()]
+        self._write_system(f"🧠 Thinking → {self._think_var.get()} ({_reasoning_effort})")
 
     def _on_backend_var_changed(self, *_args: str) -> None:
         self._switch_backend(self._backend_var.get())
@@ -736,7 +1022,7 @@ class AIPanel:
 
         self._client.ask(text, on_token, on_done, on_error, on_tool_call)
 
-    def _set_controls(self, state: WidgetState) -> None:
+    def _set_controls(self, state: Literal["normal", "disabled"]) -> None:
         try:
             self._send_btn.configure(state=state)
             self._inp.configure(state=state)
@@ -745,12 +1031,54 @@ class AIPanel:
         except Exception:
             pass
 
-    def _clear(self) -> None:
-        self._client.clear_history()
+    # ── conversation management ───────────────────────────────────────────────
+
+    def _refresh_conv_menu(self) -> None:
+        menu = self._conv_menu["menu"]
+        menu.delete(0, "end")
+        for conv_id, title in self._client.list_conversations():
+            menu.add_command(label=title, command=tk._setit(self._conv_var, conv_id))
+        if not self._client.list_conversations():
+            menu.add_command(label="(no saved conversations)", state="disabled")
+
+    def _new_conversation(self) -> None:
+        if self._busy:
+            return
+        self._client.new_conversation()
         self._chat.configure(state="normal")
         self._chat.delete("1.0", tk.END)
         self._chat.configure(state="disabled")
-        self._write_system("🔄 Conversation cleared.")
+        self._conv_var.set(self._client.title)
+        self._refresh_conv_menu()
+        self._write_system(f"✦ New conversation")
+
+    def _on_conv_selected(self, *_args: str) -> None:
+        conv_id = self._conv_var.get()
+        if conv_id == self._client.conv_id:
+            return
+        try:
+            messages = self._client.load_conversation(conv_id)
+        except Exception as e:
+            self._write_system(f"⚠ Load failed: {e}")
+            return
+        self._chat.configure(state="normal")
+        self._chat.delete("1.0", tk.END)
+        self._chat.configure(state="disabled")
+        # replay display: show user questions and AI answers from history
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                # extract just the [QUESTION] part for display
+                q = content.split("[QUESTION]\n", 1)[-1] if "[QUESTION]" in content else content
+                self._write(f"\nYou: {q}\n", "user")
+            elif role == "assistant":
+                self._write("TITAN AI: ", "user")
+                self._write(content + "\n", "ai")
+        self._write_system(f"✦ Loaded: {self._client.title}")
+
+    def _clear(self) -> None:
+        self._new_conversation()
 
     def _prettify_last_message(self) -> None:
         try:
@@ -808,4 +1136,3 @@ if __name__ == "__main__":
     root.configure(bg="#080810")
     AIPanel(root, engine_module=None)
     root.mainloop()
-WidgetState = Literal["normal", "disabled"]

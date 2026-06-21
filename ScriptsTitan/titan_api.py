@@ -90,7 +90,8 @@ class TitanAPI:
                 pos.cur_price_ts = fetched_ts
                 last_ts = pos.price_history[-1][0] if pos.price_history else 0.0
                 if (now_ts - last_ts) >= 1800:
-                    pos.price_history.append((now_ts, fast_price))
+                    from titan_position import _append_price_point
+                    _append_price_point(pos.price_history, now_ts, fast_price)
                     if len(pos.price_history) > 2880:
                         del pos.price_history[:-2880]
                     if asset:
@@ -1282,8 +1283,23 @@ class TitanAPI:
             import titan_state as _S
             phase_t0 = time.perf_counter()
             _S.log_important("Startup recovery: loading live signals from DB | phase=signal_restore")
-            self._last_signals = DB.load_latest_signals(200)
-            _S.log_important(f"Startup recovery: live signals loaded | phase=signal_restore | signals={len(self._last_signals)}")
+            raw_signals = DB.load_latest_signals(200)
+            now = time.time()
+            _age_limit = {"consensus_basket": 0.5, "recent_form": 0.75, "drift_discount": 6.0}
+            surviving = []
+            expired_cids = []
+            for s in raw_signals:
+                age_h = (now - s.newest_ts) / 3600
+                limit = _age_limit.get(s.strategy.split("+")[0], 1.0)
+                if age_h > limit:
+                    expired_cids.append(s.cid)
+                else:
+                    surviving.append(s)
+            if expired_cids:
+                DB.mark_signals_not_live(expired_cids)
+                _S.log_important(f"Startup recovery: expired {len(expired_cids)} stale signals | phase=signal_restore")
+            self._last_signals = surviving
+            _S.log_important(f"Startup recovery: live signals loaded | phase=signal_restore | signals={len(self._last_signals)} (was {len(raw_signals)} before expiry)")
             _S.log_important("Startup recovery: loading rejects from DB | phase=signal_restore")
             self._last_rejects = DB.load_latest_rejects(50)
             msg = (

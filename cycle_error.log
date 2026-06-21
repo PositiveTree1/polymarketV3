@@ -8,10 +8,8 @@ Traceback (most recent call last):
   File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_market.py", line 879, in _poll_vip_and_elite
     get_compute_and_store_wallet(wallet),
     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_wallet.py", line 908, in get_compute_and_store_wallet
-    wr_data            = fetch_real_winrate(wallet)
-                         ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_wallet.py", line 809, in fetch_real_winrate
-    "recent_pnl_30d": round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
-                      ^^^^^^^^^^^^^^^^^^^^^^^^
-TypeError: type NoneType doesn't define __round__ method
+  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_wallet.py", line 962, in get_compute_and_store_wallet
+    DB.upsert_wallet_profile(wallet, result.to_db_dict())
+  File "C:\Users\jlala\source\repos\polymarketV3\ScriptsTitan\titan_db.py", line 509, in upsert_wallet_profile
+    cx.execute(
+sqlite3.OperationalError: database is locked

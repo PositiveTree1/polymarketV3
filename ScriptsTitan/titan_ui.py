@@ -3785,12 +3785,19 @@ def run_ui(api: TitanBackend) -> None:
         analysis_txt.configure(state="disabled")
     
     
+    _diag_last_hash: list[int] = [0]
+
     def render_diagnostics(
         rejects: list[str],
         trades: list[object],
         wallets: dict[str, Wallet],
         pnl_summary: PnlSummaryDict,
     ) -> None:
+        h = hash((tuple(rejects), str(pnl_summary.get("cooldown_cids"))))
+        if h == _diag_last_hash[0]:
+            return
+        _diag_last_hash[0] = h
+        scroll_pos = diag_txt.yview()[0]
         diag_txt.configure(state="normal")
         diag_txt.delete("1.0", tk.END)
         ts    = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -3831,8 +3838,9 @@ def run_ui(api: TitanBackend) -> None:
                 f"FAIL: {', '.join(p.fail_reasons)}\n"
             )
         diag_txt.configure(state="disabled")
-    
-    
+        diag_txt.yview_moveto(scroll_pos)
+
+
     # ═══════════════════════════════════════════════════════════════════════════════
     #  ENGINE CALLBACKS
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -3878,21 +3886,25 @@ def run_ui(api: TitanBackend) -> None:
             threading.Thread(target=telegram_notifier.notify_sell, args=(pos, pnl_usdc, pnl_pct), daemon=True).start()
     
     
-    def on_cycle_complete_cb(signals, wallets, rejects, trades):
-        nonlocal _last_signals, _last_wallets, _last_rejects, _last_trades
-        # Always read from api — it applies age-expiry and reject-clearing logic
-        _last_signals = api.get_signals()
+    def on_cycle_complete_cb(signals, wallets, rejects, trades, pnl=None):
+        nonlocal _last_signals, _last_wallets, _last_rejects, _last_trades, _latest_pnl
+        # Use payload directly — server already price-enriches signals in _on_cycle
+        if signals:
+            _last_signals = signals
         _last_wallets = wallets
-        
         if rejects:
             for r in reversed(rejects):
                 if r in _last_rejects:
                     _last_rejects.remove(r)
                 _last_rejects.insert(0, r)
             _last_rejects = _last_rejects[:50]
-            
-        _last_trades  = trades
+        _last_trades = trades
+        if pnl is not None:
+            _latest_pnl = pnl
         _pending_update[0] = True
+        _pnl_snap = _latest_pnl
+        if _selected_tab_key() == "diag" and _last_wallets is not None and _pnl_snap is not None:
+            root.after(0, lambda p=_pnl_snap: render_diagnostics(_last_rejects, _last_trades, _last_wallets, p))
 
     def on_config_updated_cb(payload: dict) -> None:
         if payload.get("domain") != "wallets":
@@ -3914,7 +3926,10 @@ def run_ui(api: TitanBackend) -> None:
     # ═══════════════════════════════════════════════════════════════════════════════
     #  UI REFRESH LOOP  (fetch in bg thread → apply on main thread)
     # ═══════════════════════════════════════════════════════════════════════════════
-    _fetch_running = [False]
+    _fetch_running     = [False]
+    _fetch_backoff     = [5000]   # ms, doubles on consecutive failures, resets on success
+    _fetch_fail_streak = [0]
+    _POLL_TABS         = {"positions", "pnl"}   # tabs where live price polling makes sense
     _last_rendered_srv_log: list[str] = [""]   # [last_line]
     _last_rendered_cli_log: list[str] = [""]
 
@@ -3955,8 +3970,6 @@ def run_ui(api: TitanBackend) -> None:
             render_wallets(_last_wallets)
         elif selected_tab == "analysis" and pnl_summary is not None and trade_stats is not None:
             render_analysis(_last_signals, _last_trades, _last_wallets, pnl_summary, trade_stats)
-        elif selected_tab == "diag" and pnl_summary is not None:
-            render_diagnostics(_last_rejects, _last_trades, _last_wallets, pnl_summary)
 
     def _request_refresh() -> None:
         if not _fetch_running[0]:
@@ -3966,56 +3979,76 @@ def run_ui(api: TitanBackend) -> None:
 
     def ui_refresh() -> None:
         _request_refresh()
-        root.after(2000, ui_refresh)
+        root.after(_fetch_backoff[0], ui_refresh)
+
+    def _set_server_status(ok: bool) -> None:
+        if ok:
+            hb_label.configure(fg="#00ff88")
+        else:
+            hb_label.configure(fg="#ffaa00")
+            hb_var.set("⬤ server busy")
 
     def _fetch_and_apply(selected_tab: str) -> None:
         try:
             data = UiRefreshData()
-            try:
-                data.pnl = api.get_pnl_summary()
-            except Exception as e:
-                root.after(0, lambda err=e: _log_ui_error("fetch pnl", err))
-            try:
-                data.positions = api.get_positions()
-            except Exception as e:
-                root.after(0, lambda err=e: _log_ui_error("fetch positions", err))
-            if selected_tab in {"wallets", "alerts", "analysis", "diag"} or _pending_update[0]:
+            # pnl+positions: only poll when on a tab that shows live prices
+            if selected_tab in _POLL_TABS or not _latest_pnl:
+                try:
+                    data.pnl = api.get_pnl_summary()
+                except Exception as e:
+                    root.after(0, lambda: _set_server_status(False))
+                    root.after(0, lambda err=e: _log_ui_error("fetch pnl", err))
+                try:
+                    data.positions = api.get_positions()
+                except Exception as e:
+                    root.after(0, lambda err=e: _log_ui_error("fetch positions", err))
+            # Everything else: fetch on cycle event OR on first load (when cache is empty)
+            needs_wallets = selected_tab in {"wallets", "alerts", "analysis"} and (_pending_update[0] or not _last_wallets)
+            if needs_wallets:
                 try:
                     data.wallets = _build_wallet_cache(api.get_tracked_wallets())
                 except Exception as e:
                     root.after(0, lambda err=e: _log_ui_error("fetch wallets", err))
-            if selected_tab == "signals":
-                if not _show_signal_history[0]:
-                    try:
-                        data.signals_live = _require_signal_rows(api.get_signals())
-                    except Exception as e:
-                        root.after(0, lambda err=e: _log_ui_error("fetch live signals", err))
-                elif _pending_update[0] or not _signal_history_cache[0]:
-                    try:
-                        data.signal_history = _require_signal_rows(api.get_signal_history(limit=200))
-                    except Exception as e:
-                        root.after(0, lambda err=e: _log_ui_error("fetch signal history", err))
-            if selected_tab == "positions" and _show_closed[0]:
+            if selected_tab == "signals" and not _show_signal_history[0] and (_pending_update[0] or not _last_signals):
                 try:
-                    data.closed_positions = api.get_closed_positions(limit=200)
+                    data.signals_live = _require_signal_rows(api.get_signals())
                 except Exception as e:
-                    root.after(0, lambda err=e: _log_ui_error("fetch closed positions", err))
-            if selected_tab in {"pnl", "analysis"}:
+                    root.after(0, lambda err=e: _log_ui_error("fetch live signals", err))
+            if selected_tab in {"pnl", "analysis"} and (_pending_update[0] or _latest_trade_stats is None):
                 try:
                     data.trade_stats = api.get_trade_stats()
                 except Exception as e:
                     root.after(0, lambda err=e: _log_ui_error("fetch trade stats", err))
-            if selected_tab == "pnl":
+            if selected_tab == "pnl" and (_pending_update[0] or not _latest_trade_history):
                 try:
                     data.trade_history = api.get_trade_history()
                 except Exception as e:
                     root.after(0, lambda err=e: _log_ui_error("fetch trade history", err))
+            if selected_tab == "positions" and _show_closed[0] and (_pending_update[0] or not _latest_closed_positions):
+                try:
+                    data.closed_positions = api.get_closed_positions(limit=200)
+                except Exception as e:
+                    root.after(0, lambda err=e: _log_ui_error("fetch closed positions", err))
+            # Signal history: fetch on first open (no cycle event needed)
+            if selected_tab == "signals" and _show_signal_history[0] and not _signal_history_cache[0]:
+                try:
+                    data.signal_history = _require_signal_rows(api.get_signal_history(limit=200))
+                except Exception as e:
+                    root.after(0, lambda err=e: _log_ui_error("fetch signal history", err))
+            # Log tab: poll for fresh lines (streamed log not yet wired to widget directly)
             if selected_tab == "log":
                 try:
                     data.logs = api.get_logs(lines=600)
                 except Exception as e:
                     root.after(0, lambda err=e: _log_ui_error("fetch logs", err))
+            _fetch_fail_streak[0] = 0
+            _fetch_backoff[0] = 5000
+            root.after(0, lambda: _set_server_status(True))
             root.after(0, lambda: _ui_apply(data))
+        except Exception:
+            _fetch_fail_streak[0] += 1
+            _fetch_backoff[0] = min(5000 * (2 ** _fetch_fail_streak[0]), 60000)
+            root.after(0, lambda: _set_server_status(False))
         finally:
             _fetch_running[0] = False
 
@@ -4131,7 +4164,8 @@ def run_ui(api: TitanBackend) -> None:
                         if fast_p is not None and fast_p != pos.cur_price:
                             pos.cur_price = fast_p
                             now_ts = time.time()
-                            pos.price_history.append((now_ts, fast_p))
+                            from titan_position import _append_price_point
+                            _append_price_point(pos.price_history, now_ts, fast_p)
                             if len(pos.price_history) > 2880:
                                 del pos.price_history[:-2880]
                             from titan_prices import PRICES
@@ -4182,7 +4216,20 @@ def run_ui(api: TitanBackend) -> None:
 
         api.subscribe("titan/position_open",   lambda p: on_position_open_cb(_pos_from_payload(p)))
         api.subscribe("titan/position_close",  lambda p: on_position_close_cb(_pos_from_payload(p["pos"]), p["pnl_usdc"], p["pnl_pct"]))
-        api.subscribe("titan/cycle_complete",  lambda p: on_cycle_complete_cb(p["signals"], p["wallets"], p["rejects"], p["trades"]))
+        def _on_cycle_complete(p: dict) -> None:
+            from titan_wallet import Wallet as _Wallet
+            raw_wallets = p["wallets"]
+            if isinstance(raw_wallets, dict):
+                wallets_typed: dict[str, _Wallet] = {
+                    addr: (_Wallet.from_db(addr, w) if isinstance(w, dict) else w)
+                    for addr, w in raw_wallets.items()
+                }
+            elif isinstance(raw_wallets, list):
+                wallets_typed = _build_wallet_cache(raw_wallets)
+            else:
+                wallets_typed = {}
+            on_cycle_complete_cb(p["signals"], wallets_typed, p["rejects"], p["trades"], p.get("pnl"))
+        api.subscribe("titan/cycle_complete",  _on_cycle_complete)
         api.subscribe("titan/config_updated",  on_config_updated_cb)
         root.after(1000, ui_refresh)
         _refresh_hft_status_ui()
@@ -4376,6 +4423,12 @@ def run_ui(api: TitanBackend) -> None:
             threading.Thread(target=lambda: http.server.HTTPServer(('127.0.0.1', 8080), DashboardHandler).serve_forever(), daemon=True).start()
     
 
+    def _on_close() -> None:
+        if hasattr(api, "stop"):
+            api.stop()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", _on_close)
     show_loading_screen(root, api, on_boot_complete)
     root.mainloop()
 

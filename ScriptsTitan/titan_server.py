@@ -543,6 +543,10 @@ def _wire_events(api: TitanAPI) -> None:
         })
 
     def _on_cycle(payload: dict) -> None:
+        try:
+            pnl = _to_serializable(api.get_pnl_summary())
+        except Exception:
+            pnl = None
         _sessions.broadcast({
             "jsonrpc": "2.0",
             "method": "titan/cycle_complete",
@@ -551,8 +555,7 @@ def _wire_events(api: TitanAPI) -> None:
                 "wallets": _to_serializable(payload.get("wallets", [])),
                 "rejects": payload.get("rejects", []),
                 "trades":  _to_serializable(payload.get("trades", [])),
-                "cycle": None,
-                "elapsed_ms": None,
+                "pnl":     pnl,
             },
         })
         # also notify that snapshot / logs resources changed

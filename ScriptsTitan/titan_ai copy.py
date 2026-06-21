@@ -20,7 +20,7 @@ WidgetState: TypeAlias = Literal["normal", "disabled"]
 # ── ai config (persisted) ─────────────────────────────────────────────────────
 _AI_CONFIG_PATH = Path(__file__).parent.parent / "titan_ai_config.json"
 
-_DEFAULT_LOCAL_MODELS = ["qwen/qwen3.6-35b-a3b", "gemma@q4_k_xl", "gemma@q8_0", "gemma@q5_k_m"]
+_DEFAULT_LOCAL_MODELS = ["qwen/qwen3.6-35b-a3b", "gemma@q4_k_xl", "gemma@q8_0", "gemma@q5_k_m", "gpt-oss-20b"]
 
 def _load_ai_config() -> dict:
     if _AI_CONFIG_PATH.exists():
@@ -111,22 +111,8 @@ def _save_ai_request_snapshot(messages: list[dict]) -> None:
     log_dir = "Logs"
     os.makedirs(log_dir, exist_ok=True)
     fname = os.path.join(log_dir, f"titan_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
-    lines = [
-        f"TIMESTAMP: {datetime.now().isoformat(timespec='seconds')}",
-        f"BACKEND: {ACTIVE_BACKEND}",
-        f"MODEL: {MODEL}",
-        "",
-        "[OUTBOUND AI MESSAGES]",
-        "",
-    ]
-    for i, msg in enumerate(messages, start=1):
-        role = str(msg.get("role", "")).upper()
-        content = str(msg.get("content", ""))
-        lines.append(f"--- MESSAGE {i} [{role}] ---")
-        lines.append(content)
-        lines.append("")
     with open(fname, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines).rstrip() + "\n")
+        f.write(json.dumps(messages, ensure_ascii=False, indent=2) + "\n")
 
 
 def _json_dump(value) -> str:
