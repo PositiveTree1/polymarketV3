@@ -834,9 +834,6 @@ class TitanAPI:
 
             prof["score"]        = round(score, 5)
             prof["status"]       = int(status)
-            prof["verified"]     = status >= _WT.VERIFIED
-            prof["watchable"]    = status >= _WT.WATCH
-            prof["elite"]        = status == _WT.ELITE
             prof["vip"]          = addr.lower() in vip_wallets
             vip_name = vip_names.get(addr.lower(), "")
             current_name = str(prof.get("name") or "")
@@ -1293,11 +1290,13 @@ class TitanAPI:
             _S.log_important(f"Startup recovery: live signals loaded | phase=signal_restore | signals={len(self._last_signals)} (was {len(raw_signals)} before expiry)")
             _S.log_important("Startup recovery: loading rejects from DB | phase=signal_restore")
             self._last_rejects = DB.load_latest_rejects(50)
-            msg = (
-                f"Startup recovery: signals={len(self._last_signals)} | rejects={len(self._last_rejects)} | "
-                f"phase=signal_restore | elapsed={time.perf_counter() - phase_t0:.2f}s"
+            _S._log(
+                f"  Signals: {len(self._last_signals)} live"
+                + (f" ({len(expired_cids)} expired)" if expired_cids else "")
+                + f" | {len(self._last_rejects)} rejects"
+                + f"  ({time.perf_counter() - phase_t0:.2f}s)",
+                "INFO", terminal=True,
             )
-            _S.log_important(msg)
         except Exception as e:
             import traceback, titan_state as _S
             msg = f"⚠ Failed to restore signals/rejects from DB: {e}\n{traceback.format_exc()}"
@@ -1357,6 +1356,8 @@ class TitanAPI:
                 f.write(line + "\n")
         except Exception:
             pass
+        if terminal:
+            print(line, flush=True)
         self._emit("notifications/message", {"level": level, "data": msg, "terminal": terminal})
         if str(level).upper() in {"ERR", "ERROR", "CRITICAL"}:
             self._notify_telegram("notify_error", msg)

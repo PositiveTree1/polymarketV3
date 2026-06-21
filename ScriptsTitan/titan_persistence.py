@@ -41,8 +41,8 @@ def save_wallet_roster():
     try:
         saved = 0
         for addr, wallet in S.env().wallet_cache.items():
-            if wallet.is_watchable:
-                DB.upsert_wallet_profile(addr, wallet.to_db_dict())
+            if wallet.is_active:
+                DB.upsert_wallet_profile(addr, wallet)
                 saved += 1
         if saved:
             S._log(f"💾 Wallet roster saved: {saved} profiles to DB", "DATA")
@@ -62,15 +62,12 @@ def save_wallet_roster_async():
 
 def load_state() -> None:
     startup_t0 = time.perf_counter()
-    S.log_important("Startup recovery: begin | phase=state_load")
+    S.log_important("━━━  TITAN startup  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     DB.init_db(STATE_DB)
-    S.log_important("Startup recovery: db ready | phase=state_load")
     S.market_cache.load_all_from_db(force=True)
-    S.log_important(f"Startup recovery: market cache loaded | phase=state_load | markets={len(S.market_cache)}")
     prices_srv = PricesCacheSrv()
     prices_srv.init_db(STATE_DB)
     titan_prices.PRICES = prices_srv
-    S.log_important("Startup recovery: price cache ready | phase=state_load")
     wallets_srv = WalletsCacheSrv()
     S.env().wallet_cache = wallets_srv
     S._shared_wallet_cache = wallets_srv
@@ -78,23 +75,23 @@ def load_state() -> None:
     pruned = DB.purge_non_watchable(keep_seed=set(_SEEDS))
     if pruned:
         S._log(f"🗑 Pruned {pruned} non-watchable wallet stubs from DB", "INFO")
-    S.log_important("Startup recovery: loading wallet roster from DB | phase=state_load")
     _load_wallets_from_db()
+    n_w   = len(S.env().wallet_cache)
+    cache = S.env().wallet_cache
+    n_elite    = sum(1 for p in cache.values() if p.is_elite)
+    n_verified = sum(1 for p in cache.values() if p.is_verified)
+    n_watch    = sum(1 for p in cache.values() if p.is_watchable)
     S.log_important(
-        f"Startup recovery: wallet roster loaded | phase=state_load | wallets={len(S.env().wallet_cache)} "
-        f"watchable={len(S.get_watchlist())}"
+        f"  DB:      {len(S.market_cache)} markets | "
+        f"{n_w} wallets loaded  ({n_elite} elite / {n_verified} verified / {n_watch} watch)"
     )
-    S.log_important("Startup recovery: loading trading state | phase=state_load")
     ri = _load_trading_state()
-    wl = S.get_watchlist()
-    line = (
-        f"Startup: markets={len(S.market_cache)} | "
-        f"wallets={len(S.env().wallet_cache)} watchable={len(wl)} | "
-        f"trades={ri['trades']} Open Positions={ri['open_positions']} closed={ri['closed_trades']} | "
-        f"equity_pts={ri['equity_points']} cooldowns={ri['cooldowns']}"
+    S.log_important(
+        f"  State:   {ri['trades']} trades | {ri['open_positions']} open positions | "
+        f"{ri['closed_trades']} closed | {ri['equity_points']} equity pts | "
+        f"{ri['cooldowns']} cooldowns"
     )
-    S.log_important(line)
-    S.log_important(f"Startup recovery: state_load complete | elapsed={time.perf_counter() - startup_t0:.2f}s")
+    S.log_important(f"  Load time: {time.perf_counter() - startup_t0:.2f}s")
 
 
 def _load_trading_state() -> dict[str, int]:
@@ -287,7 +284,7 @@ def _make_dead_wallet(addr: str, preferred_name: str, reason: str, base_wallet: 
         fail_reasons=["dead_wallet"],
     )
     S.env().wallet_cache[addr] = dead_wallet
-    DB.upsert_wallet_profile(addr, dead_wallet.to_db_dict())
+    DB.upsert_wallet_profile(addr, dead_wallet)
     return dead_wallet
 
 
@@ -326,7 +323,7 @@ def ensure_linked_wallets_cached(
                 from titan_wallet import WalletTier as _WT
                 pinned_wallet = replace(cached_wallet, status=max(cached_wallet.status, _WT.WATCH))
                 S.env().wallet_cache[wallet_key] = pinned_wallet
-                DB.upsert_wallet_profile(wallet_key, pinned_wallet.to_db_dict())
+                DB.upsert_wallet_profile(wallet_key, pinned_wallet)
                 stats["pinned_watchable"] += 1
                 S._log(f"[wallet recovery] {reason}: pinned cached wallet {wallet_key} as watchable", "INFO")
             continue
@@ -354,7 +351,7 @@ def ensure_linked_wallets_cached(
             from titan_wallet import WalletTier as _WT
             pinned_wallet = replace(wallet, status=max(wallet.status, _WT.WATCH))
             S.env().wallet_cache[wallet_key] = pinned_wallet
-            DB.upsert_wallet_profile(wallet_key, pinned_wallet.to_db_dict())
+            DB.upsert_wallet_profile(wallet_key, pinned_wallet)
             stats["pinned_watchable"] += 1
             S._log(f"[wallet recovery] {reason}: pinned {wallet_key} as watchable", "INFO")
     if stats["requested"]:
@@ -381,9 +378,9 @@ def _refresh_elite_ver_wallets() -> None:
 
     targets = [
         (addr, p) for addr, p in S.env().wallet_cache.items()
-        if p.is_verified and p.ts <= stale_before
+        if p.is_ranked and p.ts <= stale_before
     ]
-    elite_ver_total = sum(1 for p in S.env().wallet_cache.values() if p.is_verified)
+    elite_ver_total = sum(1 for p in S.env().wallet_cache.values() if p.is_ranked)
     fresh_count = elite_ver_total - len(targets)
     if not targets:
         _startup(f"ELITE/VER startup refresh summary: fresh={fresh_count} refresh=0 total={elite_ver_total}")
@@ -397,8 +394,8 @@ def _refresh_elite_ver_wallets() -> None:
         name = p.name or addr[:14] + "..."
         try:
             refreshed = get_compute_and_store_wallet(addr)
-            if refreshed.is_watchable:
-                DB.upsert_wallet_profile(addr, refreshed.to_db_dict())
+            if refreshed.is_active:
+                DB.upsert_wallet_profile(addr, refreshed)
             tier_after = refreshed.tier()
             tier_change = f" {tier_before}=>{tier_after}" if tier_before != tier_after else f" {tier_after}"
             trade_count_text = f"{refreshed.loaded_trade_count}{'*' if refreshed.trade_load_limited else ''}"

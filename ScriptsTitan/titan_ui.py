@@ -3684,8 +3684,8 @@ def run_ui(api: TitanBackend) -> None:
             return (tier_rank, -p.score)
 
         for w, p in sorted(all_wallets.items(), key=_wallet_sort_key):
-            if p.total_pnl < 0 and not (p.dead or p.is_watchable): continue
-            if p.score <= 0.10 and not (p.dead or p.is_watchable): continue
+            if p.total_pnl < 0 and not (p.dead or p.is_active): continue
+            if p.score <= 0.10 and not (p.dead or p.is_active): continue
             if filt == "ELITE" and not p.is_elite:        continue
             if filt == "VER"   and not p.is_verified:     continue
             if filt == "HFT"   and not p.hft:          continue
@@ -3821,7 +3821,7 @@ def run_ui(api: TitanBackend) -> None:
         for r in rejects:
             diag_txt.insert(tk.END, r + "\n\n")
     
-        failed = [(w, p) for w, p in wallets.items() if not p.is_verified]
+        failed = [(w, p) for w, p in wallets.items() if not p.is_ranked]
         failed.sort(key=lambda x: x[1].score, reverse=True)
         diag_txt.insert(tk.END, f"\n{'═'*72}\n  FAILED WALLETS (top 20)\n{'═'*72}\n")
         for w, p in failed[:20]:

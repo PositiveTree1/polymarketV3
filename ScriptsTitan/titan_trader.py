@@ -197,8 +197,7 @@ def _compact_wallet_snapshot(wallet_addrs: list[str]) -> list[dict]:
             "score":     prof.score     if prof is not None else None,
             "win_rate":  prof.win_rate  if prof is not None else None,
             "total_pnl": prof.total_pnl if prof is not None else None,
-            "verified":  prof.is_verified  if prof is not None else None,
-            "elite":     prof.is_elite     if prof is not None else None,
+            "status":    int(prof.status)   if prof is not None else None,
             "hft":       prof.hft       if prof is not None else None,
         })
     return rows

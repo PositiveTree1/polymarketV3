@@ -174,16 +174,26 @@ class Wallet:
         return self.recent_pnl_30d >= min_pnl_30d and self.recent_pnl_7d >= min_pnl_7d
 
     @property
+    def is_active(self) -> bool:
+        """Any tier worth processing: WATCH, VERIFIED, or ELITE."""
+        return self.status.value > 0
+
+    @property
     def is_watchable(self) -> bool:
-        return self.status >= WalletTier.WATCH
+        return self.status == WalletTier.WATCH
 
     @property
     def is_verified(self) -> bool:
-        return self.status >= WalletTier.VERIFIED
+        return self.status == WalletTier.VERIFIED
 
     @property
     def is_elite(self) -> bool:
         return self.status == WalletTier.ELITE
+
+    @property
+    def is_ranked(self) -> bool:
+        """True for VERIFIED or ELITE — any tier above WATCH."""
+        return self.status == WalletTier.VERIFIED or self.status == WalletTier.ELITE
 
     def tier(self) -> WalletTier:
         return self.status
@@ -281,9 +291,6 @@ class Wallet:
             "avg_bet":              self.avg_bet,
             "trades_per_hour":      self.trades_per_hour,
             "status":               int(self.status),
-            "verified":             self.is_verified,
-            "watchable":            self.is_watchable,
-            "elite":                self.is_elite,
             "hft":                  self.hft,
             "vip":                  self.vip,
             "sports_bot":           self.sports_bot,
@@ -977,9 +984,9 @@ def get_compute_and_store_wallet(wallet: str) -> Wallet:
                   "loaded_trade_count", "trade_load_limited", "first_loaded_trade_ts", "last_loaded_trade_ts", "ts")
     )
     S.env().wallet_cache[wallet] = result
-    if result.is_watchable and _changed:
-        DB.upsert_wallet_profile(wallet, result.to_db_dict())
-    elif not result.is_watchable and cached is not None and cached.is_watchable:
+    if result.is_active and _changed:
+        DB.upsert_wallet_profile(wallet, result)
+    elif not result.is_active and cached is not None and cached.is_active:
         DB.clear_wallet_profile(wallet)
     return result
 
@@ -1056,13 +1063,12 @@ class WalletsCacheSrv(WalletsCache):
         for addr, w in list(self._data.items()):
             result = w.reclassify(sel)
             if w.tier() != result.tier() or w.hft != result.hft:
-                _log_wallet_change(w, result, result.fail_reasons, w.name, addr)
                 updated += 1
 
             self._data[addr] = result
-            if result.is_watchable:
-                DB.upsert_wallet_profile(addr, result.to_db_dict())
-            elif not result.is_watchable and w.is_watchable:
+            if result.is_active:
+                DB.upsert_wallet_profile(addr, result)
+            elif not result.is_active and w.is_active:
                 DB.clear_wallet_profile(addr)
 
         S.log_important(f"🎯 reclassify_all done: {updated} wallet(s) changed out of {len(self._data)}")
@@ -1074,7 +1080,7 @@ class WalletsCacheSrv(WalletsCache):
         stale_threshold = now_t - 6 * 3600
         refreshed = 0
         for addr, profile in list(self._data.items()):
-            if not profile.is_verified:
+            if not profile.is_ranked:
                 continue
             if profile.recent_ts >= stale_threshold:
                 continue
@@ -1124,7 +1130,7 @@ def discover_new_wallets() -> None:
     discovered = 0
     for w in list(new_cands)[:25]:
         prof = get_compute_and_store_wallet(w)
-        if prof.is_verified:
+        if prof.is_ranked:
             discovered += 1
             tag = prof.tag()
             S._log(
@@ -1138,7 +1144,7 @@ def discover_new_wallets() -> None:
     wl = S.get_watchlist()
     if len(wl) > MAX_WATCHLIST_SIZE:
         import titan_db as DB
-        verified_set = {w for w in wl if (p := S.env().wallet_cache.get(w)) and p.is_verified}
+        verified_set = {w for w in wl if (p := S.env().wallet_cache.get(w)) and p.is_ranked}
         unverified   = [w for w in wl if w not in verified_set]
         keep_unver   = max(0, MAX_WATCHLIST_SIZE - len(verified_set))
         for w in unverified[keep_unver:]:
@@ -1176,9 +1182,9 @@ def scan_top_market_holders() -> None:
         added = 0
         for w in list(new_cands)[:20]:
             prof = get_compute_and_store_wallet(w)
-            if prof.is_watchable:
+            if prof.is_active:
                 added += 1
-                if prof.is_verified:
+                if prof.is_ranked:
                     tag = prof.tag()
                     S._log(f"🆕 {tag} from market scan: {w[:14]}…", "INFO")
             time.sleep(0.12)

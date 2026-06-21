@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from titan_signals import Signal
     from titan_trade import TradeRecord
     from titan_market import Market
+    from titan_wallet import Wallet
 
 _DB_PATH: str = ""
 def init_db(db_path: str) -> None:
@@ -512,13 +513,13 @@ def load_equity_history(limit: int = 4000) -> list[tuple[float, float]]:
 # ── watchlist ────────────────────────────────────────────────────────────────
 
 
-def upsert_wallet_profile(addr: str, profile: dict) -> None:
+def upsert_wallet_profile(addr: str, wallet: "Wallet") -> None:
     if not _DB_PATH:
         return
     now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    status_val = int(profile.get("status", 1 if (profile.get("watchable") or profile.get("verified")) else 0))
-    watchable = 1 if status_val >= 1 else 0
-    blob = json.dumps(profile)
+    status_val = int(wallet.status)
+    watchable  = 1 if wallet.is_active else 0
+    blob       = json.dumps(wallet.to_db_dict())
     with _connect() as cx:
         cx.execute(
             """

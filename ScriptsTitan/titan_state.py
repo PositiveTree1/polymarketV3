@@ -149,7 +149,7 @@ def log_context(label: str):
 
 def get_watchlist() -> list[str]:
     """Return addresses currently marked watchable=True in wallet_cache."""
-    return [w for w, p in _shared_wallet_cache.items() if p.is_watchable]
+    return [w for w, p in _shared_wallet_cache.items() if p.is_active]
 
 def __getattr__(name):
     if hasattr(_wallet, name):
@@ -259,8 +259,10 @@ def _log(msg: str, level: str = "INFO", *, terminal: bool = False) -> None:
 
 
 def log_important(msg: str) -> None:
-    """Write via the shared logger and mirror to terminal."""
-    _log(msg, "INFO", terminal=True)
+    """Write via the shared logger and mirror to terminal unconditionally."""
+    _log(msg, "INFO")
+    ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] [INFO ] {msg}", flush=True)
 
 
 def safe_get(url: str, params: dict | None = None, retries: int = 3, timeout: int = 12, quiet: bool = False) -> list | dict | None:

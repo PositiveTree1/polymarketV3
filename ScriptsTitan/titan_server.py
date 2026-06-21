@@ -525,20 +525,13 @@ def _wire_events(api: TitanAPI) -> None:
         return _cb
 
     def _on_log(payload: dict) -> None:
-        from datetime import datetime
-        level = payload.get("level", "INFO")
-        msg   = payload.get("data", "")
-        terminal = bool(payload.get("terminal", False))
-        if terminal or str(level).upper() in {"ERR", "ERROR", "CRITICAL"}:
-            line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level:5}] {msg}"
-            print(line, flush=True)
         _sessions.broadcast({
             "jsonrpc": "2.0",
             "method": "notifications/message",
             "params": {
-                "level": str(level).lower(),
+                "level": str(payload.get("level", "INFO")).lower(),
                 "logger": "titan",
-                "data": msg,
+                "data": payload.get("data", ""),
             },
         })
 

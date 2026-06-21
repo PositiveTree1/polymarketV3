@@ -902,7 +902,7 @@ def _poll_vip_and_elite(hot_cutoff: float, warm_cutoff: float) -> list[WalletObs
         results.extend(trades)
         time.sleep(0.07)
 
-    S._log(f"🐳 VIP/Elite poll done — {len(results)} trades from {len(all_to_poll)} wallets", "DIAG")
+    S._log(f"🐳 VIP/Elite poll done — {len(results)} trades from {len(all_to_poll)} wallets", "DIAG", terminal=True)
     return results
 
 
@@ -914,7 +914,7 @@ def _poll_watchlist(hot_cutoff: float, warm_cutoff: float, already_polled: set) 
     e = S.env()
     for w in S.get_watchlist():
         prof = e.wallet_cache.get(w)
-        if w not in already_polled and prof is not None and prof.is_verified:
+        if w not in already_polled and prof is not None and prof.is_ranked:
             candidates.add(w)
     candidates = list(candidates)[:50]
 

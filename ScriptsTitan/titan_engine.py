@@ -176,7 +176,7 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
     # even when the spiking wallet IS elite and well-known.
     # We don't re-fetch them (too slow) — just pass the cached profile.
     for w, cached_profile in S.env().wallet_cache.items():
-        if w not in wallets and (cached_profile.is_elite or cached_profile.is_verified):
+        if w not in wallets and cached_profile.is_ranked:
             wallets[w] = cached_profile
             if cached_profile.is_verified: ver_count  += 1
             if cached_profile.is_elite:    elite_count += 1
@@ -425,62 +425,31 @@ def start(log_callback=None, position_open_cb=None, position_close_cb=None, cycl
     _cache = S.env().wallet_cache
     if isinstance(_cache, _WCS):
         n = _cache.reclassify_all()
-        _log(f"♻ Startup reclassification: {n} wallet(s) updated to match current config", "INFO")
+        n_elite    = sum(1 for p in _cache.values() if p.is_elite)
+        n_verified = sum(1 for p in _cache.values() if p.is_verified)
+        n_watch    = sum(1 for p in _cache.values() if p.is_watchable)
+        _log(
+            f"  Wallets: {n_elite} elite / {n_verified} verified / {n_watch} watch"
+            + (f"  ({n} reclassified)" if n else ""),
+            "INFO", terminal=True,
+        )
 
-    _log("🚀 TITAN v10 — Multi-Strategy tracked wallet Mirror Engine", "INFO")
-
-    # v10: Print active strategies and their key params
     active = getattr(C, "ACTIVE_STRATEGIES", [])
-    _log(f"   Active strategies: {', '.join(active)}", "INFO")
-    for strat in active:
-        cfg = getattr(C, f"strategy_{strat}", {})
-        if not cfg:
-            continue
-        if strat == "recent_form":
-            _log(
-                f"   [{strat}] min_pnl_30d=${cfg.get('min_pnl_30d',0):+.0f} "
-                f"max_tph={cfg.get('max_tph',20)} price=[{cfg.get('price_min',0.18):.2f},{cfg.get('price_max',0.78):.2f}] "
-                f"min_score={cfg.get('min_score',42)} max_age={cfg.get('max_signal_age_h',0.75)}h",
-                "INFO"
-            )
-        elif strat == "drift_discount":
-            _log(
-                f"   [{strat}] discount=[{cfg.get('min_discount_pct',0.04)*100:.0f}%,{cfg.get('max_discount_pct',0.12)*100:.0f}%] "
-                f"max_age={cfg.get('max_signal_age_h',6.0)}h "
-                f"price=[{cfg.get('price_min',0.20):.2f},{cfg.get('price_max',0.72):.2f}]",
-                "INFO"
-            )
-        elif strat == "consensus_basket":
-            _log(
-                f"   [{strat}] min_elite={cfg.get('min_elite_confluence',1)} "
-                f"max_bet=${cfg.get('max_bet_abs',1.20):.2f} "
-                f"stop={cfg.get('stop_loss_pct',None)} "
-                f"price=[{cfg.get('price_min',0.20):.2f},{cfg.get('price_max',0.72):.2f}]",
-                "INFO"
-            )
-
     max_abs, max_pct = _adaptive_bet_caps()
     _log(
-        f"   Bankroll: ${S.env().paper_bankroll:.2f}  MaxBet: {max_pct*100:.0f}% / ${max_abs:.2f}  "
-        f"MaxPos: {MAX_OPEN_POSITIONS}",
-        "INFO"
+        f"  Engine:  strategies={', '.join(active)}  "
+        f"bankroll=${S.env().paper_bankroll:.2f}  maxBet={max_pct*100:.0f}%/${max_abs:.2f}  "
+        f"maxPos={MAX_OPEN_POSITIONS}",
+        "INFO", terminal=True,
     )
     _log(
-        f"   Elite gate: PnL≥${ELITE_MIN_PNL:,.0f}  Port≥${ELITE_MIN_PORT:,.0f}  "
-        f"Score≥{ELITE_MIN_SCORE}  Res≥{ELITE_MIN_RESOLVED}",
-        "INFO"
+        f"  Config:  price=[{MIN_ENTRY_PRICE:.2f},{MAX_ENTRY_PRICE:.2f}]  "
+        f"stopLoss={'ON' if STOP_LOSS_ENABLED else 'OFF'}  "
+        f"profitTarget={PROFIT_TARGET_PCT*100:.0f}%  "
+        f"elite≥PnL${ELITE_MIN_PNL:,.0f}/Port${ELITE_MIN_PORT:,.0f}/Score{ELITE_MIN_SCORE}",
+        "INFO", terminal=True,
     )
-    _log(
-        f"   Price zone: [{MIN_ENTRY_PRICE:.2f}, {MAX_ENTRY_PRICE:.2f}]  "
-        f"Ideal: [{IDEAL_PRICE_MIN:.2f}, {IDEAL_PRICE_MAX:.2f}]",
-        "INFO"
-    )
-    _log(
-        f"   StopLoss: {'ON' if STOP_LOSS_ENABLED else 'OFF (wallet-exit only)'}  "
-        f"ProfitTarget: {PROFIT_TARGET_PCT*100:.0f}%  WalletExitSell: {WALLET_EXIT_SELL}",
-        "INFO"
-    )
-    _log("─" * 60, "DATA")
+    _log("━" * 68, "DATA", terminal=True)
 
     # Start WebSocket resolution monitor
     try:
