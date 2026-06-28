@@ -27,7 +27,7 @@ from titan_types import PnlSummaryDict, TradeStatsDict
 import os
 import webbrowser
 from pathlib import Path
-from titan_ui_charts import PnLChart, PositionChart, ChartMarker, init_chart_fonts
+from titan_ui_charts import PnLChart, PositionChart, WalletPnLChart, ChartMarker, init_chart_fonts
 from titan_wallet import WalletTier
 
 if TYPE_CHECKING:
@@ -1105,6 +1105,33 @@ def run_ui(api: TitanBackend) -> None:
         section_header(sf2, "LOADED TRADES", grid_row); grid_row += 1
         for i, (lbl, val, col) in enumerate(loaded_cells):
             stat_cell(sf2, lbl, val, col, i % 4, grid_row + i // 4)
+        grid_row += math.ceil(len(loaded_cells) / 4)
+
+        if whale.is_elite:
+            winning_pos = sum(1 for pt in whale.pnl_series if pt.realised_pnl > 0)
+            pos_top5 = whale.pos_top5_pnl_share
+            trd_top5 = whale.trd_top5_pnl_share
+            pos_top5_str = f"{pos_top5 * 100:.0f}%" if pos_top5 is not None else "N/A"
+            trd_top5_str = f"{trd_top5 * 100:.0f}%" if trd_top5 is not None else "N/A"
+            pos_top5_col = "#ff5555" if pos_top5 is not None and pos_top5 > 0.80 else "#00ff88"
+            trd_top5_col = "#ff5555" if trd_top5 is not None and trd_top5 > 0.80 else "#00ff88"
+            pos_med = whale.pos_median_roi
+            trd_med = whale.trd_median_roi
+            pos_med_str = f"{pos_med * 100:.1f}%" if pos_med is not None else "N/A"
+            trd_med_str = f"{trd_med * 100:.1f}%" if trd_med is not None else "N/A"
+            pos_med_col = "#00ff88" if pos_med is not None and pos_med >= 0 else "#ff5555"
+            trd_med_col = "#00ff88" if trd_med is not None and trd_med >= 0 else "#ff5555"
+            elite_cells = [
+                ("Pos Top-5",    pos_top5_str,      pos_top5_col),
+                ("Trd Top-5",    trd_top5_str,      trd_top5_col),
+                ("Win Pos",      str(winning_pos),  "#00ff88" if winning_pos >= 20 else "#ffaa44"),
+                ("Pos Med ROI",  pos_med_str,       pos_med_col),
+                ("Trd Med ROI",  trd_med_str,       trd_med_col),
+            ]
+            section_header(sf2, "ELITE", grid_row); grid_row += 1
+            for i, (lbl, val, col) in enumerate(elite_cells):
+                stat_cell(sf2, lbl, val, col, i % 4, grid_row + i // 4)
+            grid_row += math.ceil(len(elite_cells) / 4)
 
         info_f = tk.Frame(win, bg="#060615")
         info_f.pack(fill="x", padx=8, pady=(0, 6))
@@ -1584,9 +1611,9 @@ def run_ui(api: TitanBackend) -> None:
     # ═══════════════════════════════════════════════════════════════════════════════
 
     tab_wallets = tk.Frame(nb, bg="#080810")
-    
+
     wh_header = tk.Frame(tab_wallets, bg="#0d0d1a", pady=4)
-    wh_header.pack(fill="x", padx=4, pady=(4,0))
+    wh_header.pack(fill="x", padx=4, pady=(4, 0))
     tk.Label(wh_header, text="WALLET ROSTER", fg="#00ff88", bg="#0d0d1a", font=bold_hd).pack(side="left", padx=8)
     wh_filter_var = tk.StringVar(value="ALL")
     for val, label in [("ALL","All"),("ELITE","🔥 Elite"),("VER","✅ Verified"),("HFT","⚡ HFT"),("VIP","⭐ VIP")]:
@@ -1595,9 +1622,18 @@ def run_ui(api: TitanBackend) -> None:
                        activebackground="#0d0d1a", font=mono,
                        command=lambda: _pending_update.__setitem__(0, True)
                        ).pack(side="left", padx=4)
-    
+
+    # ── vertical split: roster (top) + chart (bottom) ────────────────────────
+    wh_paned = tk.PanedWindow(tab_wallets, orient="vertical", bg="#080810",
+                               sashwidth=5, sashrelief="flat")
+    wh_paned.pack(fill="both", expand=True, padx=4, pady=4)
+
+    # top pane — roster
+    wh_top = tk.Frame(wh_paned, bg="#080810")
+    wh_paned.add(wh_top, stretch="always")
+
     wh_cols = ("Name","Score","WinRate","WilsonLB","Res","Portfolio","Rank","Volume","PnL","AvgBet","TPH","Status","HFT","VIP")
-    wh_tree = ttk.Treeview(tab_wallets, columns=wh_cols, show="headings")
+    wh_tree = ttk.Treeview(wh_top, columns=wh_cols, show="headings")
     ww = {"Name":130,"Rank":50,"Volume":90,"Score":58,"WinRate":65,"WilsonLB":72,
           "Res":50,"Portfolio":100,"PnL":90,"AvgBet":78,"TPH":55,"Status":80,"HFT":40,"VIP":40}
     for c in wh_cols:
@@ -1608,11 +1644,55 @@ def run_ui(api: TitanBackend) -> None:
     wh_tree.tag_configure(WalletTier.VERIFIED.name, foreground="#ffdd00", background="#181400")
     wh_tree.tag_configure(WalletTier.WATCH.name,    foreground="#55aaff", background="#000d1a")
     wh_tree.tag_configure(WalletTier.REJECTED.name, foreground="#554444", background="#0c0c18")
-    wh_vsb = tk.Scrollbar(tab_wallets, command=wh_tree.yview)
+    wh_vsb = tk.Scrollbar(wh_top, command=wh_tree.yview)
     wh_tree.configure(yscrollcommand=wh_vsb.set)
     wh_vsb.pack(side="right", fill="y")
-    wh_tree.pack(fill="both", expand=True, padx=4, pady=4)
+    wh_tree.pack(fill="both", expand=True)
     _whale_tree_items: dict[str, tuple[str, "Wallet"]] = {}
+
+    # bottom pane — chart
+    wh_bot = tk.Frame(wh_paned, bg="#080810")
+    wh_paned.add(wh_bot, stretch="never", minsize=160)
+
+    wh_chart_bar = tk.Frame(wh_bot, bg="#0d0d1a")
+    wh_chart_bar.pack(fill="x")
+
+    wh_cumul_var = tk.BooleanVar(value=False)
+    tk.Checkbutton(wh_chart_bar, text="Cumulated", variable=wh_cumul_var,
+                   bg="#0d0d1a", fg="#aaaaaa", selectcolor="#0d0d1a",
+                   activebackground="#0d0d1a", font=mono_sm,
+                   command=lambda: _wh_chart_reload()).pack(side="left", padx=6, pady=2)
+
+    wh_bar_var = tk.BooleanVar(value=True)
+    tk.Checkbutton(wh_chart_bar, text="Bar chart", variable=wh_bar_var,
+                   bg="#0d0d1a", fg="#aaaaaa", selectcolor="#0d0d1a",
+                   activebackground="#0d0d1a", font=mono_sm,
+                   command=lambda: _wh_chart_reload()).pack(side="left", padx=6, pady=2)
+
+    wh_graph = WalletPnLChart(wh_bot, height=200)
+    wh_graph.pack(fill="both", expand=True, padx=2, pady=2)
+
+    _wh_selected_series: list[tuple[float, float]] = []
+    _wh_selected_name:   list[str]                 = [""]
+
+    def _wh_chart_reload() -> None:
+        wh_graph.set_bar_mode(wh_bar_var.get())
+        wh_graph.load(_wh_selected_series, _wh_selected_name[0], wh_cumul_var.get())
+
+    def _wh_on_select(_event: object = None) -> None:
+        sel = wh_tree.selection()
+        if not sel:
+            return
+        item = _whale_tree_items.get(str(sel[0]))
+        if item is None:
+            return
+        _addr, wallet = item
+        _wh_selected_series.clear()
+        _wh_selected_series.extend((p.close_ts, p.realised_pnl) for p in wallet.pnl_series)
+        _wh_selected_name[0] = wallet.name or _addr[:14]
+        _wh_chart_reload()
+
+    wh_tree.bind("<<TreeviewSelect>>", _wh_on_select)
     
     
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -2107,6 +2187,8 @@ def run_ui(api: TitanBackend) -> None:
                 "discovery_leaderboard_limit",
                 "min_resolved_bets",
                 "elite_min_resolved",
+                "watch_shallow_max_pages",
+                "elite_min_winning_positions",
             }
             _list_keys = {"leaderboard_periods"}
             _bool_keys = {"discovery_use_large_trades", "discovery_use_leaderboard", "hft_enabled"}
@@ -2181,6 +2263,18 @@ def run_ui(api: TitanBackend) -> None:
     sel_inner.bind("<Configure>", lambda e: sel_canvas.configure(scrollregion=sel_canvas.bbox("all")))
     sel_canvas.bind("<Configure>", lambda ev: sel_canvas.itemconfig(sel_canvas_win, width=ev.width))
 
+    def _sel_scroll(event):
+        sel_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _sel_bind_scroll(widget):
+        widget.bind("<MouseWheel>", _sel_scroll)
+        for child in widget.winfo_children():
+            _sel_bind_scroll(child)
+
+    sel_canvas.bind("<MouseWheel>", _sel_scroll)
+    sel_inner.bind("<MouseWheel>", _sel_scroll)
+    sel_inner.bind("<Map>", lambda e: _sel_bind_scroll(sel_inner))
+
     _PARAM_META: list[tuple[str, str, str, str]] = [
         # (field_key, label, section_header_or_"", description)
         ("",                          "",                                "── Bot filters ──",     ""),
@@ -2216,56 +2310,100 @@ def run_ui(api: TitanBackend) -> None:
         ("leaderboard_periods",       "Leaderboard periods (CSV)",      "",
          "Time windows queried on the leaderboard, e.g. ALL,MONTH,WEEK. ALL catches proven long-term performers; WEEK catches wallets running hot right now. "
          "Multiple periods ensure both types are discovered each cycle without requiring a restart."),
-        ("",                          "",                                "── Watchable gate ──",  ""),
-        ("min_win_rate_watch",        "Min win rate",                   "",
-         "First hard gate: the wallet's raw win rate (resolved wins / total resolved bets) must meet this to enter the watchlist at all. "
-         "0.53 = 53% wins. Any wallet below this is rejected immediately. Too low and you watch losers; too high and you miss real edges."),
-        ("wilson_min_watch",          "Wilson lower bound",             "",
-         "Second hard gate: the Wilson lower-bound confidence interval on the win rate must meet this. "
-         "Unlike raw win rate, Wilson LB accounts for sample size — 5 wins from 5 bets scores much lower than 100 wins from 188 bets. "
-         "This prevents lucky short streaks from entering the watchlist."),
-        ("min_resolved_bets",         "Min resolved bets",              "",
-         "Wallet must have at least this many fully settled bets before it is evaluated at all. "
-         "With fewer bets the win rate and Wilson LB are statistically meaningless. 10 is the practical minimum; 20+ gives much stronger confidence."),
-        ("min_pnl",                   "Min PnL ($)",                    "",
-         "Total realised cash PnL across all resolved positions must be at or above this. "
-         "0 means break-even or better. A positive value like $500 ensures the wallet has demonstrated real monetary edge, not just a winning percentage on micro-bets."),
-        ("",                          "",                                "── Verified gate ──",   ""),
-        ("min_win_rate_ver",          "Min win rate (verified)",        "",
-         "Stricter win rate applied on top of the watchable gate for a wallet to reach verified status. "
-         "Verified wallets are polled more frequently and their signals carry more weight in the engine. "
-         "0.56 is 3 points above the watchable floor — meaningful but not extreme."),
-        ("wilson_min_ver",            "Wilson lower bound (verified)",  "",
-         "Stricter Wilson LB for verified status. Because verified wallets drive actual copy trades, confidence in their win rate must be higher. "
-         "0.49 means the lower bound of the 95% confidence interval on their win rate is still above 49% — strong statistical evidence of edge."),
-        ("min_avg_profit",            "Min avg profit/trade ($)",       "",
-         "Average dollar profit per resolved trade (total PnL / resolved bets) must meet this. "
-         "Blocks wallets that win many tiny bets — a 60% win rate on $0.10 trades is useless to copy. "
-         "This check is bypassed for HFT wallets where per-trade profit naturally compresses due to volume."),
-        ("min_avg_bet",               "Min avg bet ($)",                "",
-         "Average bet size must be at least this. A wallet betting $2 per trade cannot generate meaningful absolute PnL regardless of win rate. "
-         "Also ensures the wallet's positions are large enough to be worth copying at our own bet sizing. Bypassed for detected HFT wallets."),
-        ("min_portfolio_or_pnl",      "Min portfolio or PnL ($)",       "",
-         "Either the wallet's current total open position value OR its lifetime PnL must exceed this — whichever is larger is used. "
-         "The OR logic is intentional: a wallet that banked $2 000 but is flat today still qualifies, as does one actively holding $2 000 open. "
-         "Ensures verified wallets are economically meaningful, not just statistically good."),
-        ("",                          "",                                "── Elite gate ──",      ""),
-        ("elite_min_pnl",             "Elite min total PnL ($)",        "",
-         "Lifetime cash PnL must exceed this for elite status. Elite wallets receive the highest polling priority and strongest copy signal weight. "
-         "$40 000 default means only wallets that have extracted serious money from the market qualify — not just a lucky month."),
-        ("elite_min_portfolio",       "Elite min portfolio ($)",        "",
-         "max(current open value, lifetime PnL) must exceed this. A $80 000 threshold ensures elite wallets are not just historically profitable "
-         "but currently deploying major capital — strong evidence of active conviction rather than past glory."),
-        ("elite_min_score",           "Elite min composite score",      "",
-         "The wallet's 0–1 composite score (weighted sum of Wilson LB, PnL %, portfolio, trade count, open positions, alpha/trade) must meet this. "
-         "0.72 means the wallet scores well across all dimensions simultaneously. Adjust the weights below to change what this score rewards."),
-        ("elite_min_resolved",        "Elite min resolved bets",        "",
-         "Minimum settled bets for elite status. Combined with the Wilson LB gate this ensures the wallet's edge is both large and statistically well-evidenced. "
-         "20 bets is a solid floor; below that the score is too unstable to trust with elite-level copy weight."),
-        ("elite_alpha_per_trade",     "Elite min alpha/trade ($)",      "",
-         "Alpha per trade = total PnL / resolved bets — the cleanest measure of per-bet dollar edge. "
-         "$40 000 PnL across 40 000 bets is $1/trade (thin). $40 000 from 200 bets is $200/trade (elite). "
-         "Default 1.0 sets a minimal floor; raise it to demand genuine per-trade impact."),
+        ("",                          "",                                "── Watch gate (leaderboard only, no trade fetch) ──", ""),
+        ("min_lb_pnl_watch",          "Min leaderboard profit ($)",     "",
+         "Primary WATCH gate — checked against the Polymarket leaderboard, no trade history needed. "
+         "The wallet's all-time profit as reported by Polymarket must reach this amount. "
+         "Raise to filter out marginally profitable wallets; lower to cast a wider net."),
+        ("min_lb_vol_watch",          "Min leaderboard volume ($)",     "",
+         "The wallet's total trading volume on the Polymarket leaderboard must reach this amount. "
+         "Raise to filter out wallets that barely traded; lower to cast a wider net."),
+        ("min_lb_rank_watch",         "Max leaderboard rank",           "",
+         "The wallet must appear in the top N traders on the Polymarket leaderboard. "
+         "For example, 20000 means only wallets ranked 20000th or better are considered. "
+         "Lower this number to focus on the best-ranked traders only."),
+        ("",                          "",                                "── Verified gate (quick fetch: positions + 1 page of recent trades) ──", ""),
+        ("watch_shallow_max_pages",   "Quick trade fetch pages",        "",
+         "Number of trade history pages fetched when evaluating a watched wallet for promotion to VERIFIED. "
+         "1 page ≈ 50 trades — enough to check win rate and statistical confidence for the VERIFIED gate without downloading the full history. "
+         "Increase only if wallets with sparse recent history are being wrongly held at WATCH."),
+        ("min_resolved_bets",         "Min settled bets",               "",
+         "Minimum number of fully settled bets required to reach VERIFIED. "
+         "Computed from the quick trade fetch — wallets with fewer settled bets stay at WATCH. "
+         "10 is the practical minimum; 20 or more gives much stronger statistical reliability."),
+        ("min_win_rate_ver",          "Min win rate",                   "",
+         "Minimum fraction of settled bets that must be winners for VERIFIED (e.g. 0.62 = 62%). "
+         "Wallets below this stay at WATCH. Raise to reduce the VERIFIED population."),
+        ("wilson_min_ver",            "Min win rate — statistical lower bound", "",
+         "A stricter version of win rate that accounts for how many bets have been seen. "
+         "A 62% win rate from 10 bets is far less reliable than 62% from 50 bets — this number captures that difference. "
+         "Raise to demand higher statistical certainty before promoting a wallet."),
+        ("min_avg_profit",            "Min average profit per trade ($)", "",
+         "Average dollar profit per settled trade required for VERIFIED. "
+         "Blocks wallets that win often but only make tiny amounts per bet. "
+         "Not applied to high-frequency traders where edge comes from volume."),
+        ("min_avg_bet",               "Min average bet size ($)",       "",
+         "Average amount placed per trade required for VERIFIED. "
+         "Ensures positions are large enough to be worth copying. "
+         "Not applied to high-frequency traders."),
+        ("min_portfolio_or_pnl",      "Min portfolio or lifetime profit ($)", "",
+         "Either the wallet's current open position value OR its lifetime profit must exceed this amount for VERIFIED. "
+         "A wallet that has already banked its profits and is currently flat still qualifies."),
+        ("",                          "",                                "── Elite gate (quick data re-checked with stricter thresholds) ──", ""),
+        ("elite_min_pnl",             "Elite min lifetime profit ($)",  "",
+         "Lifetime profit re-checked at the ELITE gate using full trade data. "
+         "Set higher than the VERIFIED threshold — only wallets that have extracted serious money qualify."),
+        ("elite_min_portfolio",       "Elite min portfolio size ($)",   "",
+         "The larger of (current open value) or (lifetime profit) must exceed this. "
+         "Ensures the wallet is actively deploying significant capital."),
+        ("elite_min_resolved",        "Elite min settled bets",         "",
+         "Settled bet count re-checked with full trade history — more reliable than the quick count used at VERIFIED. "
+         "A higher threshold here filters wallets whose quick count was misleadingly high."),
+        ("elite_min_win_rate",        "Elite min win rate",             "",
+         "Win rate re-checked against the full trade history. Stricter than VERIFIED — "
+         "a quick fetch can overstate win rate if the wallet has many unresolved losing positions not yet visible."),
+        ("elite_min_wilson",          "Elite min win rate — statistical lower bound", "",
+         "Statistical lower bound on win rate re-checked against the full history. "
+         "With 50+ settled bets the estimate is tight — this threshold is far more meaningful than the equivalent at VERIFIED."),
+        ("elite_alpha_per_trade",     "Elite min dollar edge per trade ($)", "",
+         "Average net profit per settled trade computed from the full trade history. "
+         "Much more reliable than the quick estimate at VERIFIED. Set this to demand genuine per-bet dollar impact."),
+        ("elite_min_score",           "Elite min overall score",        "",
+         "Overall 0–1 score combining win rate confidence, profit percentage, portfolio size, trade count, open positions, and dollar edge per trade. "
+         "Must pass after full data is loaded — score computed on complete history is more stable than the quick estimate."),
+        ("",                          "",                                "── Elite gate (deep analysis only — requires full trade backfill) ──", ""),
+        ("elite_min_profit_factor",   "Elite min profit factor",        "",
+         "Total profits divided by total losses across all settled positions. Requires a full trade backfill. "
+         "1.0 means break-even. 1.2 means the wallet earns $1.20 for every $1 it loses. Only available after deep analysis."),
+        ("elite_min_trimmed_roi",     "Elite min average return per trade", "",
+         "Average percentage return per settled position, after discarding the top and bottom 10% of outliers. "
+         "Requires full backfill. Filters wallets whose overall profit is driven entirely by one or two lucky outsized wins. "
+         "0.02 means the wallet must average at least a 2% return per position after removing outliers."),
+        ("elite_min_confidence",      "Elite min data completeness",    "",
+         "How complete our trade history is for this wallet, from 0 to 1. "
+         "1.0 means we have fetched the wallet's full trade history. "
+         "Below 1.0 means the fetch was cut off and some history is missing — metrics computed on incomplete data are less trustworthy. "
+         "0.50 means we require at least half the history before trusting any metric enough to grant ELITE status."),
+        ("elite_max_top5_pnl_share",  "Elite max top-5 PnL concentration", "",
+         "Fraction of total realised PnL (from resolved positions) that comes from the wallet's 5 most profitable markets. "
+         "Computed from position redeems, not trade rows — this is what you see in the PnL chart. "
+         "1.0 = gate disabled. "
+         "A value above ~0.75 signals a lottery winner — the wallet's profit is dominated by a handful of lucky outsized bets, not consistent skill. "
+         "Set to e.g. 0.80 to reject wallets where 80% or more of PnL comes from just 5 markets."),
+        ("elite_min_winning_positions", "Elite min winning positions",    "",
+         "Minimum number of resolved positions that closed at a profit (realised PnL > 0). "
+         "0 = gate disabled. "
+         "Ensures the wallet has consistent wins rather than a few enormous ones. "
+         "Set to e.g. 20 to require at least 20 individually profitable bets before granting ELITE status."),
+        ("elite_min_pos_median_roi",   "Elite min pos median ROI",       "",
+         "Median return on investment per resolved position, computed from redeems (same source as the PnL chart). "
+         "Unlike trimmed mean, the median is not distorted by 1-2 enormous outlier wins — a wallet with 2 huge wins "
+         "and hundreds of small losses will have a negative median even if its total PnL looks great. "
+         "0.0 = gate disabled. Set to e.g. 0.05 to require a 5% median return per position."),
+        ("elite_min_trd_median_roi",   "Elite min trd median ROI",       "",
+         "Median return on investment per resolved trade, computed from wallet_trades closures. "
+         "Complementary to pos median ROI — based on the internal trade DB rather than the activity feed. "
+         "0.0 = gate disabled. Set to e.g. 0.05 to require a 5% median return per trade."),
         ("",                          "",                                "── Scoring weights ──", ""),
         ("weight_wilson",             "Weight: Wilson LB",              "",
          "Share of the 0–1 composite score driven by Wilson lower-bound win rate. At 0.30 this is the dominant factor — "
@@ -2285,14 +2423,15 @@ def run_ui(api: TitanBackend) -> None:
         ("weight_alpha",              "Weight: Alpha/trade",            "",
          "Share driven by average profit per resolved trade, normalised against $50/trade. "
          "Directly rewards dollar edge per bet. Combined with weight_wilson this creates a score that values both consistency and magnitude of edge."),
-        ("hft_tph_threshold",         "HFT trades/hour threshold",      "",
-         "Wallets exceeding this trades-per-hour rate are tagged HFT (high-frequency trader). "
-         "HFT is also triggered if avg_bet < $50 with more than 100 resolved bets. "
-         "The HFT tag bypasses the avg_profit and avg_bet verified-gate checks — HFT edge comes from volume not per-trade size — and adjusts their polling frequency upward."),
-        ("sports_bot_tph_threshold",  "Sports bot trades/hour threshold","",
-         "Wallets above this TPH are tagged as sports bots. Sports bots are market makers in sports/politics markets — their edge is speed and spread, not prediction accuracy. "
-         "They are excluded from copy trading even if they pass all scoring gates. "
-         "A wallet is also tagged sports bot if it matches a known sports bot name or has a mid-range TPH (50–100) with predominantly sports market activity."),
+        ("hft_tph_threshold",         "High-frequency trader threshold (trades/hour)", "",
+         "Wallets placing more trades per hour than this are tagged as high-frequency traders (HFT). "
+         "HFT is also triggered if the average bet is under $50 with more than 100 settled bets. "
+         "HFT wallets bypass the average profit and average bet checks at the VERIFIED gate — their edge comes from trade volume, not per-trade size — and are polled more frequently."),
+        ("sports_bot_tph_threshold",  "Sports bot threshold (trades/hour)", "",
+         "Wallets above this trades-per-hour rate are tagged as sports bots. "
+         "Sports bots act as market makers in sports and politics markets — their edge is speed and spread, not outcome prediction. "
+         "They are excluded from copy trading even if they pass all other gates. "
+         "A wallet is also tagged as a sports bot if it matches a known bot name, or has a mid-range trade rate (50–100/hour) with activity concentrated in sports markets."),
     ]
 
     _sel_fields: dict[str, tk.StringVar] = {}

@@ -73,6 +73,14 @@ class WalletSelector(ABC):
     def is_selected(self, wallet: "Wallet", score: float) -> tuple["WalletTier", list[str]]:
         """Return (status, fail_reasons)."""
 
+    def is_watch_eligible(self, lb_pnl: float | None, lb_vol: float | None, _lb_rank: int | None) -> tuple[bool, list[str]]:
+        """Stage 1 leaderboard-only gate. Default: pass if any lb data present."""
+        if lb_pnl is not None and lb_pnl >= 0:
+            return True, []
+        if lb_vol is not None and lb_vol > 0:
+            return True, []
+        return False, ["NO_LB_DATA"]
+
     # Fetch candidate wallet addresses from large recent buy trades and leaderboard
     # snapshots, returning a de-duplicated input set for later evaluation. This
     # method does discovery only: it does not score wallets or decide whether they
@@ -149,25 +157,49 @@ class PerformanceSelectorParams(SelectorParams):
     discovery_leaderboard_order_by: str = "PNL"
     leaderboard_periods: list[str] = field(default_factory=lambda: ["ALL", "MONTH", "WEEK"])
 
-    # WATCHABLE gate
-    min_win_rate_watch: float = 0.53
-    wilson_min_watch: float = 0.45
-    min_resolved_bets: int = 10
-    min_pnl: float = 0.0
+    # WATCH gate — leaderboard data only, no trade fetch
+    min_lb_pnl_watch:  float = 1_000.0
+    min_lb_vol_watch:  float = 5_000.0
+    min_lb_rank_watch: int   = 20_000
 
-    # VERIFIED gate
-    min_win_rate_ver: float = 0.56
-    wilson_min_ver: float = 0.49
-    min_avg_profit: float = 2.0
-    min_avg_bet: float = 10.0
-    min_portfolio_or_pnl: float = 500.0
+    # VERIFIED gate — shallow trade fetch (watch_shallow_max_pages pages)
+    # Stricter than defaults to keep VER population manageable (~800-900 wallets)
+    watch_shallow_max_pages: int = 1
+    min_resolved_bets: int = 30
+    min_win_rate_ver: float = 0.62
+    wilson_min_ver: float = 0.52
+    min_avg_profit: float = 5.0
+    min_avg_bet: float = 15.0
+    min_portfolio_or_pnl: float = 15_000.0
 
-    # ELITE gate
-    elite_min_pnl: float = 40_000.0
-    elite_min_portfolio: float = 80_000.0
+    # ELITE gate — full deep analysis required (VER→ELITE)
+    # Re-checks VER metrics with full data + adds deep-analysis-only gates
+    elite_min_pnl: float = 25_000.0
+    elite_min_portfolio: float = 50_000.0
+    elite_min_resolved: int = 50
+    elite_min_win_rate: float = 0.65
+    elite_min_wilson: float = 0.58
+    elite_alpha_per_trade: float = 10.0
     elite_min_score: float = 0.72
-    elite_min_resolved: int = 20
-    elite_alpha_per_trade: float = 1.0
+    # Deep-analysis-only gates (require compute_wallet_quality_metrics)
+    elite_min_profit_factor: float = 1.2
+    elite_min_trimmed_roi: float = 0.02
+    elite_min_confidence: float = 0.50
+    # Concentration gate: reject wallets whose PnL is dominated by a handful of lucky bets.
+    # top_5_pnl_share = fraction of total PnL from the 5 most profitable markets.
+    # 1.0 = no gate. Anything above ~0.75 means the wallet is a lottery winner, not a skill player.
+    elite_max_top5_pnl_share: float = 0.80
+    # Minimum number of resolved positions that are profitable.
+    # Ensures the wallet has consistent wins, not just a few enormous ones.
+    # 0 = no gate. Set to e.g. 20 to require at least 20 winning positions.
+    elite_min_winning_positions: int = 0
+    # Median ROI gates — median is not distorted by outlier wins unlike trimmed_roi.
+    # A wallet with 2 huge wins and hundreds of small losses will have a negative median
+    # even if its total PnL looks great.
+    # pos_median_roi: computed from redeems (pnl_series source). 0.0 = no gate.
+    # trd_median_roi: computed from wallet_trades closures. 0.0 = no gate.
+    elite_min_pos_median_roi: float = 0.0
+    elite_min_trd_median_roi: float = 0.0
 
     # Scoring weights (must sum to 1.0)
     weight_wilson: float = 0.30
@@ -231,7 +263,33 @@ class PerformanceSelector(WalletSelector):
             p.weight_alpha          * min(1.0, max(0.0, wallet.avg_profit) / 50)
         )
 
+    def is_watch_eligible(self, lb_pnl: float | None, lb_vol: float | None, lb_rank: int | None) -> tuple[bool, list[str]]:
+        """Stage 1: NEW→WATCH. Uses only leaderboard data — no trade fetch required."""
+        from titan_wallet import WalletTier  # noqa: F401 (imported for type clarity)
+        p = self.p
+        fail_reasons: list[str] = []
+        if lb_pnl is None:
+            fail_reasons.append("NO_LB_PNL")
+            return False, fail_reasons
+        if lb_pnl < p.min_lb_pnl_watch:
+            fail_reasons.append(f"LB_PNL ${lb_pnl:+,.0f}<${p.min_lb_pnl_watch:,.0f}")
+            return False, fail_reasons
+        if lb_vol is None:
+            fail_reasons.append("NO_LB_VOL")
+            return False, fail_reasons
+        if lb_vol < p.min_lb_vol_watch:
+            fail_reasons.append(f"LB_VOL ${lb_vol:,.0f}<${p.min_lb_vol_watch:,.0f}")
+            return False, fail_reasons
+        if lb_rank is None:
+            fail_reasons.append("NO_LB_RANK")
+            return False, fail_reasons
+        if lb_rank > p.min_lb_rank_watch:
+            fail_reasons.append(f"LB_RANK {lb_rank}>{p.min_lb_rank_watch}")
+            return False, fail_reasons
+        return True, []
+
     def is_selected(self, wallet: "Wallet", score: float) -> tuple["WalletTier", list[str]]:
+        """Stage 2+3: WATCH→VERIFIED→ELITE. Requires shallow (WATCH) or full (VERIFIED) trade data."""
         from titan_wallet import WalletTier
         p          = self.p
         wr         = wallet.win_rate
@@ -246,20 +304,15 @@ class PerformanceSelector(WalletSelector):
 
         fail_reasons: list[str] = []
 
+        if wallet.lb_rank is not None and wallet.lb_rank > p.min_lb_rank_watch and not wallet.vip:
+            return WalletTier.REJECTED, [f"LB_RANK {wallet.lb_rank}>{p.min_lb_rank_watch}"]
+
         hft_detected = tph >= p.hft_tph_threshold or (avg_bet > 0 and avg_bet < 50 and n_res > 100)
         if hft_detected and not p.hft_enabled:
             return WalletTier.REJECTED, ["HFT_DISABLED"]
 
-        watchable_ok = (
-            wr    >= p.min_win_rate_watch and
-            wb    >= p.wilson_min_watch   and
-            n_res >= p.min_resolved_bets  and
-            pnl   >= p.min_pnl
-        )
-        if wr    < p.min_win_rate_watch: fail_reasons.append(f"WR {wr*100:.0f}%<{p.min_win_rate_watch*100:.0f}%")
-        if wb    < p.wilson_min_watch:   fail_reasons.append(f"WilsonLB {wb*100:.0f}%<{p.wilson_min_watch*100:.0f}%")
-        if n_res < p.min_resolved_bets:  fail_reasons.append(f"Resolved {n_res}<{p.min_resolved_bets}")
-        if pnl   < p.min_pnl:           fail_reasons.append(f"PnL ${pnl:+,.0f}")
+        if n_res < p.min_resolved_bets: fail_reasons.append(f"Resolved {n_res}<{p.min_resolved_bets}")
+
         if hft_detected:
             roi_ok  = True
             port_ok = cur >= p.min_portfolio_or_pnl or pnl >= p.min_portfolio_or_pnl
@@ -269,47 +322,81 @@ class PerformanceSelector(WalletSelector):
             port_ok = cur >= p.min_portfolio_or_pnl or pnl >= p.min_portfolio_or_pnl
 
         verified_ok = (
-            watchable_ok and
-            wr >= p.min_win_rate_ver and
-            wb >= p.wilson_min_ver   and
+            n_res >= p.min_resolved_bets and
+            wr    >= p.min_win_rate_ver  and
+            wb    >= p.wilson_min_ver    and
             roi_ok and port_ok
         )
 
-        if watchable_ok and not roi_ok:
+        if not roi_ok:
             fail_reasons.append(
                 f"ROI: avg_profit=${avg_profit:.1f}<${p.min_avg_profit}"
                 + (f", avg_bet=${avg_bet:.0f}<${p.min_avg_bet:.0f}" if avg_bet > 0 and avg_bet < p.min_avg_bet else "")
             )
-        if watchable_ok and not port_ok:
+        if not port_ok:
             fail_reasons.append(f"PORT: cur=${cur:,.0f} pnl=${pnl:+,.0f}")
-        if watchable_ok and wr < p.min_win_rate_ver:
-            fail_reasons.append(f"VER_WR {wr*100:.0f}%<{p.min_win_rate_ver*100:.0f}%")
+        if wr < p.min_win_rate_ver: fail_reasons.append(f"VER_WR {wr*100:.0f}%<{p.min_win_rate_ver*100:.0f}%")
+        if wb < p.wilson_min_ver:   fail_reasons.append(f"WilsonLB {wb*100:.0f}%<{p.wilson_min_ver*100:.0f}%")
 
         portfolio_proxy = max(cur, pnl)
         elite_ok = (
             verified_ok and
-            pnl             >= p.elite_min_pnl      and
-            portfolio_proxy >= p.elite_min_portfolio and
-            score           >= p.elite_min_score     and
-            n_res           >= p.elite_min_resolved  and
-            apt             >= p.elite_alpha_per_trade
+            pnl             >= p.elite_min_pnl       and
+            portfolio_proxy >= p.elite_min_portfolio  and
+            n_res           >= p.elite_min_resolved   and
+            wr              >= p.elite_min_win_rate   and
+            wb              >= p.elite_min_wilson      and
+            apt             >= p.elite_alpha_per_trade and
+            score           >= p.elite_min_score
         )
 
         if verified_ok and not elite_ok:
             reasons: list[str] = []
-            if pnl             < p.elite_min_pnl:      reasons.append(f"PnL ${pnl:+,.0f}<${p.elite_min_pnl:,.0f}")
-            if portfolio_proxy < p.elite_min_portfolio: reasons.append(f"Port ${portfolio_proxy:,.0f}<${p.elite_min_portfolio:,.0f}")
-            if score           < p.elite_min_score:     reasons.append(f"Score {score:.2f}<{p.elite_min_score}")
-            if n_res           < p.elite_min_resolved:  reasons.append(f"Resolved {n_res}<{p.elite_min_resolved}")
-            if apt             < p.elite_alpha_per_trade: reasons.append(f"Alpha ${apt:.1f}<${p.elite_alpha_per_trade}")
+            if pnl             < p.elite_min_pnl:         reasons.append(f"PnL ${pnl:+,.0f}<${p.elite_min_pnl:,.0f}")
+            if portfolio_proxy < p.elite_min_portfolio:    reasons.append(f"Port ${portfolio_proxy:,.0f}<${p.elite_min_portfolio:,.0f}")
+            if n_res           < p.elite_min_resolved:     reasons.append(f"Resolved {n_res}<{p.elite_min_resolved}")
+            if wr              < p.elite_min_win_rate:     reasons.append(f"WR {wr*100:.0f}%<{p.elite_min_win_rate*100:.0f}%")
+            if wb              < p.elite_min_wilson:       reasons.append(f"WilsonLB {wb*100:.0f}%<{p.elite_min_wilson*100:.0f}%")
+            if apt             < p.elite_alpha_per_trade:  reasons.append(f"Alpha ${apt:.1f}<${p.elite_alpha_per_trade:.0f}")
+            if score           < p.elite_min_score:        reasons.append(f"Score {score:.2f}<{p.elite_min_score}")
             if reasons:
                 fail_reasons.append("NOT_ELITE: " + ", ".join(reasons))
 
+        watch_ok = pnl >= p.min_lb_pnl_watch
+
         if elite_ok:        status = WalletTier.ELITE
         elif verified_ok:   status = WalletTier.VERIFIED
-        elif watchable_ok:  status = WalletTier.WATCH
+        elif watch_ok:      status = WalletTier.WATCH
         else:               status = WalletTier.REJECTED
         return status, fail_reasons
+
+    def is_elite_deep_ok(self, wallet: "Wallet") -> tuple[bool, list[str]]:
+        """
+        Deep-analysis gate: called after compute_wallet_quality_metrics populates
+        quality fields. Only runs on wallets already classified ELITE by is_selected().
+        Demotes to VERIFIED if deep metrics are too weak.
+        """
+        p = self.p
+        reasons: list[str] = []
+        pf   = wallet.profit_factor
+        roi  = wallet.trimmed_roi
+        cf   = wallet.quality_confidence
+        top5 = wallet.pos_top5_pnl_share
+
+        if pf   is not None and pf   < p.elite_min_profit_factor:                    reasons.append(f"ProfitFactor {pf:.2f}<{p.elite_min_profit_factor}")
+        if roi  is not None and roi  < p.elite_min_trimmed_roi:                      reasons.append(f"TrimmedROI {roi*100:.1f}%<{p.elite_min_trimmed_roi*100:.0f}%")
+        if cf   < p.elite_min_confidence:                                            reasons.append(f"Confidence {cf:.2f}<{p.elite_min_confidence}")
+        if top5 is not None and p.elite_max_top5_pnl_share < 1.0 and top5 > p.elite_max_top5_pnl_share:
+            reasons.append(f"Concentrated {top5*100:.0f}%>{p.elite_max_top5_pnl_share*100:.0f}%")
+        if p.elite_min_winning_positions > 0:
+            wins = sum(1 for pt in wallet.pnl_series if pt.realised_pnl > 0)
+            if wins < p.elite_min_winning_positions:
+                reasons.append(f"WinningPos {wins}<{p.elite_min_winning_positions}")
+        if p.elite_min_pos_median_roi != 0.0 and wallet.pos_median_roi is not None and wallet.pos_median_roi < p.elite_min_pos_median_roi:
+            reasons.append(f"PosMedianROI {wallet.pos_median_roi*100:.1f}%<{p.elite_min_pos_median_roi*100:.1f}%")
+        if p.elite_min_trd_median_roi != 0.0 and wallet.trd_median_roi is not None and wallet.trd_median_roi < p.elite_min_trd_median_roi:
+            reasons.append(f"TrdMedianROI {wallet.trd_median_roi*100:.1f}%<{p.elite_min_trd_median_roi*100:.1f}%")
+        return len(reasons) == 0, reasons
 
     def is_sports_bot(self, name: str, tph: float) -> bool:
         p = self.p

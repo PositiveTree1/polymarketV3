@@ -34,7 +34,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import TypedDict, Any
+from typing import TypedDict, Any, Mapping
 import titan_state as S
 import titan_config as C
 from titan_config import *
@@ -93,6 +93,8 @@ class Wallet:
     wilson_lb:          float
     alpha_per_trade:    float
     wr_source:          str
+    winrate_trades_loaded:  int
+    winrate_redeems_loaded: int
 
     # ── stats ─────────────────────────────────────────────────────────────────
     n_resolved:         int
@@ -124,6 +126,27 @@ class Wallet:
     # ── debug ─────────────────────────────────────────────────────────────────
     detail:             str
     fail_reasons:       list[str] = field(default_factory=list)
+
+    # ── stored sample metrics (Step 7) ────────────────────────────────────────
+    stored_trade_count:    int = 0
+    stored_last_trade_ts:  float | None = None
+    stored_resolved_count: int = 0
+    stored_realised_pnl:   float = 0.0
+    quality_confidence:    float = 0.0
+    data_quality:          str = "D"
+    trimmed_roi:           float | None = None
+    profit_factor:         float | None = None
+    mtm_roi:               float | None = None
+    median_24h_markout:    float | None = None
+    positive_24h_markout_rate: float | None = None
+    trd_top5_pnl_share:    float | None = None
+    pos_top5_pnl_share:    float | None = None
+    trd_median_roi:        float | None = None
+    pos_median_roi:        float | None = None
+
+    # ── in-memory trade cache (not persisted) ─────────────────────────────────
+    trade_rows: "list[DB.WalletTradeRow]" = field(default_factory=list)
+    pnl_series: "list[DB.RealisedPoint]" = field(default_factory=list)
 
     # ── methods ───────────────────────────────────────────────────────────────
 
@@ -281,6 +304,8 @@ class Wallet:
             "wilson_lb":            self.wilson_lb,
             "alpha_per_trade":      self.alpha_per_trade,
             "wr_source":            self.wr_source,
+            "winrate_trades_loaded":  self.winrate_trades_loaded,
+            "winrate_redeems_loaded": self.winrate_redeems_loaded,
             "n_resolved":           self.n_resolved,
             "n_pos":                self.n_pos,
             "total_value":          self.total_value,
@@ -302,6 +327,22 @@ class Wallet:
             "lb_vol":               self.lb_vol,
             "detail":               self.detail,
             "fail_reasons":         self.fail_reasons,
+            "stored_trade_count":   self.stored_trade_count,
+            "stored_last_trade_ts": self.stored_last_trade_ts,
+            "stored_resolved_count": self.stored_resolved_count,
+            "stored_realised_pnl":  self.stored_realised_pnl,
+            "quality_confidence":   self.quality_confidence,
+            "data_quality":         self.data_quality,
+            "trimmed_roi":          self.trimmed_roi,
+            "profit_factor":        self.profit_factor,
+            "mtm_roi":              self.mtm_roi,
+            "median_24h_markout":   self.median_24h_markout,
+            "positive_24h_markout_rate": self.positive_24h_markout_rate,
+            "trd_top5_pnl_share":   self.trd_top5_pnl_share,
+            "pos_top5_pnl_share":   self.pos_top5_pnl_share,
+            "trd_median_roi":       self.trd_median_roi,
+            "pos_median_roi":       self.pos_median_roi,
+            "pnl_series":           [[p.close_ts, p.realised_pnl] for p in self.pnl_series],
         }
 
     def to_db_dict(self) -> dict[str, Any]:
@@ -327,6 +368,8 @@ class Wallet:
             wilson_lb=float(d.get("wilson_lb") or 0.0),
             alpha_per_trade=float(d.get("alpha_per_trade") or 0.0),
             wr_source=str(d.get("wr_source") or "none"),
+            winrate_trades_loaded=int(d.get("winrate_trades_loaded") or 0),
+            winrate_redeems_loaded=int(d.get("winrate_redeems_loaded") or 0),
             n_resolved=int(d.get("n_resolved") or 0),
             n_pos=int(d.get("n_pos") or 0),
             total_value=float(d.get("total_value") or 0.0),
@@ -348,6 +391,23 @@ class Wallet:
             lb_vol=d.get("lb_vol"),
             detail=str(d.get("detail") or ""),
             fail_reasons=list(d.get("fail_reasons") or []),
+            stored_trade_count=int(d.get("stored_trade_count") or 0),
+            stored_last_trade_ts=d.get("stored_last_trade_ts"),
+            stored_resolved_count=int(d.get("stored_resolved_count") or 0),
+            stored_realised_pnl=float(d.get("stored_realised_pnl") or 0.0),
+            quality_confidence=float(d.get("quality_confidence") or 0.0),
+            data_quality=str(d.get("data_quality") or "D"),
+            trimmed_roi=d.get("trimmed_roi"),
+            profit_factor=d.get("profit_factor"),
+            mtm_roi=d.get("mtm_roi"),
+            median_24h_markout=d.get("median_24h_markout"),
+            positive_24h_markout_rate=d.get("positive_24h_markout_rate"),
+            trd_top5_pnl_share=d.get("trd_top5_pnl_share") or d.get("top_5_pnl_share"),
+            pos_top5_pnl_share=d.get("pos_top5_pnl_share"),
+            trd_median_roi=d.get("trd_median_roi"),
+            pos_median_roi=d.get("pos_median_roi"),
+            pnl_series=[DB.RealisedPoint(close_ts=float(r[0]), realised_pnl=float(r[1]))
+                        for r in (d.get("pnl_series") or []) if len(r) == 2],
         )
 
     @classmethod
@@ -367,6 +427,8 @@ class Wallet:
             wilson_lb=0.0,
             alpha_per_trade=0.0,
             wr_source="none",
+            winrate_trades_loaded=0,
+            winrate_redeems_loaded=0,
             n_resolved=0,
             n_pos=0,
             total_value=0.0,
@@ -437,7 +499,211 @@ class WinRateData(TypedDict):
     trades_per_hour:    float
     recent_pnl_30d:     float | None
     recent_pnl_7d:      float | None
+    winrate_trades_loaded:  int
+    winrate_redeems_loaded: int
+    pnl_series:             "list[DB.RealisedPoint]"
+    pos_top5_pnl_share:     "float | None"
+    pos_median_roi:         "float | None"
 
+
+@dataclass
+class RawTrade:
+    condition_id: str
+    asset:        str
+    side:         str
+    size:         float
+    price:        float
+    cash:         float
+    timestamp:    float
+    outcome:      str
+    title:        str
+    source:       str          # trades | activity
+    slug:         str = ""
+    event_slug:   str = ""
+
+
+@dataclass
+class TradeClosure:
+    condition_id: str
+    asset:        str
+    side:         str
+    close_type:   str          # REDEEM | SELL
+    close_ts:     float
+    close_price:  float | None
+    close_cash:   float
+    realised_pnl: float | None
+
+
+@dataclass
+class WalletQualityMetrics:
+    resolved_positions:         int
+    open_positions:             int
+    median_position_roi:        float | None
+    trimmed_mean_position_roi:  float | None
+    money_weighted_roi:         float | None
+    position_weighted_roi:      float | None
+    profit_factor:              float | None
+    wilson_winrate_lb:          float
+    realised_win_rate:          float
+    mtm_roi:                    float | None
+    open_mtm_pnl:               float
+    median_24h_markout:         float | None
+    positive_24h_markout_rate:  float | None
+    trd_top5_pnl_share:         float | None
+    trd_median_roi:             float | None
+    profitable_rolling_50_rate: float | None
+    sample_quality_factor:      float
+    concentration_factor:       float
+    open_risk_factor:           float
+    data_truncation_factor:     float
+    confidence:                 float
+    data_quality:               str
+
+
+def compute_wallet_quality_metrics(
+    rows: "list[DB.WalletTradeRow]",
+    trade_load_limited: bool = False,
+) -> WalletQualityMetrics:
+
+    resolved  = [r for r in rows if r.status in ("REDEEMED", "SOLD") and r.realised_pnl is not None]
+    open_rows = [r for r in rows if r.status == "OPEN"]
+
+    n_resolved_with_pnl = len(resolved)
+    n_resolved = sum(1 for r in rows if r.status in ("REDEEMED", "SOLD"))
+    n_open = len(open_rows)
+
+    # ── per-position ROI ──────────────────────────────────────────────────────
+    pos_rois: list[float] = []
+    gross_profit = 0.0
+    gross_loss   = 0.0
+    wins = 0
+    for r in resolved:
+        cost = r.entry_cash
+        if cost <= 0.0:
+            continue
+        pnl  = r.realised_pnl  # type: ignore[assignment]
+        roi  = pnl / cost
+        pos_rois.append(roi)
+        if pnl > 0:
+            gross_profit += pnl
+            wins += 1
+        else:
+            gross_loss += abs(pnl)
+
+    median_roi: float | None = None
+    trimmed_roi: float | None = None
+    if pos_rois:
+        sorted_rois = sorted(pos_rois)
+        mid = len(sorted_rois) // 2
+        median_roi = sorted_rois[mid] if len(sorted_rois) % 2 else (sorted_rois[mid - 1] + sorted_rois[mid]) / 2
+        trim_n = max(1, len(sorted_rois) // 10)
+        trimmed = sorted_rois[trim_n:-trim_n] if len(sorted_rois) > 2 * trim_n else sorted_rois
+        trimmed_roi = sum(trimmed) / len(trimmed) if trimmed else None
+
+    # ── win rate / Wilson ─────────────────────────────────────────────────────
+    realised_wr = wins / n_resolved_with_pnl if n_resolved_with_pnl > 0 else 0.0
+    wilson_lb   = wilson_lower_bound(wins, n_resolved_with_pnl)
+
+    # ── profit factor ─────────────────────────────────────────────────────────
+    profit_factor: float | None = None
+    if gross_loss > 0:
+        profit_factor = round(gross_profit / gross_loss, 4)
+    elif gross_profit > 0:
+        profit_factor = 10.0
+
+    # ── money-weighted / position-weighted ROI ────────────────────────────────
+    total_resolved_cost = sum(r.entry_cash for r in resolved if r.entry_cash > 0)
+    total_resolved_pnl  = sum(r.realised_pnl for r in resolved if r.realised_pnl is not None)  # type: ignore[misc]
+    money_weighted_roi: float | None = (
+        total_resolved_pnl / total_resolved_cost if total_resolved_cost > 0 else None
+    )
+    position_weighted_roi: float | None = (
+        sum(pos_rois) / len(pos_rois) if pos_rois else None
+    )
+
+    # ── MTM: realised + open unrealised ──────────────────────────────────────
+    open_mtm_pnl = 0.0
+    for r in open_rows:
+        cur_price = r.cur_price
+        if cur_price is not None and r.entry_cash > 0:
+            cost      = r.entry_cash
+            cur_value = r.entry_size * cur_price
+            open_mtm_pnl += cur_value - cost
+    total_cost = sum(r.entry_cash for r in rows if r.entry_cash > 0)
+    mtm_pnl    = total_resolved_pnl + open_mtm_pnl
+    mtm_roi: float | None = mtm_pnl / total_cost if total_cost > 0 else None
+
+    # ── concentration: top-5 market PnL share ────────────────────────────────
+    # Use all closed rows (REDEEMED/SOLD) with entry_cash > 0; fall back to
+    # redeem_value/close_cash when realised_pnl was not stored by the activity feed.
+    all_closed = [r for r in rows if r.status in ("REDEEMED", "SOLD") and r.entry_cash > 0 and (r.realised_pnl is not None or r.redeem_value or r.close_cash)]
+    market_pnl: dict[str, float] = {}
+    for r in all_closed:
+        pnl = r.realised_pnl if r.realised_pnl is not None else (r.redeem_value or r.close_cash or 0.0) - r.entry_cash
+        market_pnl[r.condition_id] = market_pnl.get(r.condition_id, 0.0) + pnl
+    trd_top5_pnl_share: float | None = None
+    if market_pnl:
+        total_mkt_pnl = sum(market_pnl.values())
+        if total_mkt_pnl != 0.0:
+            top5 = sorted(market_pnl.values(), reverse=True)[:5]
+            trd_top5_pnl_share = sum(top5) / abs(total_mkt_pnl)
+
+    # ── rolling-50 win rate ───────────────────────────────────────────────────
+    profitable_rolling_50_rate: float | None = None
+    if n_resolved_with_pnl >= 50:
+        wins_50 = sum(1 for r in resolved[-50:] if (r.realised_pnl or 0) > 0)
+        profitable_rolling_50_rate = wins_50 / 50.0
+
+    # ── confidence: data completeness ─────────────────────────────────────────
+    # Three independent completeness signals, all must be satisfied:
+    # 1. We have realised PnL data (closures backfilled) — without it metrics are meaningless
+    # 2. We have enough resolved trades to be statistically meaningful (>=30)
+    # 3. We fetched the full history (not truncated by page cap)
+    concentration_factor   = 1.0
+    open_risk_factor       = 1.0
+    data_truncation_factor = 1.0
+    sample_quality_factor  = 1.0
+
+    if trade_load_limited:
+        confidence = round(min(0.6, n_resolved / max(n_resolved * 2, 1)), 4)
+    elif n_resolved >= 30:
+        confidence = 1.0
+    else:
+        confidence = round(n_resolved / 30, 4)
+
+    if n_resolved >= 200:
+        data_quality = "A"
+    elif n_resolved >= 80:
+        data_quality = "B"
+    elif n_resolved >= 30:
+        data_quality = "C"
+    else:
+        data_quality = "D"
+
+    return WalletQualityMetrics(
+        resolved_positions=n_resolved,
+        open_positions=n_open,
+        median_position_roi=round(median_roi, 6) if median_roi is not None else None,
+        trimmed_mean_position_roi=round(trimmed_roi, 6) if trimmed_roi is not None else None,
+        money_weighted_roi=round(money_weighted_roi, 6) if money_weighted_roi is not None else None,
+        position_weighted_roi=round(position_weighted_roi, 6) if position_weighted_roi is not None else None,
+        profit_factor=profit_factor,
+        wilson_winrate_lb=round(wilson_lb, 6),
+        realised_win_rate=round(realised_wr, 6),
+        mtm_roi=round(mtm_roi, 6) if mtm_roi is not None else None,
+        open_mtm_pnl=round(open_mtm_pnl, 4),
+        median_24h_markout=None,
+        positive_24h_markout_rate=None,
+        trd_top5_pnl_share=round(trd_top5_pnl_share, 4) if trd_top5_pnl_share is not None else None,
+        trd_median_roi=round(median_roi, 6) if median_roi is not None else None,
+        profitable_rolling_50_rate=round(profitable_rolling_50_rate, 4) if profitable_rolling_50_rate is not None else None,
+        sample_quality_factor=sample_quality_factor,
+        concentration_factor=concentration_factor,
+        open_risk_factor=open_risk_factor,
+        data_truncation_factor=data_truncation_factor,
+        confidence=confidence,
+        data_quality=data_quality,
+    )
 
 
 def _is_auto_wallet_name(name: str) -> bool:
@@ -618,225 +884,457 @@ def get_wallet_open_positions(wallet: str) -> list[WalletOpenPosition]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  INCREMENTAL TRADE PAGINATORS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _raw_trade_from_api_row(
+    r: Mapping[str, object],
+    condition_id: str,
+    asset: str,
+    side: str,
+    ts: float,
+) -> RawTrade:
+    size  = float(r.get("size") or 0.0)   # type: ignore[arg-type]
+    price = float(r.get("price") or 0.0)  # type: ignore[arg-type]
+    cash  = float(r.get("usdcSize") or 0.0) or size * price  # type: ignore[arg-type]
+    return RawTrade(
+        condition_id=condition_id, asset=asset, side=side,
+        size=size, price=price, cash=cash, timestamp=ts,
+        outcome=str(r.get("outcome") or ""),
+        title=str(r.get("title") or ""),
+        source="trades",
+        slug=str(r.get("slug") or ""),
+        event_slug=str(r.get("eventSlug") or ""),
+    )
+
+
+def fetch_wallet_trades_incremental(
+    wallet: str,
+    newest_known_ts: float | None,
+    backfill_oldest_ts: float | None,
+    refresh_ok_until_ts: float | None,
+    refresh_page_size: int = 0,
+    max_pages: int | None = None,
+) -> tuple[list[RawTrade], float | None, float | None]:
+    """
+    Returns (new_trades, new_backfill_oldest_ts, new_refresh_ok_until_ts).
+
+    REFRESH (refresh_ok_until_ts is not None):
+      Paginates all pages, stops at newest_known_ts watermark per page.
+      Covers gaps from long server downtime correctly.
+      Returns (trades, None, now) on success — caller should persist new_refresh_ok_until_ts.
+
+    BACKFILL (refresh_ok_until_ts is None):
+      Paginates all pages. Skips pages whose full range is already stored.
+      Returns (trades, oldest_ts_reached, now_if_finished_else_None).
+      Caller persists new_backfill_oldest_ts and new_refresh_ok_until_ts.
+
+    max_pages: cap total pages fetched (shallow fetch for WATCH stage). None = unlimited.
+    """
+    results: list[RawTrade] = []
+    seen: set[tuple[str, str, str, float]] = set()
+    prev_ids: set[str] = set()
+    new_oldest_ts: float | None = None
+    now_ts = time.time()
+    pages_fetched = 0
+
+    def _page(offset: int, page_size: int) -> list | None:
+        data = S.safe_get(f"{C.DATA_API}/trades", {
+            "user": wallet, "limit": page_size, "offset": offset,
+        })
+        if data is None:
+            return None
+        if isinstance(data, dict):
+            data = data.get("data") or []
+        if not isinstance(data, list):
+            return []
+        return data
+
+    def _fingerprints(data: list) -> set[str]:
+        return {
+            f"{r.get('conditionId')}|{r.get('asset')}|{r.get('side')}|{r.get('timestamp')}"
+            for r in data
+        }
+
+    if refresh_ok_until_ts is not None:
+        # REFRESH MODE: use estimated page size, keep paging until watermark hit
+        ps = max(10, min(refresh_page_size, C.TRADES_LIMIT)) if refresh_page_size > 0 else C.TRADES_LIMIT
+        prev_fps: set[str] = set()
+        success = False
+        for offset in range(0, C.TRADES_MAX_OFFSET + 1, ps):
+            if max_pages is not None and pages_fetched >= max_pages:
+                break
+            data = _page(offset, ps)
+            pages_fetched += 1
+            if data is None or not data:
+                break
+            fps = _fingerprints(data)
+            if fps and fps == prev_fps:
+                break
+            prev_fps = fps
+            watermark_hit = False
+            for r in data:
+                ts = float(r.get("timestamp") or 0.0)
+                if ts <= 0.0:
+                    continue
+                if newest_known_ts is not None and ts <= newest_known_ts:
+                    watermark_hit = True
+                    break
+                key = (str(r.get("conditionId") or ""), str(r.get("asset") or ""), str(r.get("side") or ""), ts)
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append(_raw_trade_from_api_row(r, key[0], key[1], key[2], ts))
+            if watermark_hit or len(data) < ps:
+                success = True
+                break
+        return results, None, now_ts if success else None
+
+    # BACKFILL MODE: paginate all pages, skip already-covered pages
+    backfill_finished = False
+    prev_fps2: set[str] = set()
+    for offset in range(0, C.TRADES_MAX_OFFSET + 1, C.TRADES_LIMIT):
+        if max_pages is not None and pages_fetched >= max_pages:
+            break
+        data = _page(offset, C.TRADES_LIMIT)
+        pages_fetched += 1
+        if data is None:
+            S._log(f"fetch_wallet_trades_incremental: API error at offset {offset} for {wallet[:14]}", "WARN")
+            break
+        if not data:
+            backfill_finished = True
+            break
+        fps = _fingerprints(data)
+        if fps and fps == prev_fps2:
+            backfill_finished = True
+            break
+        prev_fps2 = fps
+
+        page_min_ts = min(
+            (float(r.get("timestamp") or 0.0) for r in data if r.get("timestamp")),
+            default=0.0,
+        )
+
+        # Skip this page entirely if it falls above what we already stored
+        if backfill_oldest_ts is not None and page_min_ts > backfill_oldest_ts:
+            if len(data) < C.TRADES_LIMIT:
+                backfill_finished = True
+                break
+            continue
+
+        for r in data:
+            ts = float(r.get("timestamp") or 0.0)
+            if ts <= 0.0:
+                continue
+            key = (str(r.get("conditionId") or ""), str(r.get("asset") or ""), str(r.get("side") or ""), ts)
+            if key in seen:
+                continue
+            seen.add(key)
+            if new_oldest_ts is None or ts < new_oldest_ts:
+                new_oldest_ts = ts
+            results.append(_raw_trade_from_api_row(r, key[0], key[1], key[2], ts))
+
+        if len(data) < C.TRADES_LIMIT:
+            backfill_finished = True
+            break
+    else:
+        backfill_finished = True  # exhausted all available offsets
+
+    return results, new_oldest_ts, now_ts if backfill_finished else None
+
+
+def fetch_wallet_activity_closures_incremental(
+    wallet: str,
+    newest_activity_ts: float | None,
+) -> list[TradeClosure]:
+    """
+    Always paginates all available pages. Stops within a page once newest_activity_ts watermark is hit.
+    Works correctly for both first load and after a long server downtime.
+    """
+    results: list[TradeClosure] = []
+    seen: set[tuple[str, str, str, float]] = set()
+    prev_ids: set[str] = set()
+
+    for offset in range(0, C.ACTIVITY_MAX_OFFSET + 1, C.ACTIVITY_LIMIT):
+        data = S.safe_get(f"{C.DATA_API}/activity", {
+            "user": wallet, "type": "REDEEM",
+            "limit": C.ACTIVITY_LIMIT, "offset": offset,
+            "sortBy": "TIMESTAMP", "sortDirection": "DESC",
+        })
+        if data is None:
+            S._log(f"fetch_wallet_activity_closures_incremental: API error at offset {offset} for {wallet[:14]}", "WARN")
+            break
+        if isinstance(data, dict):
+            data = data.get("data") or []
+        if not isinstance(data, list) or not data:
+            break
+
+        page_ids = {str(r.get("id") or "") for r in data}
+        if page_ids and page_ids == prev_ids:
+            break
+        prev_ids = page_ids
+
+        watermark_hit = False
+        for r in data:
+            ts = float(r.get("timestamp") or 0.0)
+            if ts <= 0.0:
+                continue
+            if newest_activity_ts is not None and ts <= newest_activity_ts:
+                watermark_hit = True
+                break
+            cid   = str(r.get("conditionId") or "")
+            asset = str(r.get("asset") or "")
+            side  = str(r.get("side") or "BUY")
+            key   = (cid, asset, side, ts)
+            if key in seen:
+                continue
+            seen.add(key)
+            close_cash = float(r.get("usdcSize") or 0.0)
+            entry_cash = float(r.get("size") or 0.0) * float(r.get("price") or 0.0)
+            realised: float | None = None
+            if entry_cash > 0.0:
+                realised = close_cash - entry_cash
+            results.append(TradeClosure(
+                condition_id=cid, asset=asset, side=side,
+                close_type="REDEEM", close_ts=ts,
+                close_price=None, close_cash=close_cash, realised_pnl=realised,
+            ))
+
+        if watermark_hit or len(data) < C.ACTIVITY_LIMIT:
+            break
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  WIN RATE CALCULATION
 # ─────────────────────────────────────────────────────────────────────────────
-def fetch_real_winrate(wallet: str) -> WinRateData:
+
+def load_and_refresh_wallet_trades(
+    wallet_obj: "Wallet",
+    positions_raw: list | None = None,
+    max_pages: int | None = None,
+) -> WinRateData:
     """
-    Compute win rate from resolved trades.
-    Returns win_rate, wilson_lb, total resolved, avg_profit, avg_bet.
+    Single entry point for trade data + win-rate computation.
 
-    v10: Also computes recent_pnl_30d and recent_pnl_7d for Recent Form strategy.
+    1. Use wallet_obj.trade_rows if populated (already in memory).
+    2. Otherwise load from DB and cache into wallet_obj.trade_rows.
+    3. Determine how many new trades to fetch from API based on
+       refresh_ok_until_ts and trades_per_hour; fetch the minimum needed,
+       stop when the watermark (newest known ts) is hit.
+    4. Upsert new trades to DB, extend wallet_obj.trade_rows.
+    5. Compute and return WinRateData from the full trade_rows.
+
+    max_pages: when set, caps the number of API pages fetched (shallow fetch for WATCH stage).
+               None = unlimited (full fetch for VERIFIED/ELITE stage).
     """
-    _limit = C.ACTIVITY_LIMIT or 500
+    addr = wallet_obj.addr
 
-    ### Redeems trades
-    redeems = S.safe_get(f"{C.DATA_API}/activity", {
-        "user": wallet, "type": "REDEEM",
-        "limit": _limit, "sortBy": "TIMESTAMP", "sortDirection": "DESC",
-    }) or []
-    if isinstance(redeems, dict):
-        redeems = redeems.get("data", [])
-    redeem_keys = set()
-    total_redeem_value = 0.0
-    for r in redeems:
-        cid   = r.get("conditionId") or ""
-        asset = r.get("asset") or ""
-        if cid or asset:
-            redeem_keys.add((cid, asset))
-        total_redeem_value += float(r.get("usdcSize") or r.get("size") or 0)
+    # ── Step 1-2: ensure trade_rows is populated ──────────────────────────────
+    if not wallet_obj.trade_rows:
+        wallet_obj.trade_rows = DB.load_wallet_trade_rows(addr)
 
-    ### Buy trades
-    buy_trades = S.safe_get(f"{C.DATA_API}/activity", {
-        "user": wallet, "type": "TRADE", "side": "BUY",
-        "limit": _limit, "sortBy": "TIMESTAMP", "sortDirection": "DESC",
-    }) or []
-    if isinstance(buy_trades, dict):
-        buy_trades = buy_trades.get("data", [])
-    loaded_trade_count = len(buy_trades)
-    trade_load_limited = loaded_trade_count >= _limit
-    loaded_trade_ts = [
-        float(t.get("timestamp") or 0.0)
-        for t in buy_trades
-        if float(t.get("timestamp") or 0.0) > 0.0
-    ]
-    first_loaded_trade_ts = min(loaded_trade_ts) if loaded_trade_ts else None
-    last_loaded_trade_ts = max(loaded_trade_ts) if loaded_trade_ts else None
+    rows = wallet_obj.trade_rows
 
-    # Estimate trades_per_hour from timestamp spread
-    trades_per_hour = 0.0
-    if len(buy_trades) >= 10:
-        ts_list = sorted([float(t.get("timestamp") or 0) for t in buy_trades if t.get("timestamp")], reverse=True)
-        if len(ts_list) >= 2:
-            span_hours = (ts_list[0] - ts_list[-1]) / 3600
-            if span_hours > 0:
-                trades_per_hour = len(ts_list) / span_hours
+    # ── Step 3: decide whether to hit the API ─────────────────────────────────
+    backfill_oldest_ts, refresh_ok_until_ts = DB.get_wallet_fetch_state(addr)
+    now_ts = time.time()
 
-    # v10: Compute time-windowed PnL for Recent Form strategy
+    newest_known_ts: float | None = max((r.entry_ts for r in rows if r.entry_ts > 0), default=None)
+
+    if refresh_ok_until_ts is None:
+        page_size = C.TRADES_LIMIT
+    else:
+        age_hours = (now_ts - refresh_ok_until_ts) / 3600.0
+        if age_hours < 0.25:
+            return _compute_winrate_from_rows(rows, positions_raw)
+        tph = wallet_obj.trades_per_hour or 0.0
+        page_size = max(10, int(tph * age_hours * 2.5)) if tph > 0 else C.TRADES_LIMIT
+        page_size = min(page_size, C.TRADES_LIMIT)
+
+    # ── Step 4: fetch new trades from API ─────────────────────────────────────
+    new_trades, new_oldest_ts, new_refresh_ts = fetch_wallet_trades_incremental(
+        addr, newest_known_ts, backfill_oldest_ts, refresh_ok_until_ts, page_size,
+        max_pages=max_pages,
+    )
+    if new_trades:
+        DB.upsert_wallet_trades(addr, new_trades)
+        existing_keys = {(r.condition_id, r.asset, r.side, r.entry_ts) for r in rows}
+        fresh = [
+            r for r in DB.load_wallet_trade_rows(addr)
+            if (r.condition_id, r.asset, r.side, r.entry_ts) not in existing_keys
+        ]
+        wallet_obj.trade_rows = rows + fresh
+    resolved_oldest = new_oldest_ts if new_oldest_ts is not None else backfill_oldest_ts
+    DB.update_wallet_fetch_state(addr, resolved_oldest, new_refresh_ts)
+
+    return _compute_winrate_from_rows(wallet_obj.trade_rows, positions_raw)
+
+
+def _compute_winrate_from_rows(
+    rows: "list[DB.WalletTradeRow]",
+    positions_raw: list | None,
+) -> WinRateData:
     now_t   = time.time()
     days_30 = now_t - 30 * 86400
     days_7  = now_t - 7  * 86400
 
-    trades_30d = [t for t in buy_trades if float(t.get("timestamp") or 0) >= days_30]
-    trades_7d  = [t for t in buy_trades if float(t.get("timestamp") or 0) >= days_7]
+    buy_rows      = [r for r in rows if r.side == "BUY"]
+    redeemed_rows = [r for r in rows if r.status in ("REDEEMED", "SOLD")]
+    open_rows     = [r for r in rows if r.status == "OPEN"]
 
-    redeems_30d = [r for r in redeems if float(r.get("timestamp") or 0) >= days_30]
-    redeems_7d  = [r for r in redeems if float(r.get("timestamp") or 0) >= days_7]
+    loaded_trade_count    = len(buy_rows)
+    entry_ts_list         = [r.entry_ts for r in buy_rows if r.entry_ts > 0]
+    first_loaded_trade_ts = min(entry_ts_list) if entry_ts_list else None
+    last_loaded_trade_ts  = max(entry_ts_list) if entry_ts_list else None
 
-    def _cash(t):
-        v = float(t.get("usdcSize") or 0) or float(t.get("size") or 0) * float(t.get("price") or 0)
-        return v
+    trades_per_hour = 0.0
+    if len(entry_ts_list) >= 10:
+        ts_sorted  = sorted(entry_ts_list, reverse=True)
+        span_hours = (ts_sorted[0] - ts_sorted[-1]) / 3600
+        if span_hours > 0:
+            trades_per_hour = len(ts_sorted) / span_hours
 
-    loaded_trade_pnl = total_redeem_value - sum(_cash(t) for t in buy_trades)
+    total_redeem_value   = sum(r.redeem_value or r.close_cash or 0.0 for r in redeemed_rows)
+    resolved_entry_cash  = sum(r.entry_cash for r in redeemed_rows)
+    total_entry_cash     = sum(r.entry_cash for r in buy_rows)
+    # PnL only over closed positions — open buy costs must not be subtracted
+    loaded_trade_pnl     = total_redeem_value - resolved_entry_cash
 
-    recent_pnl_30d: float | None = (
-        sum(float(r.get("usdcSize", 0) or 0) for r in redeems_30d) -
-        sum(_cash(t) for t in trades_30d)
-        if first_loaded_trade_ts is not None and first_loaded_trade_ts <= days_30
-        else None
-    )
-    recent_pnl_7d: float | None = (
-        sum(float(r.get("usdcSize", 0) or 0) for r in redeems_7d) -
-        sum(_cash(t) for t in trades_7d)
-        if first_loaded_trade_ts is not None and first_loaded_trade_ts <= days_7
-        else None
-    )
+    recent_pnl_30d: float | None = None
+    recent_pnl_7d:  float | None = None
+    if first_loaded_trade_ts is not None and first_loaded_trade_ts <= days_30:
+        red_30d = [r for r in redeemed_rows if (r.close_ts or 0) >= days_30]
+        recent_pnl_30d = (
+            sum(r.redeem_value or r.close_cash or 0.0 for r in red_30d) -
+            sum(r.entry_cash for r in red_30d)
+        )
+    if first_loaded_trade_ts is not None and first_loaded_trade_ts <= days_7:
+        red_7d = [r for r in redeemed_rows if (r.close_ts or 0) >= days_7]
+        recent_pnl_7d = (
+            sum(r.redeem_value or r.close_cash or 0.0 for r in red_7d) -
+            sum(r.entry_cash for r in red_7d)
+        )
 
-    trade_by_pos = {}
-    total_spent  = 0.0
-    for t in buy_trades:
-        cid   = t.get("conditionId") or ""
-        asset = t.get("asset") or ""
-        cash  = float(t.get("usdcSize") or 0) or float(t.get("size") or 0) * float(t.get("price") or 0)
-        total_spent += cash
-        pos_key = (cid, asset)
-        if pos_key != ("", "") and pos_key not in trade_by_pos:
-            trade_by_pos[pos_key] = {"cash": cash, "cid": cid, "asset": asset}
+    redeem_keys: set[tuple[str, str]] = {(r.condition_id, r.asset) for r in redeemed_rows}
+    n_redeems = len(redeemed_rows)
 
-    ### Current Positions
-    positions_raw = S.safe_get(f"{C.DATA_API}/positions", {
-        "user": wallet, "limit": _limit,
-        "sortBy": "CURRENT", "sortDirection": "ASC",
-    }) or []
-    if isinstance(positions_raw, dict):
-        positions_raw = positions_raw.get("data", [])
-
-    current_price_by_pos = {}
-    for p in positions_raw:
-        entry = {
-            "cur":        float(p.get("curPrice", 0.5) or 0.5),
-            "redeemable": p.get("redeemable", False),
-            "cashPnl":    float(p.get("cashPnl", 0) or 0),
+    if positions_raw is not None:
+        current_price_by_pos: dict[tuple[str, str], dict] = {
+            (p.get("conditionId") or "", p.get("asset") or ""): {
+                "cur":        float(p.get("curPrice", 0.5) or 0.5),
+                "redeemable": bool(p.get("redeemable", False)),
+                "cashPnl":    float(p.get("cashPnl", 0) or 0),
+            }
+            for p in positions_raw
+            if p.get("conditionId") or p.get("asset")
         }
-        cid = p.get("conditionId") or ""
-        asset = p.get("asset") or ""
-        if cid or asset:
-            current_price_by_pos[(cid, asset)] = entry
+        n_open_known = len(positions_raw)
+    else:
+        current_price_by_pos = {
+            (r.condition_id, r.asset): {
+                "cur":        r.cur_price or 0.5,
+                "redeemable": r.redeemable,
+                "cashPnl":    r.cash_pnl or 0.0,
+            }
+            for r in open_rows
+            if r.cur_price is not None
+        }
+        n_open_known = len(open_rows)
 
-    lost_positions = set()
-    for pos_key, td in trade_by_pos.items():
+    lost_positions: set[tuple[str, str]] = set()
+    for r in open_rows:
+        pos_key = (r.condition_id, r.asset)
         if pos_key in redeem_keys:
             continue
         pos = current_price_by_pos.get(pos_key)
         if pos:
-            cur      = pos["cur"]
-            cash_pnl = pos.get("cashPnl", 0)
-            if cur <= 0.02:
+            cur_p    = pos["cur"]
+            cash_pnl = pos["cashPnl"]
+            if cur_p <= 0.02:
                 lost_positions.add(pos_key)
-            elif pos.get("redeemable") and cash_pnl < 0:
+            elif pos["redeemable"] and cash_pnl < 0:
                 lost_positions.add(pos_key)
-            elif cash_pnl < -1.0 and cur < 0.10:
+            elif cash_pnl < -1.0 and cur_p < 0.10:
                 lost_positions.add(pos_key)
 
     wins   = len(redeem_keys)
     losses = len(lost_positions)
     total  = wins + losses
 
-    # When no matches between REDEEM and BUY trades (window mismatch: wallet traded >LIMIT times),
-    # fall back to using REDEEM count as wins against total open positions.
-    if total == 0 and len(redeem_keys) > 0 and len(positions_raw) > 0:
-        n_open = len(positions_raw)
-        wins   = len(redeem_keys)
-        total  = wins + n_open
-        avg_bet = total_spent / len(trade_by_pos) if trade_by_pos else 0
-        if avg_bet == 0:
-            open_costs = [float(p.get("initialValue", 0) or p.get("currentValue", 0) or 0) for p in positions_raw]
-            open_costs = [s for s in open_costs if s > 0]
-            if open_costs:
-                avg_bet = sum(open_costs) / len(open_costs)
-        wr = wins / total
-        wb = wilson_lower_bound(wins, total)
-        avg_profit = round(total_redeem_value / wins, 2) if wins > 0 else -1
+    lost_entry_cash = sum(r.entry_cash for r in open_rows if (r.condition_id, r.asset) in lost_positions)
+
+    avg_bet    = total_entry_cash / loaded_trade_count if loaded_trade_count > 0 else 0.0
+    avg_profit = round((total_redeem_value - resolved_entry_cash - lost_entry_cash) / total, 2) if total > 0 else -1
+
+    series = sorted(
+        [DB.RealisedPoint(close_ts=r.close_ts, realised_pnl=(r.redeem_value or r.close_cash or 0.0) - r.entry_cash)
+         for r in redeemed_rows if r.close_ts and r.entry_cash > 0 and (r.redeem_value or r.close_cash)],
+        key=lambda p: p.close_ts,
+    )
+
+    pos_top5_pnl_share: float | None = None
+    pos_median_roi: float | None = None
+    if series:
+        pos_market_pnl: dict[str, float] = {}
+        for r in redeemed_rows:
+            if r.close_ts and r.entry_cash > 0 and (r.redeem_value or r.close_cash):
+                pnl = (r.redeem_value or r.close_cash or 0.0) - r.entry_cash
+                pos_market_pnl[r.condition_id] = pos_market_pnl.get(r.condition_id, 0.0) + pnl
+        total_pos_pnl = sum(pos_market_pnl.values())
+        if total_pos_pnl != 0.0:
+            top5_vals = sorted(pos_market_pnl.values(), reverse=True)[:5]
+            pos_top5_pnl_share = round(sum(top5_vals) / abs(total_pos_pnl), 4)
+    # Median ROI across wins (from redeems) + inferred losses at -100%.
+    # Losses never generate a redeem so they must be added explicitly.
+    pos_rois: list[float] = [
+        ((r.redeem_value or r.close_cash or 0.0) - r.entry_cash) / r.entry_cash
+        for r in redeemed_rows
+        if r.entry_cash > 0 and (r.redeem_value or r.close_cash)
+    ] + [-1.0] * losses
+    if pos_rois:
+        s = sorted(pos_rois)
+        mid = len(s) // 2
+        pos_median_roi = round(s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2, 6)
+
+    def _result(w: int, l: int, t: int, src: str) -> WinRateData:
+        wr = w / t if t > 0 else 0.0
+        wb = wilson_lower_bound(w, t)
         return {
-            "wins": wins, "losses": n_open, "total": total,
+            "wins": w, "losses": l, "total": t,
             "loaded_trade_count": loaded_trade_count,
-            "trade_load_limited": trade_load_limited,
-            "loaded_trade_pnl": round(loaded_trade_pnl, 2),
+            "trade_load_limited": False,
+            "loaded_trade_pnl":   round(loaded_trade_pnl, 2),
             "first_loaded_trade_ts": first_loaded_trade_ts,
-            "last_loaded_trade_ts": last_loaded_trade_ts,
+            "last_loaded_trade_ts":  last_loaded_trade_ts,
             "win_rate": round(wr, 4), "wilson_lb": round(wb, 4),
-            "source": "redeem_window_fallback",
+            "source": src,
             "avg_profit": avg_profit, "avg_bet": round(avg_bet, 2),
             "trades_per_hour": round(trades_per_hour, 2),
             "recent_pnl_30d": round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
-            "recent_pnl_7d":  round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
+            "recent_pnl_7d":  round(recent_pnl_7d,  2) if recent_pnl_7d  is not None else None,
+            "winrate_trades_loaded":  loaded_trade_count,
+            "winrate_redeems_loaded": n_redeems,
+            "pnl_series": series,
+            "pos_top5_pnl_share": pos_top5_pnl_share,
+            "pos_median_roi": pos_median_roi,
         }
 
-    resolved_keys    = redeem_keys | lost_positions
-    resolved_spend   = sum(td["cash"] for k, td in trade_by_pos.items() if k in resolved_keys)
-    n_res_with_spend = sum(1 for k in resolved_keys if k in trade_by_pos)
-    avg_bet = resolved_spend / n_res_with_spend if n_res_with_spend > 0 else 0
-
-    if total > 0 and resolved_spend > 0:
-        avg_profit = round((total_redeem_value - resolved_spend) / total, 2)
-    else:
-        avg_profit = -1
-
-    if avg_bet == 0 and trade_by_pos:
-        avg_bet = total_spent / len(trade_by_pos)
+    if total == 0 and wins > 0 and n_open_known > 0:
+        return _result(wins, n_open_known, wins + n_open_known, "redeem_window_fallback")
 
     if total == 0:
-        n_open    = len(positions_raw)
-        open_wins = sum(1 for p in positions_raw if float(p.get("cashPnl", 0) or 0) > 0)
-        wr_open   = open_wins / n_open if n_open > 0 else 0
-        wb        = wilson_lower_bound(open_wins, n_open)
-        if avg_bet == 0 and n_open > 0:
-            open_costs = [float(p.get("initialValue", 0) or p.get("currentValue", 0) or 0) for p in positions_raw]
-            open_costs = [s for s in open_costs if s > 0]
-            if open_costs:
-                avg_bet = sum(open_costs) / len(open_costs)
+        open_wins = sum(1 for p in current_price_by_pos.values() if p["cashPnl"] > 0)
+        wr_open   = open_wins / n_open_known if n_open_known > 0 else 0.0
+        wb        = wilson_lower_bound(open_wins, n_open_known)
         return {
-            "wins": open_wins, "losses": n_open - open_wins,
-            "total": n_open,
-            "loaded_trade_count": loaded_trade_count,
-            "trade_load_limited": trade_load_limited,
-            "loaded_trade_pnl": round(loaded_trade_pnl, 2),
-            "first_loaded_trade_ts": first_loaded_trade_ts,
-            "last_loaded_trade_ts": last_loaded_trade_ts,
+            **_result(open_wins, n_open_known - open_wins, n_open_known, "open_positions_proxy"),
             "win_rate": wr_open,
-            "wilson_lb": wb * 0.5, "source": "open_positions_proxy",
-            "avg_profit": avg_profit, "avg_bet": round(avg_bet, 2),
-            "trades_per_hour": round(trades_per_hour, 2),
-            "recent_pnl_30d": round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
-            "recent_pnl_7d":  round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
+            "wilson_lb": wb * 0.5,
         }
 
-    wr = wins / total
-    wb = wilson_lower_bound(wins, total)
-    return {
-        "wins": wins, "losses": losses, "total": total,
-        "loaded_trade_count": loaded_trade_count,
-        "trade_load_limited": trade_load_limited,
-        "loaded_trade_pnl": round(loaded_trade_pnl, 2),
-        "first_loaded_trade_ts": first_loaded_trade_ts,
-        "last_loaded_trade_ts": last_loaded_trade_ts,
-        "win_rate": round(wr, 4), "wilson_lb": round(wb, 4),
-        "source": "redeems + inferred losses from current positions",
-        "avg_profit": avg_profit,
-        "avg_bet":    round(avg_bet, 2),
-        "trades_per_hour": round(trades_per_hour, 2),
-        "recent_pnl_30d": round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
-        "recent_pnl_7d":  round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
-    }
+    return _result(wins, losses, total, "redeems+inferred_losses")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -862,18 +1360,43 @@ def _log_wallet_change(before: Wallet | None, after: Wallet, fail_reasons: list[
         if promoted:
             msg, level = f"⬆ {tag_before}→{tag_after} {name} ({addr[:12]}…) | {stats_str}", "INFO"
         else:
-            msg, level = f"⬇ {tag_before}→{tag_after} {name} ({addr[:12]}…) | {reasons_str} | {stats_str}", "WARN"
+            is_empty_stub = after.score == 0.0 and after.n_resolved == 0 and after.total_pnl == 0.0
+            level = "DIAG" if is_empty_stub else "WARN"
+            msg = f"⬇ {tag_before}→{tag_after} {name} ({addr[:12]}…) | {reasons_str} | {stats_str}"
     else:
         msg, level = f"~ {tag_before}→{tag_after} {name} ({addr[:12]}…) | {stats_str}", "INFO"
     S._log(f"[WALLET] {msg}", level, terminal=True)
 
 
-def get_compute_and_store_wallet(wallet: str) -> Wallet:
-    wallet = wallet.lower()
-    now_t  = time.time()
-    is_vip = wallet in {addr.lower() for addr in C.VIP_WALLETS}
+def get_compute_and_store_wallet(
+    wallet: str,
+    lb_row: "dict | None" = None,
+) -> Wallet:
+    """
+    Classify and cache a wallet using a 3-stage cost model:
+
+    Stage 1 — NEW→WATCH:
+        Only leaderboard data (lb_row). No positions call, no trade fetch.
+        If lb_row is absent (wallet not on leaderboard), create a WATCH stub
+        and defer deeper evaluation to the next cycle (stage 2).
+
+    Stage 2 — WATCH→VERIFIED:
+        Positions call + shallow trade fetch (watch_shallow_max_pages pages).
+        Uses the full VERIFIED gate: win_rate, wilson_lb, resolved bets, portfolio/PnL.
+
+    Stage 3 — VERIFIED→ELITE:
+        Full trade backfill + closure fetch + compute_wallet_quality_metrics.
+        Identical to original behavior.
+    """
+    from dataclasses import replace as _replace
+
+    wallet   = wallet.lower()
+    now_t    = time.time()
+    is_vip   = wallet in {addr.lower() for addr in C.VIP_WALLETS}
     vip_name = C.VIP_WALLET_NAMES.get(wallet, "")
-    cached = S.env().wallet_cache.get(wallet)
+    cached        = S.env().wallet_cache.get(wallet)
+    cached_origin = cached  # preserved for _log_wallet_change throughout all stages
+
     if cached is not None and (now_t - cached.ts) < WALLET_TTL:
         return cached
 
@@ -881,51 +1404,26 @@ def get_compute_and_store_wallet(wallet: str) -> Wallet:
     existing_is_real = bool(existing_name) and not _is_auto_wallet_name(existing_name)
     keep_name        = existing_name if existing_is_real else vip_name
 
-    lb_data = S.safe_get(f"{C.DATA_API}/v1/leaderboard", {"user": wallet, "timePeriod": "ALL"})
-    lb_row  = lb_data[0] if lb_data and isinstance(lb_data, list) else None
-    if lb_row and not keep_name:
-        lb_name = str(lb_row.get("userName") or "").strip()
-        if lb_name and not _is_auto_wallet_name(lb_name):
-            keep_name = lb_name
+    sel = C.get_active_selector()
+    if sel is None:
+        raise RuntimeError("get_compute_and_store_wallet requires an active selector, but none is configured.")
 
-    if not keep_name:
-        keep_name = resolve_wallet_display_name(wallet)
+    # ── Extract leaderboard data ──────────────────────────────────────────────
+    # lb_row may be passed in from a bulk discovery call (free); if not, fetch it.
+    if lb_row is None:
+        lb_data = S.safe_get(f"{C.DATA_API}/v1/leaderboard", {"user": wallet, "timePeriod": "ALL"})
+        lb_row  = lb_data[0] if lb_data and isinstance(lb_data, list) else None
 
-    pos_data = S.safe_get(f"{C.DATA_API}/positions", {
-        "user": wallet, "limit": 500,
-        "sortBy": "CASHPNL", "sortDirection": "DESC",
-    })
-
-    if pos_data is None or not isinstance(pos_data, list):
-        if cached is not None:
-            cached.ts = now_t - WALLET_TTL + 60
-            S.env().wallet_cache[wallet] = cached
-            return cached
-        null = Wallet.make_stub(wallet, "No data", status=WalletTier.ERROR)
-        null.ts   = now_t
-        null.name = keep_name or (wallet[:10] + "…")
-        null.vip  = is_vip
-        null.fail_reasons = ["no_data"]
-        S.env().wallet_cache[wallet] = null
-        return null
-
-    n_pos  = len(pos_data)
-    init   = sum(float(p.get("initialValue") or 0) for p in pos_data)
-    cur    = sum(float(p.get("currentValue") or 0) for p in pos_data)
-    pnl    = sum(float(p.get("cashPnl")      or 0) for p in pos_data)
-
-    value_data = S.safe_get(f"{C.DATA_API}/value", {"user": wallet})
-    if value_data and isinstance(value_data, list) and len(value_data) > 0:
-        cur = float(value_data[0].get("value") or cur)
-
-    pct    = pnl / init * 100 if init > 0 else 0
-    avg_sz = init / n_pos if n_pos > 0 else 0
-
-    lb_rank: int | None = None
+    lb_pnl:  float | None = None
     lb_vol:  float | None = None
+    lb_rank: int   | None = None
     if lb_row:
+        if not keep_name:
+            lb_name = str(lb_row.get("userName") or "").strip()
+            if lb_name and not _is_auto_wallet_name(lb_name):
+                keep_name = lb_name
         if lb_row.get("pnl") is not None:
-            pnl = float(lb_row["pnl"])
+            lb_pnl = float(lb_row["pnl"])
         try:
             lb_rank = int(lb_row["rank"]) if lb_row.get("rank") is not None else None
         except (ValueError, TypeError):
@@ -933,7 +1431,155 @@ def get_compute_and_store_wallet(wallet: str) -> Wallet:
         if lb_row.get("vol") is not None:
             lb_vol = float(lb_row["vol"])
 
-    wr_data            = fetch_real_winrate(wallet)
+    final_name = existing_name if existing_is_real else (keep_name or wallet[:10] + "…")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STAGE 1 — leaderboard gate: runs for every wallet on every cycle
+    # ══════════════════════════════════════════════════════════════════════════
+    watch_ok, fail_reasons = sel.is_watch_eligible(lb_pnl, lb_vol, lb_rank)
+    if not watch_ok and not is_vip:
+        stub = Wallet.make_stub(wallet, f"lb_pnl=${lb_pnl:+,.0f}" if lb_pnl is not None else "no_lb_data",
+                                status=WalletTier.REJECTED)
+        stub.ts        = now_t
+        stub.name      = final_name
+        stub.vip       = is_vip
+        stub.lb_rank   = lb_rank
+        stub.lb_vol    = lb_vol
+        stub.fail_reasons = fail_reasons
+        S.env().wallet_cache[wallet] = stub
+        return stub
+
+    # Pass stage 1 — build a WATCH stub and fall through to stage 2 immediately
+    stub = Wallet.make_stub(wallet, "lb_watch_pending", status=WalletTier.WATCH)
+    stub.ts        = now_t
+    stub.name      = final_name
+    stub.vip       = is_vip
+    stub.lb_rank   = lb_rank
+    stub.lb_vol    = lb_vol
+    stub.total_pnl = lb_pnl if lb_pnl is not None else 0.0
+    stub.fail_reasons = []
+    cached = stub
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STAGE 2 — positions + shallow trade fetch → VERIFIED gate
+    # ══════════════════════════════════════════════════════════════════════════
+    if not keep_name:
+        keep_name = resolve_wallet_display_name(wallet)
+    final_name = existing_name if existing_is_real else (keep_name or wallet[:10] + "…")
+
+    _syn = DB.get_wallet_synthetic_position(wallet)
+    _pos_age   = now_t - _syn[0] if _syn else float("inf")
+    _pos_stale = _pos_age > WALLET_TTL / 2
+
+    if _pos_stale:
+        pos_data = S.safe_get(f"{C.DATA_API}/positions", {
+            "user": wallet, "limit": 500,
+            "sortBy": "CASHPNL", "sortDirection": "DESC",
+        })
+        if pos_data is None or not isinstance(pos_data, list):
+            cached.ts = now_t - WALLET_TTL + 60
+            S.env().wallet_cache[wallet] = cached
+            return cached
+        DB.update_wallet_positions(wallet, pos_data)
+        n_pos    = len(pos_data)
+        init     = sum(float(p.get("initialValue") or 0) for p in pos_data)
+        cur      = sum(float(p.get("currentValue") or 0) for p in pos_data)
+    else:
+        pos_data = None
+        _, n_pos, init, cur, _ = _syn  # type: ignore[misc]
+
+    total_pnl = lb_pnl if lb_pnl is not None else 0.0
+    pct    = total_pnl / init * 100 if init > 0 else 0
+    avg_sz = init / n_pos if n_pos > 0 else 0
+
+    from titan_selector import PerformanceSelector as _PS
+    shallow_pages = sel.p.watch_shallow_max_pages if isinstance(sel, _PS) else 1
+    _trade_carrier = cached
+    wr_data = load_and_refresh_wallet_trades(_trade_carrier, pos_data, max_pages=shallow_pages)
+
+    _draft = Wallet(
+        addr=wallet, name=final_name, ts=now_t,
+        loaded_trade_count=wr_data["loaded_trade_count"],
+        trade_load_limited=wr_data["trade_load_limited"],
+        loaded_trade_pnl=wr_data["loaded_trade_pnl"],
+        first_loaded_trade_ts=wr_data["first_loaded_trade_ts"],
+        last_loaded_trade_ts=wr_data["last_loaded_trade_ts"],
+        score=0.0, win_rate=wr_data["win_rate"], wilson_lb=wr_data["wilson_lb"],
+        alpha_per_trade=0.0, wr_source=wr_data["source"],
+        winrate_trades_loaded=wr_data["winrate_trades_loaded"],
+        winrate_redeems_loaded=wr_data["winrate_redeems_loaded"],
+        n_resolved=wr_data["total"], n_pos=n_pos,
+        total_value=cur, total_pnl=total_pnl, pnl_pct=pct, avg_pos_size=avg_sz,
+        avg_profit=wr_data["avg_profit"], avg_bet=wr_data["avg_bet"],
+        trades_per_hour=round(wr_data["trades_per_hour"], 2),
+        status=WalletTier.WATCH, hft=False, vip=is_vip, sports_bot=False, dead=False,
+        recent_pnl_30d=wr_data["recent_pnl_30d"],
+        recent_pnl_7d=wr_data["recent_pnl_7d"],
+        recent_ts=now_t, lb_rank=lb_rank, lb_vol=lb_vol, detail="", fail_reasons=[],
+        pnl_series=wr_data["pnl_series"],
+        pos_top5_pnl_share=wr_data["pos_top5_pnl_share"],
+        pos_median_roi=wr_data["pos_median_roi"],
+    )
+    result = _draft.reclassify(sel)
+    _log_wallet_change(cached_origin, result, result.fail_reasons, final_name, wallet)
+    _changed = any(
+        getattr(result, k) != getattr(cached_origin, k)
+        for k in ("status", "score", "win_rate", "wilson_lb", "total_pnl", "name",
+                   "hft", "loaded_trade_count", "ts")
+    ) if cached_origin is not None else True
+    S.env().wallet_cache[wallet] = result
+    if result.is_active and _changed:
+        DB.upsert_wallet_profile(wallet, result)
+    elif not result.is_active and cached.is_active:
+        DB.clear_wallet_profile(wallet)
+    if not result.is_ranked:
+        return result
+    # Wallet reached VERIFIED or ELITE — fall through to stage 3 for full backfill
+    cached = result
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STAGE 3 — VERIFIED/ELITE: full fetch + deep analysis
+    # ══════════════════════════════════════════════════════════════════════════
+    if not keep_name:
+        keep_name = resolve_wallet_display_name(wallet)
+    final_name = existing_name if existing_is_real else (keep_name or wallet[:10] + "…")
+
+    _syn = DB.get_wallet_synthetic_position(wallet)
+    _pos_age   = now_t - _syn[0] if _syn else float("inf")
+    _pos_stale = _pos_age > WALLET_TTL / 2
+
+    if _pos_stale:
+        pos_data = S.safe_get(f"{C.DATA_API}/positions", {
+            "user": wallet, "limit": 500,
+            "sortBy": "CASHPNL", "sortDirection": "DESC",
+        })
+        if pos_data is None or not isinstance(pos_data, list):
+            if cached is not None:
+                cached.ts = now_t - WALLET_TTL + 60
+                S.env().wallet_cache[wallet] = cached
+                return cached
+            null = Wallet.make_stub(wallet, "No data", status=WalletTier.ERROR)
+            null.ts   = now_t
+            null.name = final_name
+            null.vip  = is_vip
+            null.fail_reasons = ["no_data"]
+            S.env().wallet_cache[wallet] = null
+            return null
+        DB.update_wallet_positions(wallet, pos_data)
+        n_pos = len(pos_data)
+        init  = sum(float(p.get("initialValue") or 0) for p in pos_data)
+        cur   = sum(float(p.get("currentValue") or 0) for p in pos_data)
+    else:
+        pos_data = None
+        _, n_pos, init, cur, _ = _syn  # type: ignore[misc]
+
+    total_pnl = lb_pnl if lb_pnl is not None else 0.0
+    pct    = total_pnl / init * 100 if init > 0 else 0
+    avg_sz = init / n_pos if n_pos > 0 else 0
+
+    _trade_carrier = cached if cached is not None else Wallet.make_stub(wallet, "")
+    wr_data = load_and_refresh_wallet_trades(_trade_carrier, pos_data)
+
     wr                 = wr_data["win_rate"]
     wb                 = wr_data["wilson_lb"]
     n_res              = wr_data["total"]
@@ -944,21 +1590,14 @@ def get_compute_and_store_wallet(wallet: str) -> Wallet:
     loaded_trade_count = wr_data["loaded_trade_count"]
     trade_load_limited = wr_data["trade_load_limited"]
     loaded_trade_pnl   = wr_data["loaded_trade_pnl"]
-    first_loaded_trade_ts = wr_data["first_loaded_trade_ts"]
-    last_loaded_trade_ts  = wr_data["last_loaded_trade_ts"]
-    recent_pnl_30d     = wr_data["recent_pnl_30d"]
-    recent_pnl_7d      = wr_data["recent_pnl_7d"]
+    first_loaded_trade_ts  = wr_data["first_loaded_trade_ts"]
+    last_loaded_trade_ts   = wr_data["last_loaded_trade_ts"]
+    recent_pnl_30d         = wr_data["recent_pnl_30d"]
+    recent_pnl_7d          = wr_data["recent_pnl_7d"]
+    winrate_trades_loaded  = wr_data["winrate_trades_loaded"]
+    winrate_redeems_loaded = wr_data["winrate_redeems_loaded"]
+    pnl_series             = wr_data["pnl_series"]
 
-    if existing_is_real:
-        final_name = existing_name
-    elif keep_name:
-        final_name = keep_name
-    elif existing_name and _is_auto_wallet_name(existing_name):
-        final_name = existing_name
-    else:
-        final_name = wallet[:10] + "…"
-
-    sel = C.get_active_selector()
     _draft = Wallet(
         addr=wallet, name=final_name, ts=now_t,
         loaded_trade_count=loaded_trade_count, trade_load_limited=trade_load_limited,
@@ -966,22 +1605,84 @@ def get_compute_and_store_wallet(wallet: str) -> Wallet:
         first_loaded_trade_ts=float(first_loaded_trade_ts) if first_loaded_trade_ts is not None else None,
         last_loaded_trade_ts=float(last_loaded_trade_ts) if last_loaded_trade_ts is not None else None,
         score=0.0, win_rate=wr, wilson_lb=wb, alpha_per_trade=0.0, wr_source=wr_src,
-        n_resolved=n_res, n_pos=n_pos, total_value=cur, total_pnl=pnl, pnl_pct=pct,
+        winrate_trades_loaded=winrate_trades_loaded, winrate_redeems_loaded=winrate_redeems_loaded,
+        n_resolved=n_res, n_pos=n_pos, total_value=cur, total_pnl=total_pnl, pnl_pct=pct,
         avg_pos_size=avg_sz, avg_profit=avg_profit, avg_bet=avg_bet, trades_per_hour=round(tph, 2),
         status=WalletTier.REJECTED, hft=False, vip=is_vip, sports_bot=False, dead=False,
         recent_pnl_30d=round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
         recent_pnl_7d=round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
         recent_ts=now_t, lb_rank=lb_rank, lb_vol=lb_vol, detail="", fail_reasons=[],
+        pnl_series=pnl_series,
+        pos_top5_pnl_share=wr_data["pos_top5_pnl_share"],
+        pos_median_roi=wr_data["pos_median_roi"],
     )
     result = _draft.reclassify(sel)
 
-    _log_wallet_change(cached, result, result.fail_reasons, final_name, wallet)
+    if result.is_ranked:
+        try:
+            last_activity_ts = DB.get_wallet_last_activity_ts(wallet)
+            closures = fetch_wallet_activity_closures_incremental(wallet, last_activity_ts)
+            if closures:
+                DB.apply_wallet_trade_closures(wallet, closures)
+                _trade_carrier.trade_rows = DB.load_wallet_trade_rows(wallet)
+            if not _trade_carrier.trade_rows:
+                _trade_carrier.trade_rows = DB.load_wallet_trade_rows(wallet)
+
+            trade_rows     = _trade_carrier.trade_rows
+            total_stored   = len(trade_rows)
+            total_resolved = sum(1 for r in trade_rows if r.status in ("REDEEMED", "SOLD"))
+            qm             = compute_wallet_quality_metrics(trade_rows, trade_load_limited=result.trade_load_limited)
+            stored_pnl     = DB.get_wallet_realised_pnl(wallet)
+            last_trade_ts_stored = max((r.entry_ts for r in trade_rows if r.entry_ts > 0), default=None)
+            result = _replace(
+                result,
+                trade_rows=trade_rows,
+                stored_trade_count=total_stored,
+                stored_last_trade_ts=last_trade_ts_stored,
+                stored_resolved_count=total_resolved,
+                stored_realised_pnl=round(stored_pnl, 4),
+                quality_confidence=qm.confidence,
+                data_quality=qm.data_quality,
+                trimmed_roi=qm.trimmed_mean_position_roi,
+                profit_factor=qm.profit_factor,
+                mtm_roi=qm.mtm_roi,
+                median_24h_markout=qm.median_24h_markout,
+                positive_24h_markout_rate=qm.positive_24h_markout_rate,
+                trd_top5_pnl_share=qm.trd_top5_pnl_share,
+                trd_median_roi=qm.trd_median_roi,
+            )
+
+            _, refresh_ok_until_ts = DB.get_wallet_fetch_state(wallet)
+            bf_tag = f"✓refresh@{time.strftime('%H:%M', time.localtime(refresh_ok_until_ts))}" if refresh_ok_until_ts else "⬇backfill"
+            S._log(
+                f"wallet_trades {result.tag()} {result.name} "
+                f"{len(closures)} closures [{bf_tag}] | "
+                f"wr_input: {result.winrate_trades_loaded} trades + {result.winrate_redeems_loaded} redeems | "
+                f"db: {total_stored} total / {total_resolved} resolved",
+                "DATA",
+            )
+        except Exception as _e:
+            S._log(f"wallet_trades persistence failed for {wallet[:14]}: {_e}", "WARN")
+
+        # Deep-analysis ELITE gate: always runs, even if trade fetch failed (confidence=0 will demote)
+        if result.is_elite:
+            from titan_selector import PerformanceSelector as _PS
+            if isinstance(sel, _PS):
+                deep_ok, deep_reasons = sel.is_elite_deep_ok(result)
+                if not deep_ok:
+                    result = _replace(result, status=WalletTier.VERIFIED,
+                                      fail_reasons=result.fail_reasons + [f"DEEP_GATE: {', '.join(deep_reasons)}"])
+                    S._log(f"[WALLET] ⬇ ELITE→VER {result.name} ({wallet[:12]}…) deep gate failed: {deep_reasons}", "WARN", terminal=True)
+
+    _log_wallet_change(cached_origin, result, result.fail_reasons, final_name, wallet)
 
     _changed = cached is None or any(
         getattr(result, k) != getattr(cached, k)
         for k in ("status", "score", "win_rate", "wilson_lb",
                   "total_pnl", "name", "hft", "vip", "sports_bot", "dead", "recent_pnl_30d", "recent_pnl_7d",
-                  "loaded_trade_count", "trade_load_limited", "first_loaded_trade_ts", "last_loaded_trade_ts", "ts")
+                  "loaded_trade_count", "trade_load_limited", "first_loaded_trade_ts", "last_loaded_trade_ts", "ts",
+                  "stored_trade_count", "stored_resolved_count", "stored_realised_pnl",
+                  "quality_confidence", "data_quality", "trimmed_roi", "profit_factor", "mtm_roi")
     )
     S.env().wallet_cache[wallet] = result
     if result.is_active and _changed:
@@ -1064,6 +1765,7 @@ class WalletsCacheSrv(WalletsCache):
             result = w.reclassify(sel)
             if w.tier() != result.tier() or w.hft != result.hft:
                 updated += 1
+                _log_wallet_change(w, result, result.fail_reasons, w.name, addr)
 
             self._data[addr] = result
             if result.is_active:
@@ -1085,7 +1787,7 @@ class WalletsCacheSrv(WalletsCache):
             if profile.recent_ts >= stale_threshold:
                 continue
             try:
-                wr_data = fetch_real_winrate(addr)
+                wr_data = load_and_refresh_wallet_trades(profile)
                 profile.recent_pnl_30d = wr_data["recent_pnl_30d"]
                 profile.recent_pnl_7d  = wr_data["recent_pnl_7d"]
                 profile.recent_ts      = now_t

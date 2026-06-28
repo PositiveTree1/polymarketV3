@@ -123,7 +123,8 @@ class Market:
 
 import titan_config as C
 from titan_config import *
-from titan_wallet import Wallet, get_compute_and_store_wallet, get_elite_wallets
+from titan_wallet import Wallet, get_compute_and_store_wallet, get_elite_wallets, fetch_wallet_trades_incremental
+import titan_db as _DB
 
 _SPORTS_KEYWORDS = (
     "vs", "spread", "o/u", "over", "under", "winner", "set ", "game ",
@@ -798,62 +799,86 @@ def _normalise_trade(t: dict, wallet: str, hot_cutoff: float, warm_cutoff: float
 # ─────────────────────────────────────────────────────────────────────────────
 #  PER-WALLET POLLING
 # ─────────────────────────────────────────────────────────────────────────────
-_poll_limit_warned: set[str] = set()
-
-
 def _poll_wallet_trades(wallet: str, limit: int, min_cash: float,
                         hot_cutoff: float, warm_cutoff: float,
                         source: str, is_elite: bool = False,
                         avg_bet: float = 0, hft: bool = False,
                         is_large_trade_mode: bool = False) -> list[WalletObservation]:
-    data = S.safe_get(f"{C.DATA_API}/trades", {
-        "user":         wallet,
-        "limit":        limit,
-        "side":         "BUY",
-        "filterType":   "CASH",
-        "filterAmount": min_cash,
-    })
-    if not data or not isinstance(data, list):
-        return []
-    prof    = S.env().wallet_cache.get(wallet)
-    name    = (prof.name if prof is not None else None) or wallet[:14] + "…"
-    if len(data) >= limit:
-        if wallet not in _poll_limit_warned:
-            _poll_limit_warned.add(wallet)
-            S._log(f"⚠ Poll limit hit for {name} ({len(data)}/{limit}) — trades may be truncated", "WARN")
-    else:
-        _poll_limit_warned.discard(wallet)
-    results : list[WalletObservation] = []
-    for t in data:
-        whaletrade : WalletObservation | None = _normalise_trade(t, wallet, hot_cutoff, warm_cutoff, source, is_elite)
-        if whaletrade is None:
+    prof = S.env().wallet_cache.get(wallet)
+    name = (prof.name if prof is not None else None) or wallet[:14] + "…"
+
+    newest_known_ts = _DB.get_wallet_last_trade_ts(wallet)
+    backfill_oldest_ts, refresh_ok_until_ts = _DB.get_wallet_fetch_state(wallet)
+
+    refresh_page_size = 0
+    if refresh_ok_until_ts is not None and prof is not None:
+        tph = prof.trades_per_hour or 0.0
+        hours_since = (time.time() - refresh_ok_until_ts) / 3600.0
+        if tph > 0 and hours_since > 0:
+            refresh_page_size = max(10, int(tph * hours_since * 2.5))
+
+    raw_trades, new_oldest_ts, new_refresh_ts = fetch_wallet_trades_incremental(
+        wallet, newest_known_ts, backfill_oldest_ts, refresh_ok_until_ts, refresh_page_size,
+    )
+    if raw_trades:
+        _DB.upsert_wallet_trades(wallet, raw_trades)
+    resolved_oldest = new_oldest_ts if new_oldest_ts is not None else backfill_oldest_ts
+    _DB.update_wallet_fetch_state(wallet, resolved_oldest, new_refresh_ts)
+
+    results: list[WalletObservation] = []
+    for t in raw_trades:
+        if t.timestamp < warm_cutoff:
             continue
+        if not (0.02 < t.price < 0.98):
+            continue
+        if not t.condition_id or not t.outcome:
+            continue
+        if t.cash <= 0:
+            continue
+        if t.cash < min_cash:
+            continue
+        obs = WalletObservation(
+            wallet=wallet.lower(),
+            name=name,
+            cid=t.condition_id,
+            asset=t.asset,
+            slug=t.slug,
+            event_slug=t.event_slug,
+            title=t.title or t.slug or t.condition_id[:28],
+            outcome=t.outcome,
+            price=t.price,
+            size=t.size,
+            cash=t.cash,
+            ts=t.timestamp,
+            window="hot" if t.timestamp >= hot_cutoff else "warm",
+            source=source,
+            is_elite=is_elite,
+        )
 
         if hft and avg_bet > 0:
-            cash = whaletrade.cash
-            if cash >= avg_bet * 3.0:
-                whaletrade.is_large_trade = True
-                results.append(whaletrade)
+            if obs.cash >= avg_bet * 3.0:
+                obs.is_large_trade = True
+                results.append(obs)
                 continue
-            if cash < max(HFT_MIN_CASH_PER_TRADE, avg_bet * ELITE_TRADE_MIN_FRACTION):
+            if obs.cash < max(HFT_MIN_CASH_PER_TRADE, avg_bet * ELITE_TRADE_MIN_FRACTION):
                 S._log(
-                    f"  ⏭ {name} HFT skip ${cash:,.0f} < "
+                    f"  ⏭ {name} HFT skip ${obs.cash:,.0f} < "
                     f"{ELITE_TRADE_MIN_FRACTION*100:.0f}% of avg ${avg_bet:,.0f}",
                     "DIAG"
                 )
                 continue
-            results.append(whaletrade)
-        elif not hft and avg_bet > 0 and whaletrade.cash < avg_bet * ELITE_TRADE_MIN_FRACTION:
+            results.append(obs)
+        elif not hft and avg_bet > 0 and obs.cash < avg_bet * ELITE_TRADE_MIN_FRACTION:
             S._log(
-                f"  ⏭ {name} skipped ${whaletrade.cash:,.0f} < "
+                f"  ⏭ {name} skipped ${obs.cash:,.0f} < "
                 f"{ELITE_TRADE_MIN_FRACTION*100:.0f}% of avg ${avg_bet:,.0f}",
                 "DIAG"
             )
             continue
         else:
-            if avg_bet > 0 and whaletrade.cash >= avg_bet * 3.0:
-                whaletrade.is_large_trade = True
-            results.append(whaletrade)
+            if avg_bet > 0 and obs.cash >= avg_bet * 3.0:
+                obs.is_large_trade = True
+            results.append(obs)
     return results
 
 

@@ -12,7 +12,7 @@ import titan_db as DB
 import titan_prices
 from titan_monitor_job import start_monitored_thread
 from titan_prices import PricesCacheSrv
-from titan_config import STATE_FILE, STATE_DB, BANKROLL_START, MAX_WATCHLIST_SIZE
+from titan_config import STATE_FILE, STATE_DB, BANKROLL_START
 from titan_wallet import Wallet, WalletsCacheSrv
 
 _STARTUP_ELITE_VER_REFRESH_MAX_AGE_S = 2 * 24 * 3600
@@ -378,7 +378,7 @@ def _refresh_elite_ver_wallets() -> None:
 
     targets = [
         (addr, p) for addr, p in S.env().wallet_cache.items()
-        if p.is_ranked and p.ts <= stale_before
+        if p.is_ranked and (p.ts <= stale_before or (p.is_elite and (not p.pnl_series or p.pos_top5_pnl_share is None or p.trd_top5_pnl_share is None or p.pos_median_roi is None or p.trd_median_roi is None)))
     ]
     elite_ver_total = sum(1 for p in S.env().wallet_cache.values() if p.is_ranked)
     fresh_count = elite_ver_total - len(targets)
@@ -393,6 +393,8 @@ def _refresh_elite_ver_wallets() -> None:
         tier_before = p.tier()
         name = p.name or addr[:14] + "..."
         try:
+            from dataclasses import replace as _replace
+            S.env().wallet_cache[addr] = _replace(p, ts=0.0)
             refreshed = get_compute_and_store_wallet(addr)
             if refreshed.is_active:
                 DB.upsert_wallet_profile(addr, refreshed)
@@ -417,14 +419,15 @@ def _load_wallets_from_db() -> None:
     from titan_config import SEED_WATCHLIST, VIP_WALLETS, VIP_WALLET_NAMES
     from titan_wallet import Wallet
     vip_wallets = {w.lower() for w in VIP_WALLETS}
-    try:
-        profiles = DB.load_watchable_wallets(MAX_WATCHLIST_SIZE)
-        with_profile = 0
-        legacy = 0
-        for addr, raw in profiles.items():
-            if addr in S.env().wallet_cache:
-                continue
-            if raw is not None:
+    profiles = DB.load_watchable_wallets()
+    with_profile = 0
+    legacy = 0
+    failed = 0
+    for addr, raw in profiles.items():
+        if addr in S.env().wallet_cache:
+            continue
+        if raw is not None:
+            try:
                 wallet = Wallet.from_db(addr, raw)
                 wallet.vip = addr.lower() in vip_wallets
                 vip_name = VIP_WALLET_NAMES.get(addr.lower(), "")
@@ -436,22 +439,24 @@ def _load_wallets_from_db() -> None:
                 S._log(f"📂 LOAD {display} {wallet.status.display()}", "DIAG")
                 S.env().wallet_cache[addr] = wallet
                 with_profile += 1
-            else:
-                S.env().wallet_cache[addr] = _make_stub(addr, "legacy")
-                legacy += 1
+            except Exception as e:
+                import traceback
+                S._log(f"⚠ Wallet load failed {addr[:14]}… ({e})\n{traceback.format_exc()}", "WARN")
+                failed += 1
+        else:
+            S.env().wallet_cache[addr] = _make_stub(addr, "legacy")
+            legacy += 1
 
-        seeds_added = 0
-        for addr in SEED_WATCHLIST:
-            a = addr.lower()
-            if a not in S.env().wallet_cache and len(S.get_watchlist()) < MAX_WATCHLIST_SIZE:
-                S.env().wallet_cache[a] = _make_stub(a, "seed")
-                DB.set_watchable(a, True)
-                seeds_added += 1
+    seeds_added = 0
+    for addr in SEED_WATCHLIST:
+        a = addr.lower()
+        if a not in S.env().wallet_cache:
+            S.env().wallet_cache[a] = _make_stub(a, "seed")
+            DB.set_watchable(a, True)
+            seeds_added += 1
 
-        S._log(
-            f"📂 Wallets loaded: {with_profile} with profile, {legacy} legacy, {seeds_added} seeds | "
-            f"watchable={len(S.get_watchlist())}",
-            "INFO",
-        )
-    except Exception as e:
-        S._log(f"⚠ Wallet load failed ({e})", "WARN")
+    S._log(
+        f"📂 Wallets loaded: {with_profile} with profile, {legacy} legacy, {seeds_added} seeds, {failed} failed | "
+        f"watchable={len(S.get_watchlist())}",
+        "INFO",
+    )

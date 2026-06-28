@@ -8,6 +8,7 @@ Keeps titan_state.json lean by offloading high-cardinality data here.
 import json
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Iterator
 if TYPE_CHECKING:
@@ -15,7 +16,38 @@ if TYPE_CHECKING:
     from titan_signals import Signal
     from titan_trade import TradeRecord
     from titan_market import Market
-    from titan_wallet import Wallet
+    from titan_wallet import Wallet, RawTrade, TradeClosure
+
+
+@dataclass
+class WalletTradeRow:
+    id:             int
+    wallet:         str
+    condition_id:   str
+    asset:          str
+    side:           str
+    outcome:        str
+    title:          str
+    slug:           str
+    event_slug:     str
+    entry_ts:       float
+    entry_price:    float
+    entry_size:     float
+    entry_cash:     float
+    source:         str
+    status:         str
+    close_ts:       float | None
+    close_price:    float | None
+    close_cash:     float | None
+    redeem_value:   float | None
+    realised_pnl:   float | None
+    hold_minutes:   float | None
+    fee_estimate:   float | None
+    close_type:     str | None
+    close_source:   str | None
+    cur_price:      float | None
+    cash_pnl:       float | None
+    redeemable:     bool
 
 _DB_PATH: str = ""
 def init_db(db_path: str) -> None:
@@ -126,6 +158,42 @@ def init_db(db_path: str) -> None:
                 data        TEXT     NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_markets_updated_at ON markets (updated_at);
+
+            CREATE TABLE IF NOT EXISTS wallet_trades_meta (
+                wallet              TEXT NOT NULL PRIMARY KEY,
+                backfill_oldest_ts  REAL,
+                refresh_ok_until_ts REAL,
+                updated_at          DATETIME NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS wallet_trades (
+                id             INTEGER  PRIMARY KEY AUTOINCREMENT,
+                wallet         TEXT     NOT NULL,
+                condition_id   TEXT     NOT NULL,
+                asset          TEXT     NOT NULL,
+                side           TEXT     NOT NULL,
+                outcome        TEXT,
+                title          TEXT,
+                entry_ts       DATETIME NOT NULL,
+                entry_price    REAL     NOT NULL,
+                entry_size     REAL     NOT NULL,
+                entry_cash     REAL     NOT NULL,
+                source         TEXT     NOT NULL,
+                status         TEXT     NOT NULL,
+                close_ts       DATETIME,
+                close_price    REAL,
+                close_cash     REAL,
+                redeem_value   REAL,
+                realised_pnl   REAL,
+                hold_minutes   REAL,
+                fee_estimate   REAL,
+                close_type     TEXT,
+                close_source   TEXT,
+                UNIQUE(wallet, condition_id, asset, side, entry_ts)
+            );
+            CREATE INDEX IF NOT EXISTS idx_wt_wallet_entry_ts   ON wallet_trades (wallet, entry_ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_wt_wallet_status_ts  ON wallet_trades (wallet, status, entry_ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_wt_wallet_close_ts   ON wallet_trades (wallet, close_ts DESC);
         """)
         _migrate_ts_columns(cx)
         # Add removed column to existing DBs that predate it
@@ -262,6 +330,42 @@ def _migrate_add_columns(cx: sqlite3.Connection) -> None:
                 ELSE 0
             END
         """)
+
+    meta_cols = {row[1] for row in cx.execute("PRAGMA table_info(wallet_trades_meta)").fetchall()}
+    if "refresh_ok_until_ts" not in meta_cols:
+        cx.execute("ALTER TABLE wallet_trades_meta ADD COLUMN refresh_ok_until_ts REAL")
+        # Migrate: wallets that had backfill_done=1 get refresh_ok_until_ts = updated_at epoch
+        # so they don't re-backfill, but a server gap will force a re-sweep on next poll
+        if "backfill_done" in meta_cols:
+            cx.execute("""
+                UPDATE wallet_trades_meta
+                SET refresh_ok_until_ts = CAST(strftime('%s', updated_at) AS REAL)
+                WHERE backfill_done = 1
+            """)
+
+    wt_cols = {row[1] for row in cx.execute("PRAGMA table_info(wallet_trades)").fetchall()}
+    if "slug" not in wt_cols:
+        cx.execute("ALTER TABLE wallet_trades ADD COLUMN slug TEXT NOT NULL DEFAULT ''")
+    if "event_slug" not in wt_cols:
+        cx.execute("ALTER TABLE wallet_trades ADD COLUMN event_slug TEXT NOT NULL DEFAULT ''")
+    if "cur_price" not in wt_cols:
+        cx.execute("ALTER TABLE wallet_trades ADD COLUMN cur_price REAL")
+    if "cash_pnl" not in wt_cols:
+        cx.execute("ALTER TABLE wallet_trades ADD COLUMN cash_pnl REAL")
+    if "redeemable" not in wt_cols:
+        cx.execute("ALTER TABLE wallet_trades ADD COLUMN redeemable INTEGER")
+
+    meta_cols2 = {row[1] for row in cx.execute("PRAGMA table_info(wallet_trades_meta)").fetchall()}
+    if "pos_ts" not in meta_cols2:
+        cx.execute("ALTER TABLE wallet_trades_meta ADD COLUMN pos_ts REAL")
+    if "pos_n" not in meta_cols2:
+        cx.execute("ALTER TABLE wallet_trades_meta ADD COLUMN pos_n INTEGER")
+    if "pos_init" not in meta_cols2:
+        cx.execute("ALTER TABLE wallet_trades_meta ADD COLUMN pos_init REAL")
+    if "pos_cur" not in meta_cols2:
+        cx.execute("ALTER TABLE wallet_trades_meta ADD COLUMN pos_cur REAL")
+    if "pos_cash_pnl" not in meta_cols2:
+        cx.execute("ALTER TABLE wallet_trades_meta ADD COLUMN pos_cash_pnl REAL")
 
     existing = {row[1] for row in cx.execute("PRAGMA table_info(trade_history)").fetchall()}
     if "asset" not in existing:
@@ -534,8 +638,8 @@ def upsert_wallet_profile(addr: str, wallet: "Wallet") -> None:
         )
 
 
-def load_watchable_wallets(limit: int) -> dict[str, dict | None]:
-    """Return status>=WATCH(1) addresses up to limit, ordered by score DESC.
+def load_watchable_wallets() -> dict[str, dict | None]:
+    """Return all status>=WATCH(1) addresses, ordered by score DESC.
     Value is a raw dict if profile_json exists, else None. Caller uses Wallet.from_db() to hydrate.
     """
     if not _DB_PATH:
@@ -547,9 +651,7 @@ def load_watchable_wallets(limit: int) -> dict[str, dict | None]:
             FROM watchlist
             WHERE status >= 1
             ORDER BY COALESCE(json_extract(profile_json, '$.score'), 0) DESC
-            LIMIT ?
             """,
-            (limit,),
         ).fetchall()
     result: dict[str, dict | None] = {}
     for addr, blob in rows:
@@ -1101,3 +1203,358 @@ def load_latest_rejects(limit: int = 200) -> list[str]:
             "SELECT reason FROM rejects ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
     return [r[0] for r in reversed(rows)]
+
+
+# ── wallet_trades ─────────────────────────────────────────────────────────────
+
+def upsert_wallet_trades(wallet: str, trades: "list[RawTrade]") -> int:
+    if not _DB_PATH or not trades:
+        return 0
+    rows = [
+        (
+            wallet.lower(),
+            t.condition_id,
+            t.asset,
+            t.side,
+            t.outcome,
+            t.title,
+            t.slug,
+            t.event_slug,
+            _ts_to_dt(t.timestamp),
+            t.price,
+            t.size,
+            t.cash,
+            t.source,
+            "OPEN",
+        )
+        for t in trades
+    ]
+    with _connect() as cx:
+        cur = cx.executemany(
+            """
+            INSERT OR IGNORE INTO wallet_trades
+                (wallet, condition_id, asset, side, outcome, title, slug, event_slug,
+                 entry_ts, entry_price, entry_size, entry_cash, source, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        return cur.rowcount
+
+
+def get_wallet_last_trade_ts(wallet: str) -> float | None:
+    if not _DB_PATH:
+        return None
+    with _connect() as cx:
+        row = cx.execute(
+            "SELECT entry_ts FROM wallet_trades WHERE wallet=? ORDER BY entry_ts DESC LIMIT 1",
+            (wallet.lower(),),
+        ).fetchone()
+    if row is None:
+        return None
+    return _dt_to_ts(row[0])
+
+
+def get_wallet_fetch_state(wallet: str) -> tuple[float | None, float | None]:
+    """Return (backfill_oldest_ts, refresh_ok_until_ts).
+    backfill_oldest_ts:  oldest entry_ts stored so far (None = never started).
+    refresh_ok_until_ts: unix ts of last successful full refresh (None = never done).
+                         If now - refresh_ok_until_ts is large the server was down and
+                         the next poll must do a full paginated sweep to cover the gap.
+    """
+    if not _DB_PATH:
+        return None, None
+    with _connect() as cx:
+        row = cx.execute(
+            "SELECT backfill_oldest_ts, refresh_ok_until_ts FROM wallet_trades_meta WHERE wallet=?",
+            (wallet.lower(),),
+        ).fetchone()
+    if row is None:
+        return None, None
+    return row[0], row[1]
+
+
+def update_wallet_fetch_state(
+    wallet: str,
+    oldest_ts: float | None,
+    refresh_ok_until_ts: float | None,
+) -> None:
+    if not _DB_PATH:
+        return
+    now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    with _connect() as cx:
+        cx.execute(
+            """
+            INSERT INTO wallet_trades_meta (wallet, backfill_oldest_ts, refresh_ok_until_ts, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(wallet) DO UPDATE SET
+                backfill_oldest_ts  = COALESCE(excluded.backfill_oldest_ts, backfill_oldest_ts),
+                refresh_ok_until_ts = COALESCE(excluded.refresh_ok_until_ts, refresh_ok_until_ts),
+                updated_at          = excluded.updated_at
+            """,
+            (wallet.lower(), oldest_ts, refresh_ok_until_ts, now),
+        )
+
+
+def get_wallet_last_activity_ts(wallet: str) -> float | None:
+    if not _DB_PATH:
+        return None
+    with _connect() as cx:
+        row = cx.execute(
+            "SELECT close_ts FROM wallet_trades WHERE wallet=? AND close_ts IS NOT NULL ORDER BY close_ts DESC LIMIT 1",
+            (wallet.lower(),),
+        ).fetchone()
+    if row is None:
+        return None
+    return _dt_to_ts(row[0])
+
+
+def get_wallet_trade_count(wallet: str) -> int:
+    if not _DB_PATH:
+        return 0
+    with _connect() as cx:
+        row = cx.execute(
+            "SELECT COUNT(*) FROM wallet_trades WHERE wallet=?",
+            (wallet.lower(),),
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def get_wallet_resolved_trade_count(wallet: str) -> int:
+    if not _DB_PATH:
+        return 0
+    with _connect() as cx:
+        row = cx.execute(
+            "SELECT COUNT(*) FROM wallet_trades WHERE wallet=? AND status IN ('REDEEMED','SOLD')",
+            (wallet.lower(),),
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+@dataclass
+class RealisedPoint:
+    close_ts:     float
+    realised_pnl: float
+
+
+
+
+def get_wallet_realised_pnl(wallet: str) -> float:
+    if not _DB_PATH:
+        return 0.0
+    with _connect() as cx:
+        row = cx.execute(
+            "SELECT COALESCE(SUM(realised_pnl), 0.0) FROM wallet_trades WHERE wallet=? AND realised_pnl IS NOT NULL",
+            (wallet.lower(),),
+        ).fetchone()
+    return float(row[0]) if row else 0.0
+
+
+def apply_wallet_trade_closures(wallet: str, closures: "list[TradeClosure]") -> int:
+    if not _DB_PATH or not closures:
+        return 0
+    updated = 0
+    missed = 0
+    with _connect() as cx:
+        for c in closures:
+            close_dt = _ts_to_dt(c.close_ts)
+            hold_minutes: float | None = None
+            row = cx.execute(
+                """
+                SELECT id, entry_ts FROM wallet_trades
+                WHERE wallet=? AND condition_id=? AND asset=? AND status='OPEN'
+                ORDER BY entry_ts ASC LIMIT 1
+                """,
+                (wallet.lower(), c.condition_id, c.asset),
+            ).fetchone()
+            if row is None:
+                if c.asset:
+                    missed += 1
+                    if missed <= 3:
+                        sample = cx.execute(
+                            "SELECT condition_id, asset, side FROM wallet_trades WHERE wallet=? LIMIT 3",
+                            (wallet.lower(),),
+                        ).fetchall()
+                        try:
+                            import titan_state as _S
+                            _S._log(
+                                f"apply_wallet_trade_closures: no match for cid={c.condition_id!r} asset={c.asset!r} | "
+                                f"db sample: {sample}",
+                                "DATA",
+                            )
+                        except Exception:
+                            pass
+                    continue
+                # asset empty on REDEEM rows — fall back to condition_id only match
+                row = cx.execute(
+                    """
+                    SELECT id, entry_ts FROM wallet_trades
+                    WHERE wallet=? AND condition_id=? AND status='OPEN'
+                    ORDER BY entry_ts ASC LIMIT 1
+                    """,
+                    (wallet.lower(), c.condition_id),
+                ).fetchone()
+                if row is None:
+                    continue
+            trade_id, entry_ts_str = row
+            try:
+                entry_ts = _dt_to_ts(entry_ts_str)
+                hold_minutes = (c.close_ts - entry_ts) / 60.0
+            except Exception:
+                pass
+            cur = cx.execute(
+                """
+                UPDATE wallet_trades SET
+                    status       = ?,
+                    close_ts     = ?,
+                    close_price  = ?,
+                    close_cash   = ?,
+                    redeem_value = ?,
+                    realised_pnl = ?,
+                    hold_minutes = ?,
+                    close_type   = ?,
+                    close_source = 'activity'
+                WHERE id = ?
+                """,
+                (
+                    "REDEEMED" if c.close_type == "REDEEM" else "SOLD",
+                    close_dt,
+                    c.close_price,
+                    c.close_cash,
+                    c.close_cash if c.close_type == "REDEEM" else None,
+                    c.realised_pnl,
+                    hold_minutes,
+                    c.close_type,
+                    trade_id,
+                ),
+            )
+            updated += cur.rowcount
+    return updated
+
+
+def update_wallet_positions(wallet: str, pos_data: list) -> None:
+    """
+    Persist a synthetic position snapshot from the /positions API response.
+    - Stores aggregate metrics (n, init, cur, cash_pnl) + timestamp in wallet_trades_meta.
+    - Updates cur_price, cash_pnl, redeemable on OPEN wallet_trades rows that match.
+    """
+    if not _DB_PATH or not isinstance(pos_data, list):
+        return
+    now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    now_ts = datetime.now(tz=timezone.utc).timestamp()
+
+    pos_n       = len(pos_data)
+    pos_init    = sum(float(p.get("initialValue") or 0) for p in pos_data)
+    pos_cur     = sum(float(p.get("currentValue") or 0) for p in pos_data)
+    pos_cash_pnl = sum(float(p.get("cashPnl") or 0) for p in pos_data)
+
+    with _connect() as cx:
+        cx.execute(
+            """
+            INSERT INTO wallet_trades_meta (wallet, pos_ts, pos_n, pos_init, pos_cur, pos_cash_pnl, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(wallet) DO UPDATE SET
+                pos_ts       = excluded.pos_ts,
+                pos_n        = excluded.pos_n,
+                pos_init     = excluded.pos_init,
+                pos_cur      = excluded.pos_cur,
+                pos_cash_pnl = excluded.pos_cash_pnl,
+                updated_at   = excluded.updated_at
+            """,
+            (wallet.lower(), now_ts, pos_n, pos_init, pos_cur, pos_cash_pnl, now),
+        )
+        for p in pos_data:
+            cid  = str(p.get("conditionId") or "")
+            asset = str(p.get("asset") or "")
+            if not cid and not asset:
+                continue
+            cur_price  = p.get("curPrice")
+            cash_pnl   = p.get("cashPnl")
+            redeemable = 1 if p.get("redeemable") else 0
+            cx.execute(
+                """
+                UPDATE wallet_trades
+                SET cur_price = ?, cash_pnl = ?, redeemable = ?
+                WHERE wallet = ? AND condition_id = ? AND asset = ? AND status = 'OPEN'
+                """,
+                (cur_price, cash_pnl, redeemable, wallet.lower(), cid, asset),
+            )
+
+
+def get_wallet_synthetic_position(wallet: str) -> "tuple[float, int, float, float, float] | None":
+    """
+    Return (pos_ts, pos_n, pos_init, pos_cur, pos_cash_pnl) from the last stored snapshot.
+    Returns None if no snapshot exists yet.
+    """
+    if not _DB_PATH:
+        return None
+    with _connect() as cx:
+        row = cx.execute(
+            "SELECT pos_ts, pos_n, pos_init, pos_cur, pos_cash_pnl FROM wallet_trades_meta WHERE wallet=?",
+            (wallet.lower(),),
+        ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return (float(row[0]), int(row[1] or 0), float(row[2] or 0), float(row[3] or 0), float(row[4] or 0))
+
+
+def load_wallet_trade_rows(wallet: str) -> "list[WalletTradeRow]":
+    if not _DB_PATH:
+        return []
+    with _connect() as cx:
+        rows = cx.execute(
+            """
+            SELECT id, wallet, condition_id, asset, side,
+                   COALESCE(outcome, ''), COALESCE(title, ''),
+                   COALESCE(slug, ''), COALESCE(event_slug, ''),
+                   entry_ts, entry_price, entry_size, entry_cash,
+                   source, status,
+                   close_ts, close_price, close_cash,
+                   redeem_value, realised_pnl, hold_minutes, fee_estimate,
+                   close_type, close_source,
+                   cur_price, cash_pnl, redeemable
+            FROM wallet_trades
+            WHERE wallet=?
+            ORDER BY entry_ts ASC
+            """,
+            (wallet.lower(),),
+        ).fetchall()
+    result: list[WalletTradeRow] = []
+    for r in rows:
+        (id_, wlt, cid, asset, side, outcome, title, slug, event_slug,
+         entry_ts_raw, entry_price, entry_size, entry_cash,
+         source, status,
+         close_ts_raw, close_price, close_cash,
+         redeem_value, realised_pnl, hold_minutes, fee_estimate,
+         close_type, close_source,
+         cur_price_, cash_pnl_, redeemable_) = r
+        result.append(WalletTradeRow(
+            id=int(id_),
+            wallet=str(wlt),
+            condition_id=str(cid),
+            asset=str(asset),
+            side=str(side),
+            outcome=str(outcome),
+            title=str(title),
+            slug=str(slug),
+            event_slug=str(event_slug),
+            entry_ts=_dt_to_ts(entry_ts_raw) if isinstance(entry_ts_raw, str) else float(entry_ts_raw or 0),
+            entry_price=float(entry_price or 0),
+            entry_size=float(entry_size or 0),
+            entry_cash=float(entry_cash or 0),
+            source=str(source),
+            status=str(status),
+            close_ts=_dt_to_ts(close_ts_raw) if isinstance(close_ts_raw, str) else (float(close_ts_raw) if close_ts_raw is not None else None),
+            close_price=float(close_price) if close_price is not None else None,
+            close_cash=float(close_cash) if close_cash is not None else None,
+            redeem_value=float(redeem_value) if redeem_value is not None else None,
+            realised_pnl=float(realised_pnl) if realised_pnl is not None else None,
+            hold_minutes=float(hold_minutes) if hold_minutes is not None else None,
+            fee_estimate=float(fee_estimate) if fee_estimate is not None else None,
+            close_type=str(close_type) if close_type is not None else None,
+            close_source=str(close_source) if close_source is not None else None,
+            cur_price=float(cur_price_) if cur_price_ is not None else None,
+            cash_pnl=float(cash_pnl_) if cash_pnl_ is not None else None,
+            redeemable=bool(redeemable_) if redeemable_ is not None else False,
+        ))
+    return result

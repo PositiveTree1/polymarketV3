@@ -74,6 +74,7 @@ class BaseChart(tk.Canvas):
         )
         self._history: list[HistoryPoint] = []
         self._markers: list[ChartMarker] = []
+        self._bar_mode: bool = False
         self._view_start: int = 0
         self._view_size: int = 0
         self._selector_index: int = 0
@@ -482,6 +483,29 @@ class BaseChart(tk.Canvas):
                 tags="chart",
             )
 
+    # ── bar-mode helpers ──────────────────────────────────────────────────────
+
+    def set_bar_mode(self, enabled: bool) -> None:
+        self._bar_mode = enabled
+        self._mark_dirty()
+
+    def _draw_series_bars(self, ctx: RenderContext, zero_value: float = 0.0) -> None:
+        """Draw vertical bars from zero_value. Green above, red below."""
+        n = len(ctx.visible)
+        if n == 0:
+            return
+        bar_w = max(2, ctx.plot_width / max(n * 1.4, 1))
+        y_zero = ctx.y_from_value(zero_value)
+        for ts, value in zip(ctx.timestamps, ctx.values):
+            x = ctx.x_from_ts(ts)
+            y = ctx.y_from_value(value)
+            color = "#00cc44" if value >= zero_value else "#cc3333"
+            self.create_rectangle(
+                x - bar_w / 2, min(y, y_zero),
+                x + bar_w / 2, max(y, y_zero),
+                fill=color, outline="", tags="chart",
+            )
+
     def _draw_series(self, ctx: RenderContext) -> None:
         raise NotImplementedError
 
@@ -759,4 +783,88 @@ class PnLChart(BaseChart):
         )
 
 
-__all__ = ["BaseChart", "PositionChart", "PnLChart", "ChartMarker", "init_chart_fonts"]
+class WalletPnLChart(BaseChart):
+    """Per-trade realised PnL chart for a selected wallet. Supports bar and line modes."""
+    PAD_L, PAD_R, PAD_T, PAD_B = 70, 20, 24, 40
+
+    def __init__(self, parent: tk.Misc, **kwargs: Any) -> None:
+        super().__init__(parent, bg="#06060f", hl="#1a1a30", **kwargs)
+        self._bar_mode = True
+        self._wallet_name: str = ""
+        self._cumulated: bool = False
+
+    def load(self, points: list[tuple[float, float]], wallet_name: str, cumulated: bool) -> None:
+        """points: list of (close_ts, realised_pnl) sorted by ts."""
+        self._wallet_name = wallet_name
+        self._cumulated   = cumulated
+        if not points:
+            self._history = []
+            self._mark_dirty()
+            return
+        if cumulated:
+            acc = 0.0
+            history: list[HistoryPoint] = []
+            for ts, pnl in points:
+                acc += pnl
+                history.append((ts, acc))
+        else:
+            history = [(ts, pnl) for ts, pnl in points]
+        new_len  = len(history)
+        new_last = history[-1][1] if history else 0.0
+        track_latest = self._selector_index >= max(self._last_len - 1, 0)
+        changed = new_len != self._last_len or new_last != self._last_val or wallet_name != self._wallet_name
+        self._apply_loaded_history(
+            history=history,
+            new_len=new_len,
+            new_last=new_last,
+            reset_view=changed,
+            track_latest=track_latest,
+        )
+        self._schedule_redraw()
+
+    def _compute_y_bounds(self, values: list[float]) -> tuple[float, float]:
+        low, high = min(values), max(values)
+        spread = max(abs(high), abs(low), 1.0)
+        pad = spread * 0.12
+        low_b  = min(low  - pad, 0.0)
+        high_b = max(high + pad, 0.0)
+        return low_b, high_b
+
+    def _guide_label(self, value: float) -> str:
+        return f"${value:+,.0f}"
+
+    def _crosshair_label(self, ts: float, value: float) -> str:
+        label = "Cumul" if self._cumulated else "PnL"
+        return f"{time.strftime('%m/%d', time.localtime(ts))}  {label}: ${value:+,.2f}"
+
+    def _crosshair_color(self, value: float) -> str:
+        return "#00ff55" if value >= 0 else "#ff5555"
+
+    def _baseline_text(self) -> str | None:
+        return "$0"
+
+    def _baseline_line_color(self) -> str:
+        return "#334455"
+
+    def _draw_series(self, ctx: RenderContext) -> None:
+        if self._bar_mode:
+            self._draw_series_bars(ctx, zero_value=0.0)
+        else:
+            for i in range(1, len(ctx.values)):
+                self.create_line(
+                    ctx.x_from_ts(ctx.timestamps[i - 1]), ctx.y_from_value(ctx.values[i - 1]),
+                    ctx.x_from_ts(ctx.timestamps[i]),     ctx.y_from_value(ctx.values[i]),
+                    fill="#00ff55" if ctx.values[i] >= 0 else "#ff5555",
+                    width=2, tags="chart",
+                )
+
+    def _draw_header(self, ctx: RenderContext) -> None:
+        label = "cumulated PnL" if self._cumulated else "per-trade PnL"
+        self.create_text(
+            ctx.pad_left, ctx.pad_top,
+            text=f"{self._wallet_name}  —  {label}  ({len(ctx.visible)} trades)",
+            fill="#aaaacc", anchor="w", font=_mono_sm, tags="chart",
+        )
+
+
+__all__ = ["BaseChart", "PositionChart", "PnLChart", "WalletPnLChart", "ChartMarker", "init_chart_fonts"]

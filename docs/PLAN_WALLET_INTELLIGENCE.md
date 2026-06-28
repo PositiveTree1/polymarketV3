@@ -170,7 +170,7 @@ The implementation must be split into steps that can be stopped between commits 
 
 **Legend:** `[ ] TODO` · `[~] IN PROGRESS` · `[x] DONE`
 
-### Step 1 - Add config constants only `[ ] TODO`
+### Step 1 - Add config constants only `[x] DONE`
 
 Files:
 
@@ -194,7 +194,7 @@ Acceptance checks:
 - existing wallet scoring still calls `fetch_real_winrate`
 - no selector behaviour changes
 
-### Step 2 - Add typed models without wiring them `[ ] TODO`
+### Step 2 - Add typed models without wiring them `[x] DONE`
 
 File:
 
@@ -240,7 +240,9 @@ Acceptance checks:
 - no runtime path uses these models yet
 - app behaviour unchanged
 
-### Step 3 - Add `wallet_trades` table and DB helpers `[ ] TODO`
+> Also added `winrate_trades_loaded` and `winrate_redeems_loaded` to `WinRateData` TypedDict — counts of activity rows fetched by `fetch_real_winrate` for the win-rate calculation.
+
+### Step 3 - Add `wallet_trades` table and DB helpers `[x] DONE`
 
 File:
 
@@ -262,7 +264,7 @@ Acceptance checks:
 - app starts with old scoring
 - DB helper smoke test can insert and update a small in-memory or temp DB sample
 
-### Step 4 - Add endpoint paginators, not scoring `[ ] TODO`
+### Step 4 - Add endpoint paginators, not scoring `[x] DONE`
 
 File:
 
@@ -287,7 +289,7 @@ Acceptance checks:
 - no production scoring path uses the new paginators yet
 - app still starts and scores exactly as before
 
-### Step 5 - Wire persistence after wallet classification `[ ] TODO`
+### Step 5 - Wire persistence after wallet classification `[x] DONE` *(updated)*
 
 File:
 
@@ -313,14 +315,16 @@ Important:
 - do not use stored metrics for selector decisions yet
 - if persistence fails, log it and keep the current wallet result
 - do not demote a wallet because persistence failed
+- once a wallet has any stored rows (`last_trade_ts IS NOT NULL`), keep accumulating even if it drops to WATCH — continuity is preserved for when it returns to VER/ELITE
 
 Acceptance checks:
 
 - app still starts
 - verified/elite wallet refresh writes rows
+- a wallet that drops from VER to WATCH continues accumulating if it already has stored rows
 - existing `Wallet` fields remain populated by `fetch_real_winrate`
 
-### Step 6 - Build metric computation from stored rows `[ ] TODO`
+### Step 6 - Build metric computation from stored rows `[x] DONE`
 
 Files:
 
@@ -351,13 +355,18 @@ Acceptance checks:
 - function is deterministic and does not call APIs
 - app still uses legacy selector inputs
 
-### Step 7 - Add new `Wallet` fields as read-only diagnostics `[ ] TODO`
+### Step 7 - Add new `Wallet` fields as read-only diagnostics `[x] DONE`
 
 File:
 
 - `ScriptsTitan/titan_wallet.py`
 
-Add fields to `Wallet`, `to_wire`, `to_db_dict`, and `from_db`:
+Already added to `Wallet`, `to_wire`, `to_db_dict`, `from_db`, and `make_stub`:
+
+- `winrate_trades_loaded` — count of `/activity TRADE BUY` rows fetched for win-rate calculation
+- `winrate_redeems_loaded` — count of `/activity REDEEM` rows fetched for win-rate calculation
+
+Still to add (requires Step 6 first):
 
 - `stored_trade_count`
 - `stored_last_trade_ts`
