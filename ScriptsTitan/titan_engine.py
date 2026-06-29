@@ -160,10 +160,10 @@ def analyse(trades: list, is_hft_loop: bool = False) -> None:
 
             cached = S.env().wallet_cache.get(w)
             if cached:
-                if not p.recent_pnl_30d and cached.recent_pnl_30d:
-                    p.recent_pnl_30d = cached.recent_pnl_30d
-                if not p.recent_pnl_7d and cached.recent_pnl_7d:
-                    p.recent_pnl_7d = cached.recent_pnl_7d
+                if not p.trd_pnl_30d and cached.trd_pnl_30d:
+                    p.trd_pnl_30d = cached.trd_pnl_30d
+                if not p.trd_pnl_7d and cached.trd_pnl_7d:
+                    p.trd_pnl_7d = cached.trd_pnl_7d
                 if not p.recent_ts and cached.recent_ts:
                     p.recent_ts = cached.recent_ts
 
@@ -544,7 +544,7 @@ def get_system_snapshot() -> str:
     )
     for w, p in elites[:15]:
         hft = "⚡" if p.hft else ""
-        rf_tag = f" RF30d:${p.recent_pnl_30d:+.0f}" if p.recent_pnl_30d is not None else ""
+        rf_tag = f" trd30d:${p.trd_pnl_30d:+.0f}" if p.trd_pnl_30d is not None else ""
         lines.append(
             f"  {hft}{p.name or (w[:10]+'…'):<22} "
             f"Score:{p.score:.2f}  WR:{p.win_rate*100:.0f}%  "

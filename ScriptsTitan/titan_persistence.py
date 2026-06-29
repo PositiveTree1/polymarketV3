@@ -75,15 +75,18 @@ def load_state() -> None:
     pruned = DB.purge_non_watchable(keep_seed=set(_SEEDS))
     if pruned:
         S._log(f"🗑 Pruned {pruned} non-watchable wallet stubs from DB", "INFO")
+    S.env().hft_wallet_addrs = DB.load_hft_wallets()
     _load_wallets_from_db()
     n_w   = len(S.env().wallet_cache)
     cache = S.env().wallet_cache
     n_elite    = sum(1 for p in cache.values() if p.is_elite)
     n_verified = sum(1 for p in cache.values() if p.is_verified)
     n_watch    = sum(1 for p in cache.values() if p.is_watchable)
+    n_hft = len(S.env().hft_wallet_addrs)
     S.log_important(
         f"  DB:      {len(S.market_cache)} markets | "
-        f"{n_w} wallets loaded  ({n_elite} elite / {n_verified} verified / {n_watch} watch)"
+        f"{n_w} wallets loaded  ({n_elite} elite / {n_verified} verified / {n_watch} watch) | "
+        f"{n_hft} known HFT wallets"
     )
     ri = _load_trading_state()
     S.log_important(
@@ -407,7 +410,6 @@ def _refresh_elite_ver_wallets() -> None:
                 f"  {i}/{total}{tier_change} {name} "
                 f"trades={trade_count_text} range={first_trade_text}->{last_trade_text}"
             )
-            time.sleep(0.5)
         except Exception as e:
             import traceback
             S._log(f"Refresh failed for {addr[:14]}...: {e}\n{traceback.format_exc()}", "WARN")

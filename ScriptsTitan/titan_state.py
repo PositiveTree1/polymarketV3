@@ -104,6 +104,7 @@ class WalletEnv:
         self.position_wallet_map:  dict[str, set[str]]                   = {}
         self.signal_first_seen_by_asset: dict[str, float]               = {}
         self.equity_history:      list[tuple[float, float]]             = []
+        self.hft_wallet_addrs:    set[str]                              = set()
 
 # The one wallet
 _wallet = WalletEnv()

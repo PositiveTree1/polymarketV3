@@ -166,6 +166,11 @@ def init_db(db_path: str) -> None:
                 updated_at          DATETIME NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS hft_wallets (
+                address     TEXT NOT NULL PRIMARY KEY,
+                added_at    DATETIME NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS wallet_trades (
                 id             INTEGER  PRIMARY KEY AUTOINCREMENT,
                 wallet         TEXT     NOT NULL,
@@ -710,6 +715,25 @@ def set_watchable(addr: str, flag: bool) -> None:
             "INSERT INTO watchlist (address, added_at, watchable, status) VALUES (?, ?, ?, ?) ON CONFLICT(address) DO UPDATE SET watchable=excluded.watchable, status=excluded.status",
             (addr.lower(), now, status_val, status_val),
         )
+
+
+def mark_hft_wallet(addr: str) -> None:
+    if not _DB_PATH:
+        return
+    now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    with _connect() as cx:
+        cx.execute(
+            "INSERT OR IGNORE INTO hft_wallets (address, added_at) VALUES (?, ?)",
+            (addr.lower(), now),
+        )
+
+
+def load_hft_wallets() -> set[str]:
+    if not _DB_PATH:
+        return set()
+    with _connect() as cx:
+        rows = cx.execute("SELECT address FROM hft_wallets").fetchall()
+    return {str(r[0]) for r in rows}
 
 
 # ── signals ──────────────────────────────────────────────────────────────────

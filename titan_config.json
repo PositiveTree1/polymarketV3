@@ -686,7 +686,7 @@
                 "elite_min_wilson": 0.58,
                 "elite_alpha_per_trade": 10.0,
                 "elite_min_score": 0.9,
-                "elite_min_profit_factor": 1.2,
+                "elite_min_profit_factor": 1.3,
                 "elite_min_trimmed_roi": 0.02,
                 "elite_min_confidence": 0.5,
                 "weight_wilson": 0.3,
@@ -696,10 +696,10 @@
                 "weight_open_positions": 0.1,
                 "weight_alpha": 0.1,
                 "hft_enabled": false,
-                "hft_tph_threshold": 50.0,
+                "hft_tph_threshold": 10.0,
                 "sports_bot_tph_threshold": 100.0,
                 "elite_max_top5_pnl_share": 0.8,
-                "elite_min_winning_positions": 20
+                "elite_min_winning_positions": 50
             }
         }
     },

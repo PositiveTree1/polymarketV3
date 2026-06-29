@@ -506,7 +506,7 @@ class RecentFormBuilder(SignalBuilderBase):
                 continue
 
             avg_recent_wr = 0.55
-            rf_pnl_vals = [wallets.get(w, _EMPTY_W).recent_pnl_30d or 0 for w in rf_qualified]
+            rf_pnl_vals = [wallets.get(w, _EMPTY_W).trd_pnl_30d or 0 for w in rf_qualified]
             if rf_pnl_vals:
                 avg_pnl = sum(rf_pnl_vals) / len(rf_pnl_vals)
                 avg_recent_wr = max(0.50, min(0.75, 0.55 + avg_pnl / 10000))

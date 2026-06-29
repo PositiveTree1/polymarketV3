@@ -114,9 +114,12 @@ class Wallet:
     sports_bot:         bool
     dead:               bool
 
-    # ── recent form ───────────────────────────────────────────────────────────
-    recent_pnl_30d:     float | None
-    recent_pnl_7d:      float | None
+    # ── trade PnL windows ────────────────────────────────────────────────────
+    trd_pnl_7d:         float | None
+    trd_pnl_30d:        float | None
+    trd_pnl_6m:         float | None
+    trd_pnl_1y:         float | None
+    trd_pnl_total:      float | None
     recent_ts:          float
 
     # ── leaderboard ───────────────────────────────────────────────────────────
@@ -192,9 +195,9 @@ class Wallet:
                                   max_tph: float = 20) -> bool:
         if self.trades_per_hour > max_tph:
             return False
-        if self.recent_pnl_30d is None or self.recent_pnl_7d is None:
+        if self.trd_pnl_30d is None or self.trd_pnl_7d is None:
             return False
-        return self.recent_pnl_30d >= min_pnl_30d and self.recent_pnl_7d >= min_pnl_7d
+        return self.trd_pnl_30d >= min_pnl_30d and self.trd_pnl_7d >= min_pnl_7d
 
     @property
     def is_active(self) -> bool:
@@ -241,7 +244,7 @@ class Wallet:
         est_tag    = "~" if avg_profit_estimated else ""
         hft_tag    = " ⚡HFT" if hft else ""
         sports_tag = " 🏈SPORTS" if sports_bot else ""
-        rf_tag     = f" RF30d:${self.recent_pnl_30d:+.0f}" if self.recent_pnl_30d is not None else ""
+        rf_tag     = f" trd30d:${self.trd_pnl_30d:+.0f}" if self.trd_pnl_30d is not None else ""
         return _replace(
             self,
             score=round(score, 5),
@@ -322,8 +325,11 @@ class Wallet:
             "vip":                  self.vip,
             "sports_bot":           self.sports_bot,
             "dead":                 self.dead,
-            "recent_pnl_30d":       self.recent_pnl_30d,
-            "recent_pnl_7d":        self.recent_pnl_7d,
+            "trd_pnl_7d":           self.trd_pnl_7d,
+            "trd_pnl_30d":          self.trd_pnl_30d,
+            "trd_pnl_6m":           self.trd_pnl_6m,
+            "trd_pnl_1y":           self.trd_pnl_1y,
+            "trd_pnl_total":        self.trd_pnl_total,
             "recent_ts":            self.recent_ts,
             "lb_rank":              self.lb_rank,
             "lb_vol":               self.lb_vol,
@@ -386,8 +392,11 @@ class Wallet:
             vip=bool(d.get("vip") or False),
             sports_bot=bool(d.get("sports_bot") or False),
             dead=bool(d.get("dead") or False),
-            recent_pnl_30d=d.get("recent_pnl_30d"),
-            recent_pnl_7d=d.get("recent_pnl_7d"),
+            trd_pnl_7d=d.get("trd_pnl_7d") if d.get("trd_pnl_7d") is not None else d.get("recent_pnl_7d"),
+            trd_pnl_30d=d.get("trd_pnl_30d") if d.get("trd_pnl_30d") is not None else d.get("recent_pnl_30d"),
+            trd_pnl_6m=d.get("trd_pnl_6m"),
+            trd_pnl_1y=d.get("trd_pnl_1y"),
+            trd_pnl_total=d.get("trd_pnl_total"),
             recent_ts=float(d.get("recent_ts") or 0.0),
             lb_rank=d.get("lb_rank"),
             lb_vol=d.get("lb_vol"),
@@ -445,8 +454,11 @@ class Wallet:
             vip=is_vip,
             sports_bot=False,
             dead=False,
-            recent_pnl_30d=None,
-            recent_pnl_7d=None,
+            trd_pnl_7d=None,
+            trd_pnl_30d=None,
+            trd_pnl_6m=None,
+            trd_pnl_1y=None,
+            trd_pnl_total=None,
             recent_ts=0.0,
             lb_rank=None,
             lb_vol=None,
@@ -499,8 +511,11 @@ class WinRateData(TypedDict):
     avg_profit:         float
     avg_bet:            float
     trades_per_hour:    float
-    recent_pnl_30d:     float | None
-    recent_pnl_7d:      float | None
+    trd_pnl_7d:         float | None
+    trd_pnl_30d:        float | None
+    trd_pnl_6m:         float | None
+    trd_pnl_1y:         float | None
+    trd_pnl_total:      float | None
     winrate_trades_loaded:  int
     winrate_redeems_loaded: int
     pnl_series:             "list[DB.RealisedPoint]"
@@ -1213,20 +1228,21 @@ def _compute_winrate_from_rows(
     # PnL only over closed positions — open buy costs must not be subtracted
     loaded_trade_pnl     = total_redeem_value - resolved_entry_cash
 
-    recent_pnl_30d: float | None = None
-    recent_pnl_7d:  float | None = None
-    if first_loaded_trade_ts is not None and first_loaded_trade_ts <= days_30:
-        red_30d = [r for r in redeemed_rows if (r.close_ts or 0) >= days_30]
-        recent_pnl_30d = (
-            sum(r.redeem_value or r.close_cash or 0.0 for r in red_30d) -
-            sum(r.entry_cash for r in red_30d)
-        )
-    if first_loaded_trade_ts is not None and first_loaded_trade_ts <= days_7:
-        red_7d = [r for r in redeemed_rows if (r.close_ts or 0) >= days_7]
-        recent_pnl_7d = (
-            sum(r.redeem_value or r.close_cash or 0.0 for r in red_7d) -
-            sum(r.entry_cash for r in red_7d)
-        )
+    days_6m  = now_t - 182 * 86400
+    days_1y  = now_t - 365 * 86400
+
+    def _window_pnl(cutoff: float) -> float | None:
+        if first_loaded_trade_ts is None or first_loaded_trade_ts > cutoff:
+            return None
+        subset = [r for r in redeemed_rows if (r.close_ts or 0) >= cutoff]
+        return (sum(r.redeem_value or r.close_cash or 0.0 for r in subset) -
+                sum(r.entry_cash for r in subset))
+
+    trd_pnl_7d    = _window_pnl(days_7)
+    trd_pnl_30d   = _window_pnl(days_30)
+    trd_pnl_6m    = _window_pnl(days_6m)
+    trd_pnl_1y    = _window_pnl(days_1y)
+    trd_pnl_total = loaded_trade_pnl
 
     redeem_keys: set[tuple[str, str]] = {(r.condition_id, r.asset) for r in redeemed_rows}
     n_redeems = len(redeemed_rows)
@@ -1336,8 +1352,11 @@ def _compute_winrate_from_rows(
             "source": src,
             "avg_profit": avg_profit, "avg_bet": round(avg_bet, 2),
             "trades_per_hour": round(trades_per_hour, 2),
-            "recent_pnl_30d": round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
-            "recent_pnl_7d":  round(recent_pnl_7d,  2) if recent_pnl_7d  is not None else None,
+            "trd_pnl_7d":    round(trd_pnl_7d,    2) if trd_pnl_7d    is not None else None,
+            "trd_pnl_30d":   round(trd_pnl_30d,   2) if trd_pnl_30d   is not None else None,
+            "trd_pnl_6m":    round(trd_pnl_6m,    2) if trd_pnl_6m    is not None else None,
+            "trd_pnl_1y":    round(trd_pnl_1y,    2) if trd_pnl_1y    is not None else None,
+            "trd_pnl_total": round(trd_pnl_total,  2) if trd_pnl_total is not None else None,
             "winrate_trades_loaded":  loaded_trade_count,
             "winrate_redeems_loaded": n_redeems,
             "pnl_series": series,
@@ -1417,6 +1436,18 @@ def get_compute_and_store_wallet(
     wallet   = wallet.lower()
     now_t    = time.time()
     is_vip   = wallet in {addr.lower() for addr in C.VIP_WALLETS}
+
+    # Fast-path: known HFT wallet and HFT is disabled — skip all API calls.
+    if not is_vip and not C.HFT_ENABLED and wallet in S.env().hft_wallet_addrs:
+        cached = S.env().wallet_cache.get(wallet)
+        if cached is not None:
+            return cached
+        stub = Wallet.make_stub(wallet, "hft_rejected", status=WalletTier.REJECTED)
+        stub.ts  = now_t
+        stub.hft = True
+        S.env().wallet_cache[wallet] = stub
+        return stub
+
     vip_name = C.VIP_WALLET_NAMES.get(wallet, "")
     cached        = S.env().wallet_cache.get(wallet)
     cached_origin = cached  # preserved for _log_wallet_change throughout all stages
@@ -1541,8 +1572,9 @@ def get_compute_and_store_wallet(
         avg_profit=wr_data["avg_profit"], avg_bet=wr_data["avg_bet"],
         trades_per_hour=round(wr_data["trades_per_hour"], 2),
         status=WalletTier.WATCH, hft=False, vip=is_vip, sports_bot=False, dead=False,
-        recent_pnl_30d=wr_data["recent_pnl_30d"],
-        recent_pnl_7d=wr_data["recent_pnl_7d"],
+        trd_pnl_7d=wr_data["trd_pnl_7d"], trd_pnl_30d=wr_data["trd_pnl_30d"],
+        trd_pnl_6m=wr_data["trd_pnl_6m"], trd_pnl_1y=wr_data["trd_pnl_1y"],
+        trd_pnl_total=wr_data["trd_pnl_total"],
         recent_ts=now_t, lb_rank=lb_rank, lb_vol=lb_vol, detail="", fail_reasons=[],
         pnl_series=wr_data["pnl_series"],
         pos_top5_pnl_share=wr_data["pos_top5_pnl_share"],
@@ -1556,6 +1588,9 @@ def get_compute_and_store_wallet(
                    "hft", "loaded_trade_count", "ts")
     ) if cached_origin is not None else True
     S.env().wallet_cache[wallet] = result
+    if result.hft and wallet not in S.env().hft_wallet_addrs:
+        S.env().hft_wallet_addrs.add(wallet)
+        DB.mark_hft_wallet(wallet)
     if result.is_active and _changed:
         DB.upsert_wallet_profile(wallet, result)
     elif not result.is_active and cached.is_active:
@@ -1633,8 +1668,9 @@ def get_compute_and_store_wallet(
         avg_pos_size=avg_sz, avg_profit=wr_data["avg_profit"], avg_bet=wr_data["avg_bet"],
         trades_per_hour=round(wr_data["trades_per_hour"], 2),
         status=WalletTier.REJECTED, hft=False, vip=is_vip, sports_bot=False, dead=False,
-        recent_pnl_30d=round(wr_data["recent_pnl_30d"], 2) if wr_data["recent_pnl_30d"] is not None else None,
-        recent_pnl_7d=round(wr_data["recent_pnl_7d"], 2) if wr_data["recent_pnl_7d"] is not None else None,
+        trd_pnl_7d=wr_data["trd_pnl_7d"], trd_pnl_30d=wr_data["trd_pnl_30d"],
+        trd_pnl_6m=wr_data["trd_pnl_6m"], trd_pnl_1y=wr_data["trd_pnl_1y"],
+        trd_pnl_total=wr_data["trd_pnl_total"],
         recent_ts=now_t, lb_rank=lb_rank, lb_vol=lb_vol, detail="", fail_reasons=[],
         pnl_series=wr_data["pnl_series"],
         pos_top5_pnl_share=wr_data["pos_top5_pnl_share"],
@@ -1691,12 +1727,15 @@ def get_compute_and_store_wallet(
     _changed = cached is None or any(
         getattr(result, k) != getattr(cached, k)
         for k in ("status", "score", "win_rate", "wilson_lb",
-                  "total_pnl", "name", "hft", "vip", "sports_bot", "dead", "recent_pnl_30d", "recent_pnl_7d",
+                  "total_pnl", "name", "hft", "vip", "sports_bot", "dead", "trd_pnl_7d", "trd_pnl_30d",
                   "loaded_trade_count", "trade_load_limited", "first_loaded_trade_ts", "last_loaded_trade_ts", "ts",
                   "stored_trade_count", "stored_resolved_count", "stored_realised_pnl",
                   "quality_confidence", "data_quality", "trimmed_roi", "profit_factor", "mtm_roi")
     )
     S.env().wallet_cache[wallet] = result
+    if result.hft and wallet not in S.env().hft_wallet_addrs:
+        S.env().hft_wallet_addrs.add(wallet)
+        DB.mark_hft_wallet(wallet)
     if result.is_active and _changed:
         DB.upsert_wallet_profile(wallet, result)
     elif not result.is_active and cached is not None and cached.is_active:
@@ -1771,15 +1810,25 @@ class WalletsCacheSrv(WalletsCache):
             _reclassify_in_progress.clear()
 
     def _reclassify_all_inner(self, _C) -> int:
+        from dataclasses import replace as _replace
+        from titan_selector import PerformanceSelector as _PS
         sel = _C.get_active_selector()
         updated = 0
         for addr, w in list(self._data.items()):
             result = w.reclassify(sel)
+            if result.is_elite and isinstance(sel, _PS) and result.trd_top5_pnl_share is not None:
+                deep_ok, deep_reasons = sel.is_elite_deep_ok(result)
+                if not deep_ok:
+                    result = _replace(result, status=WalletTier.VERIFIED,
+                                      fail_reasons=result.fail_reasons + [f"DEEP_GATE: {', '.join(deep_reasons)}"])
             if w.tier() != result.tier() or w.hft != result.hft:
                 updated += 1
                 _log_wallet_change(w, result, result.fail_reasons, w.name, addr)
 
             self._data[addr] = result
+            if result.hft and addr not in S.env().hft_wallet_addrs:
+                S.env().hft_wallet_addrs.add(addr)
+                DB.mark_hft_wallet(addr)
             if result.is_active:
                 DB.upsert_wallet_profile(addr, result)
             elif not result.is_active and w.is_active:
@@ -1800,8 +1849,11 @@ class WalletsCacheSrv(WalletsCache):
                 continue
             try:
                 wr_data = load_and_refresh_wallet_trades(profile)
-                profile.recent_pnl_30d = wr_data["recent_pnl_30d"]
-                profile.recent_pnl_7d  = wr_data["recent_pnl_7d"]
+                profile.trd_pnl_7d    = wr_data["trd_pnl_7d"]
+                profile.trd_pnl_30d   = wr_data["trd_pnl_30d"]
+                profile.trd_pnl_6m    = wr_data["trd_pnl_6m"]
+                profile.trd_pnl_1y    = wr_data["trd_pnl_1y"]
+                profile.trd_pnl_total = wr_data["trd_pnl_total"]
                 profile.recent_ts      = now_t
                 self._data[addr] = profile
                 DB.upsert_wallet_profile(addr, profile)

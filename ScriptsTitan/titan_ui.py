@@ -1014,7 +1014,7 @@ def run_ui(api: TitanBackend) -> None:
         whale_name = whale.name
         win.title(f"Whale Detail — {whale_name[:50]}")
         win.configure(bg="#060615")
-        win.geometry("760x672")
+        win.geometry("760x806")
         win.resizable(True, True)
 
         mono10 = font.Font(family="Courier", size=10)
@@ -1086,8 +1086,11 @@ def run_ui(api: TitanBackend) -> None:
             ("Avg Bet",     f"${whale.avg_bet:,.0f}",                                           "#ffaa44"),
             ("Avg Profit",  f"${avg_profit:+.1f}", "#00ff88" if avg_profit >= 0 else "#ff5555"),
             ("Alpha/Trade", f"${alpha_pt:+.1f}",   "#00ff88" if alpha_pt >= 0 else "#ff5555"),
-            ("30d PnL",     f"${whale.recent_pnl_30d:+,.0f}" if whale.recent_pnl_30d is not None else "N/A", "#88ccff"),
-            ("7d PnL",      f"${whale.recent_pnl_7d:+,.0f}"  if whale.recent_pnl_7d  is not None else "N/A", "#88ccff"),
+            ("trd 7d",   f"${whale.trd_pnl_7d:+,.0f}"    if whale.trd_pnl_7d    is not None else "N/A", "#88ccff"),
+            ("trd 30d",  f"${whale.trd_pnl_30d:+,.0f}"   if whale.trd_pnl_30d   is not None else "N/A", "#88ccff"),
+            ("trd 6m",   f"${whale.trd_pnl_6m:+,.0f}"    if whale.trd_pnl_6m    is not None else "N/A", "#88ccff"),
+            ("trd 1y",   f"${whale.trd_pnl_1y:+,.0f}"    if whale.trd_pnl_1y    is not None else "N/A", "#88ccff"),
+            ("trd total",f"${whale.trd_pnl_total:+,.0f}"  if whale.trd_pnl_total is not None else "N/A", "#88ccff"),
             ("First Trade",
              datetime.fromtimestamp(whale.first_loaded_trade_ts).strftime("%Y-%m-%d %H:%M") if whale.first_loaded_trade_ts else "N/A",
              "#aaaacc"),
@@ -2563,10 +2566,10 @@ def run_ui(api: TitanBackend) -> None:
              "Wallets with trades-per-hour above this are excluded from Recent Form qualification. "
              "Default 20 — above this the wallet is effectively HFT and its directional signals are noise. Passed directly to is_recent_form_qualified()."),
             ("min_pnl_30d",             "Min PnL 30d ($)",               "float",
-             "Wallet must have recent_pnl_30d >= this to qualify. Default 0 = break-even or better over 30 days. "
+             "Wallet must have trd_pnl_30d >= this to qualify. Default 0 = break-even or better over 30 days. "
              "Raise to require wallets currently on a profitable streak."),
             ("min_pnl_7d",              "Min PnL 7d ($)",                "float",
-             "Wallet must have recent_pnl_7d >= this. Default -50 allows a small recent drawdown. "
+             "Wallet must have trd_pnl_7d >= this. Default -50 allows a small recent drawdown. "
              "Set to 0 or above to require the wallet to be profitable right now, not just over the month."),
             ("max_signal_age_h",        "Max signal age (h)",            "float",
              "Trade older than this (hours) is rejected. Default 0.75h (45 min) — slightly looser than Consensus Basket "
@@ -4415,7 +4418,7 @@ def run_ui(api: TitanBackend) -> None:
                 wallets_typed = _build_wallet_cache(raw_wallets)
             else:
                 wallets_typed = {}
-            on_cycle_complete_cb(p["signals"], wallets_typed, p["rejects"], p["trades"], p.get("pnl"))
+            on_cycle_complete_cb(_require_signal_rows(p["signals"]), wallets_typed, p["rejects"], p["trades"], p.get("pnl"))
         api.subscribe("titan/cycle_complete",  _on_cycle_complete)
         api.subscribe("titan/config_updated",  on_config_updated_cb)
         root.after(1000, ui_refresh)
