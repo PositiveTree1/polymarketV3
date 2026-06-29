@@ -2144,6 +2144,11 @@ def run_ui(api: TitanBackend) -> None:
             " | BUY when wallet buys, SELL when wallet sells | connecting..."
         )
 
+    _timing_fields: dict[str, tk.StringVar] = {
+        "CYCLE_SECONDS":              tk.StringVar(),
+        "DISCOVERY_INTERVAL_CYCLES":  tk.StringVar(),
+    }
+
     def _sel_load():
         """Read wallet_selector section from config JSON and populate widgets."""
         try:
@@ -2161,6 +2166,12 @@ def run_ui(api: TitanBackend) -> None:
                     var.set(", ".join(str(v) for v in val))
                 else:
                     var.set("" if val == "" else str(val))
+            _timing_fields["CYCLE_SECONDS"].set(
+                str((_raw.get("trade_sourcing", {}).get("CYCLE_SECONDS") or {}).get("value", ""))
+            )
+            _timing_fields["DISCOVERY_INTERVAL_CYCLES"].set(
+                str((_raw.get("discovery", {}).get("DISCOVERY_INTERVAL_CYCLES") or {}).get("value", ""))
+            )
             _refresh_hft_status_ui()
             _sel_status_var.set(f"  Loaded · active: {active}")
         except Exception as e:
@@ -2207,6 +2218,20 @@ def run_ui(api: TitanBackend) -> None:
                         target[key] = float(raw_val)
                     except ValueError:
                         target[key] = raw_val
+            _cs_raw = _timing_fields["CYCLE_SECONDS"].get().strip()
+            if _cs_raw:
+                if "trade_sourcing" not in _raw:
+                    _raw["trade_sourcing"] = {"_group": "Trade Sourcing"}
+                if not isinstance(_raw["trade_sourcing"].get("CYCLE_SECONDS"), dict):
+                    _raw["trade_sourcing"]["CYCLE_SECONDS"] = {}
+                _raw["trade_sourcing"]["CYCLE_SECONDS"]["value"] = int(_cs_raw)
+            _dic_raw = _timing_fields["DISCOVERY_INTERVAL_CYCLES"].get().strip()
+            if _dic_raw:
+                if "discovery" not in _raw:
+                    _raw["discovery"] = {"_group": "Wallet Discovery"}
+                if not isinstance(_raw["discovery"].get("DISCOVERY_INTERVAL_CYCLES"), dict):
+                    _raw["discovery"]["DISCOVERY_INTERVAL_CYCLES"] = {}
+                _raw["discovery"]["DISCOVERY_INTERVAL_CYCLES"]["value"] = int(_dic_raw)
             with open(cfg_path, "w", encoding="utf-8") as _f:
                 _j.dump(_raw, _f, indent=4)
             _tc.reload()
@@ -2277,6 +2302,13 @@ def run_ui(api: TitanBackend) -> None:
 
     _PARAM_META: list[tuple[str, str, str, str]] = [
         # (field_key, label, section_header_or_"", description)
+        ("",                          "",                                "── Timing ──",          ""),
+        ("CYCLE_SECONDS",             "Cycle seconds",                  "",
+         "How many seconds the main engine sleeps between cycles. "
+         "15s = 4 cycles/min. Lower = faster reaction but more API load."),
+        ("DISCOVERY_INTERVAL_CYCLES", "Discovery every N cycles",       "",
+         "Wallet discovery runs once every N main-loop cycles. "
+         "At 15s/cycle, N=20 means discovery fires every 5 minutes."),
         ("",                          "",                                "── Bot filters ──",     ""),
         ("hft_enabled",               "HFT wallets enabled",            "",
          "Master switch for HFT wallet classification and the HFT fast loop. "
@@ -2435,6 +2467,7 @@ def run_ui(api: TitanBackend) -> None:
     ]
 
     _sel_fields: dict[str, tk.StringVar] = {}
+    _TIMING_KEYS = {"CYCLE_SECONDS", "DISCOVERY_INTERVAL_CYCLES"}
     row_idx = 0
     for field_key, label, section, desc in _PARAM_META:
         if section:
@@ -2443,8 +2476,11 @@ def run_ui(api: TitanBackend) -> None:
                 row=row_idx, column=0, columnspan=3, sticky="w")
             row_idx += 1
             continue
-        var = tk.StringVar()
-        _sel_fields[field_key] = var
+        if field_key in _TIMING_KEYS:
+            var = _timing_fields[field_key]
+        else:
+            var = tk.StringVar()
+            _sel_fields[field_key] = var
         if field_key == "hft_enabled":
             var.trace_add("write", lambda *_args: _refresh_hft_status_ui())
         tk.Label(sel_inner, text=label, fg="#aaaacc", bg="#080810",
