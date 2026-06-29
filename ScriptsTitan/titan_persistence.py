@@ -393,14 +393,14 @@ def _refresh_elite_ver_wallets() -> None:
         tier_before = p.tier()
         name = p.name or addr[:14] + "..."
         try:
-            from dataclasses import replace as _replace
-            S.env().wallet_cache[addr] = _replace(p, ts=0.0)
-            refreshed = get_compute_and_store_wallet(addr)
+            refreshed = get_compute_and_store_wallet(addr, force_refresh=True)
             if refreshed.is_active:
                 DB.upsert_wallet_profile(addr, refreshed)
             tier_after = refreshed.tier()
             tier_change = f" {tier_before}=>{tier_after}" if tier_before != tier_after else f" {tier_after}"
-            trade_count_text = f"{refreshed.loaded_trade_count}{'*' if refreshed.trade_load_limited else ''}"
+            added = refreshed.loaded_trade_count - (p.loaded_trade_count or 0)
+            added_text = f"+{added}" if added > 0 else "="
+            trade_count_text = f"{refreshed.loaded_trade_count}{'*' if refreshed.trade_load_limited else ''}({added_text})"
             first_trade_text = _fmt_date(refreshed.first_loaded_trade_ts)
             last_trade_text  = _fmt_date(refreshed.last_loaded_trade_ts)
             _startup(

@@ -68,7 +68,9 @@ def _rescore_watchlist():
     stale = [
         w for w in S.get_watchlist()
         if w not in must
-        and (now_t - (p3.ts if (p3 := S.env().wallet_cache.get(w)) is not None else 0)) >= WALLET_TTL
+        and (p3 := S.env().wallet_cache.get(w)) is not None
+        and p3.is_ranked
+        and (now_t - p3.ts) >= WALLET_TTL
     ]
     to_score = list(must) + stale
     if not to_score:

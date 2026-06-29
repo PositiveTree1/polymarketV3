@@ -253,13 +253,16 @@ class PerformanceSelector(WalletSelector):
         )
 
     def score(self, wallet: "Wallet") -> float:
+        import titan_config as _C
         p = self.p
+        use_pos = _C.USE_POSITIONS_API
+        w_wilson    = p.weight_wilson + (0 if use_pos else p.weight_pnl_pct + p.weight_portfolio + p.weight_open_positions)
         return (
-            p.weight_wilson         * wallet.wilson_lb +
-            p.weight_pnl_pct        * min(1.0, max(0.0, wallet.pnl_pct / 30)) +
-            p.weight_portfolio      * min(1.0, wallet.total_value / 25_000) +
+            w_wilson                * wallet.wilson_lb +
+            (p.weight_pnl_pct        * min(1.0, max(0.0, wallet.pnl_pct / 30))   if use_pos else 0.0) +
+            (p.weight_portfolio      * min(1.0, wallet.total_value / 25_000)       if use_pos else 0.0) +
             p.weight_trade_count    * min(1.0, wallet.n_resolved / 20) +
-            p.weight_open_positions * min(1.0, wallet.n_pos / 10) +
+            (p.weight_open_positions * min(1.0, wallet.n_pos / 10)                 if use_pos else 0.0) +
             p.weight_alpha          * min(1.0, max(0.0, wallet.avg_profit) / 50)
         )
 

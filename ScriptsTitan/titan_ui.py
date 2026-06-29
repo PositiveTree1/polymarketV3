@@ -2147,6 +2147,7 @@ def run_ui(api: TitanBackend) -> None:
     _timing_fields: dict[str, tk.StringVar] = {
         "CYCLE_SECONDS":              tk.StringVar(),
         "DISCOVERY_INTERVAL_CYCLES":  tk.StringVar(),
+        "USE_POSITIONS_API":          tk.StringVar(),
     }
 
     def _sel_load():
@@ -2172,6 +2173,9 @@ def run_ui(api: TitanBackend) -> None:
             _timing_fields["DISCOVERY_INTERVAL_CYCLES"].set(
                 str((_raw.get("discovery", {}).get("DISCOVERY_INTERVAL_CYCLES") or {}).get("value", ""))
             )
+            _upa_entry = _raw.get("trade_sourcing", {}).get("USE_POSITIONS_API")
+            _upa_val = _upa_entry.get("value", True) if isinstance(_upa_entry, dict) else True
+            _timing_fields["USE_POSITIONS_API"].set(str(_upa_val))
             _refresh_hft_status_ui()
             _sel_status_var.set(f"  Loaded · active: {active}")
         except Exception as e:
@@ -2212,7 +2216,7 @@ def run_ui(api: TitanBackend) -> None:
                 elif key in _bool_keys:
                     target[key] = raw_val.lower() in {"1", "true", "yes", "on"}
                 elif key in _int_keys:
-                    target[key] = int(raw_val)
+                    target[key] = int(float(raw_val))
                 else:
                     try:
                         target[key] = float(raw_val)
@@ -2232,10 +2236,18 @@ def run_ui(api: TitanBackend) -> None:
                 if not isinstance(_raw["discovery"].get("DISCOVERY_INTERVAL_CYCLES"), dict):
                     _raw["discovery"]["DISCOVERY_INTERVAL_CYCLES"] = {}
                 _raw["discovery"]["DISCOVERY_INTERVAL_CYCLES"]["value"] = int(_dic_raw)
+            _upa_raw = _timing_fields["USE_POSITIONS_API"].get().strip()
+            if _upa_raw:
+                if "trade_sourcing" not in _raw:
+                    _raw["trade_sourcing"] = {"_group": "Trade Sourcing"}
+                if not isinstance(_raw["trade_sourcing"].get("USE_POSITIONS_API"), dict):
+                    _raw["trade_sourcing"]["USE_POSITIONS_API"] = {}
+                _raw["trade_sourcing"]["USE_POSITIONS_API"]["value"] = _upa_raw.lower() in {"1", "true", "yes", "on"}
             with open(cfg_path, "w", encoding="utf-8") as _f:
                 _j.dump(_raw, _f, indent=4)
             _tc.reload()
             _refresh_hft_status_ui()
+            _load_config_into_editor()
             _sel_status_var.set(f"  ⏳ Reclassifying wallets…")
             log("🎯 Wallet selector config saved — reclassifying…", "INFO")
             def _reclassify():
@@ -2248,7 +2260,9 @@ def run_ui(api: TitanBackend) -> None:
             import threading as _th
             _th.Thread(target=_reclassify, daemon=True).start()
         except Exception as e:
-            _sel_status_var.set(f"  ❌ Save failed: {e}")
+            msg = f"Selector save failed: {e}"
+            _sel_status_var.set(f"  ❌ {msg}")
+            log(msg, "ERR")
 
     # ── toolbar ───────────────────────────────────────────────────────────────
     sel_toolbar = tk.Frame(tab_selector, bg="#0d0d1a", pady=6)
@@ -2309,6 +2323,11 @@ def run_ui(api: TitanBackend) -> None:
         ("DISCOVERY_INTERVAL_CYCLES", "Discovery every N cycles",       "",
          "Wallet discovery runs once every N main-loop cycles. "
          "At 15s/cycle, N=20 means discovery fires every 5 minutes."),
+        ("USE_POSITIONS_API",         "Use positions API",              "",
+         "When false, skip the /positions API call entirely. Only closed trades (REDEEMED/SOLD) count. "
+         "n_pos=0, total_value=0, pnl_pct=0, avg_pos_size=0. "
+         "Scoring weight normally given to portfolio/pnl_pct/open_positions is redistributed to wilson_lb. "
+         "Significantly speeds up wallet evaluation."),
         ("",                          "",                                "── Bot filters ──",     ""),
         ("hft_enabled",               "HFT wallets enabled",            "",
          "Master switch for HFT wallet classification and the HFT fast loop. "
@@ -2467,7 +2486,7 @@ def run_ui(api: TitanBackend) -> None:
     ]
 
     _sel_fields: dict[str, tk.StringVar] = {}
-    _TIMING_KEYS = {"CYCLE_SECONDS", "DISCOVERY_INTERVAL_CYCLES"}
+    _TIMING_KEYS = {"CYCLE_SECONDS", "DISCOVERY_INTERVAL_CYCLES", "USE_POSITIONS_API"}
     row_idx = 0
     for field_key, label, section, desc in _PARAM_META:
         if section:

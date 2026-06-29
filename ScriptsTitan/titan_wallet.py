@@ -270,12 +270,14 @@ class Wallet:
             sports_bot = sel.is_sports_bot(self.name, self.trades_per_hour) if isinstance(sel, PerformanceSelector) else False
         else:
             wb = self.wilson_lb
+            use_pos = C.USE_POSITIONS_API
+            w_wilson = 0.30 + (0 if use_pos else 0.25 + 0.15 + 0.10)
             score = (
-                0.30 * wb +
-                0.25 * min(1.0, max(0, self.pnl_pct / 30)) +
-                0.15 * min(1.0, self.total_value / 25_000) +
+                w_wilson * wb +
+                (0.25 * min(1.0, max(0, self.pnl_pct / 30))   if use_pos else 0.0) +
+                (0.15 * min(1.0, self.total_value / 25_000)    if use_pos else 0.0) +
                 0.10 * min(1.0, self.n_resolved / 20) +
-                0.10 * min(1.0, self.n_pos / 10) +
+                (0.10 * min(1.0, self.n_pos / 10)              if use_pos else 0.0) +
                 0.10 * min(1.0, max(0, self.avg_profit) / 50)
             )
             fail_reasons = []
@@ -1113,61 +1115,70 @@ def fetch_wallet_activity_closures_incremental(
 def load_and_refresh_wallet_trades(
     wallet_obj: "Wallet",
     positions_raw: list | None = None,
-    max_pages: int | None = None,
+    with_closures: bool = False,
 ) -> WinRateData:
     """
     Single entry point for trade data + win-rate computation.
 
-    1. Use wallet_obj.trade_rows if populated (already in memory).
-    2. Otherwise load from DB and cache into wallet_obj.trade_rows.
-    3. Determine how many new trades to fetch from API based on
-       refresh_ok_until_ts and trades_per_hour; fetch the minimum needed,
-       stop when the watermark (newest known ts) is hit.
-    4. Upsert new trades to DB, extend wallet_obj.trade_rows.
+    1. Load trade_rows from DB if not already in memory.
+    2. Calculate how many new trades to fetch: tph × gap_hours × 1.5, rounded up.
+       - If refresh_ok_until_ts is None (never fetched): full backfill mode.
+       - If gap < 15 min: skip API call entirely, use cached rows.
+       - Otherwise: one targeted page fetch in ~90% of cases.
+    3. Fetch new trades, upsert to DB, extend trade_rows in memory.
+    4. If with_closures=True: fetch new REDEEM activity since last known closure,
+       apply to trade rows so realised_pnl is up to date.
     5. Compute and return WinRateData from the full trade_rows.
-
-    max_pages: when set, caps the number of API pages fetched (shallow fetch for WATCH stage).
-               None = unlimited (full fetch for VERIFIED/ELITE stage).
     """
-    addr = wallet_obj.addr
-
-    # ── Step 1-2: ensure trade_rows is populated ──────────────────────────────
-    if not wallet_obj.trade_rows:
-        wallet_obj.trade_rows = DB.load_wallet_trade_rows(addr)
-
-    rows = wallet_obj.trade_rows
-
-    # ── Step 3: decide whether to hit the API ─────────────────────────────────
-    backfill_oldest_ts, refresh_ok_until_ts = DB.get_wallet_fetch_state(addr)
+    import math
+    addr   = wallet_obj.addr
     now_ts = time.time()
 
+    # ── Step 1: load rows from DB once ────────────────────────────────────────
+    if not wallet_obj.trade_rows:
+        wallet_obj.trade_rows = DB.load_wallet_trade_rows(addr)
+    rows = wallet_obj.trade_rows
+
+    # ── Step 2: decide page count ─────────────────────────────────────────────
+    backfill_oldest_ts, refresh_ok_until_ts = DB.get_wallet_fetch_state(addr)
     newest_known_ts: float | None = max((r.entry_ts for r in rows if r.entry_ts > 0), default=None)
 
     if refresh_ok_until_ts is None:
+        # First time ever — full backfill, no page cap
         page_size = C.TRADES_LIMIT
+        smart_max_pages = None
     else:
-        age_hours = (now_ts - refresh_ok_until_ts) / 3600.0
-        if age_hours < 0.25:
+        gap_hours = (now_ts - refresh_ok_until_ts) / 3600.0
+        if gap_hours < 0.25:
+            # Data is fresh — skip API call
             return _compute_winrate_from_rows(rows, positions_raw)
         tph = wallet_obj.trades_per_hour or 0.0
-        page_size = max(10, int(tph * age_hours * 2.5)) if tph > 0 else C.TRADES_LIMIT
-        page_size = min(page_size, C.TRADES_LIMIT)
+        if tph > 0:
+            needed = math.ceil(tph * gap_hours * 1.5)
+            page_size  = min(max(10, needed), C.TRADES_LIMIT)
+            smart_max_pages = math.ceil(needed / page_size)
+        else:
+            page_size = C.TRADES_LIMIT
+            smart_max_pages = 1
 
-    # ── Step 4: fetch new trades from API ─────────────────────────────────────
+    # ── Step 3: fetch new trades ──────────────────────────────────────────────
     new_trades, new_oldest_ts, new_refresh_ts = fetch_wallet_trades_incremental(
         addr, newest_known_ts, backfill_oldest_ts, refresh_ok_until_ts, page_size,
-        max_pages=max_pages,
+        max_pages=smart_max_pages,
     )
     if new_trades:
         DB.upsert_wallet_trades(addr, new_trades)
-        existing_keys = {(r.condition_id, r.asset, r.side, r.entry_ts) for r in rows}
-        fresh = [
-            r for r in DB.load_wallet_trade_rows(addr)
-            if (r.condition_id, r.asset, r.side, r.entry_ts) not in existing_keys
-        ]
-        wallet_obj.trade_rows = rows + fresh
+        wallet_obj.trade_rows = DB.load_wallet_trade_rows(addr)
     resolved_oldest = new_oldest_ts if new_oldest_ts is not None else backfill_oldest_ts
     DB.update_wallet_fetch_state(addr, resolved_oldest, new_refresh_ts)
+
+    # ── Step 4: fetch closures (REDEEM activity) if requested ─────────────────
+    if with_closures:
+        last_activity_ts = DB.get_wallet_last_activity_ts(addr)
+        closures = fetch_wallet_activity_closures_incremental(addr, last_activity_ts)
+        if closures:
+            DB.apply_wallet_trade_closures(addr, closures)
+            wallet_obj.trade_rows = DB.load_wallet_trade_rows(addr)
 
     return _compute_winrate_from_rows(wallet_obj.trade_rows, positions_raw)
 
@@ -1268,31 +1279,44 @@ def _compute_winrate_from_rows(
     avg_bet    = total_entry_cash / loaded_trade_count if loaded_trade_count > 0 else 0.0
     avg_profit = round((total_redeem_value - resolved_entry_cash - lost_entry_cash) / total, 2) if total > 0 else -1
 
-    series = sorted(
-        [DB.RealisedPoint(close_ts=r.close_ts, realised_pnl=(r.redeem_value or r.close_cash or 0.0) - r.entry_cash)
-         for r in redeemed_rows if r.close_ts and r.entry_cash > 0 and (r.redeem_value or r.close_cash)],
-        key=lambda p: p.close_ts,
-    )
+    # pnl_series: one point per closed trade row (REDEEMED/SOLD).
+    # Rows missing close value are treated as full loss (-entry_cash).
+    # Inferred lost open positions are appended at -entry_cash using entry_ts as close_ts.
+    # n_resolved = total closed points so it always matches len(pnl_series).
+    redeemed_series: list[DB.RealisedPoint] = []
+    for r in redeemed_rows:
+        close_ts = r.close_ts or r.entry_ts
+        pnl = (r.redeem_value or r.close_cash or 0.0) - r.entry_cash if r.entry_cash > 0 else 0.0
+        redeemed_series.append(DB.RealisedPoint(close_ts=close_ts, realised_pnl=pnl))
+    lost_series: list[DB.RealisedPoint] = [
+        DB.RealisedPoint(close_ts=r.entry_ts, realised_pnl=-r.entry_cash)
+        for r in open_rows
+        if (r.condition_id, r.asset) in lost_positions and r.entry_cash > 0
+    ]
+    series = sorted(redeemed_series + lost_series, key=lambda p: p.close_ts)
+    n_resolved_closed = len(series)
 
     pos_top5_pnl_share: float | None = None
     pos_median_roi: float | None = None
     if series:
         pos_market_pnl: dict[str, float] = {}
         for r in redeemed_rows:
-            if r.close_ts and r.entry_cash > 0 and (r.redeem_value or r.close_cash):
-                pnl = (r.redeem_value or r.close_cash or 0.0) - r.entry_cash
-                pos_market_pnl[r.condition_id] = pos_market_pnl.get(r.condition_id, 0.0) + pnl
+            pnl = (r.redeem_value or r.close_cash or 0.0) - r.entry_cash if r.entry_cash > 0 else 0.0
+            pos_market_pnl[r.condition_id] = pos_market_pnl.get(r.condition_id, 0.0) + pnl
+        for r in open_rows:
+            if (r.condition_id, r.asset) in lost_positions and r.entry_cash > 0:
+                pos_market_pnl[r.condition_id] = pos_market_pnl.get(r.condition_id, 0.0) - r.entry_cash
         total_pos_pnl = sum(pos_market_pnl.values())
         if total_pos_pnl != 0.0:
             top5_vals = sorted(pos_market_pnl.values(), reverse=True)[:5]
             pos_top5_pnl_share = round(sum(top5_vals) / abs(total_pos_pnl), 4)
-    # Median ROI across wins (from redeems) + inferred losses at -100%.
-    # Losses never generate a redeem so they must be added explicitly.
     pos_rois: list[float] = [
         ((r.redeem_value or r.close_cash or 0.0) - r.entry_cash) / r.entry_cash
-        for r in redeemed_rows
-        if r.entry_cash > 0 and (r.redeem_value or r.close_cash)
-    ] + [-1.0] * losses
+        for r in redeemed_rows if r.entry_cash > 0
+    ] + [
+        -1.0
+        for r in open_rows if (r.condition_id, r.asset) in lost_positions and r.entry_cash > 0
+    ]
     if pos_rois:
         s = sorted(pos_rois)
         mid = len(s) // 2
@@ -1302,7 +1326,7 @@ def _compute_winrate_from_rows(
         wr = w / t if t > 0 else 0.0
         wb = wilson_lower_bound(w, t)
         return {
-            "wins": w, "losses": l, "total": t,
+            "wins": w, "losses": l, "total": n_resolved_closed,
             "loaded_trade_count": loaded_trade_count,
             "trade_load_limited": False,
             "loaded_trade_pnl":   round(loaded_trade_pnl, 2),
@@ -1371,6 +1395,7 @@ def _log_wallet_change(before: Wallet | None, after: Wallet, fail_reasons: list[
 def get_compute_and_store_wallet(
     wallet: str,
     lb_row: "dict | None" = None,
+    force_refresh: bool = False,
 ) -> Wallet:
     """
     Classify and cache a wallet using a 3-stage cost model:
@@ -1381,12 +1406,11 @@ def get_compute_and_store_wallet(
         and defer deeper evaluation to the next cycle (stage 2).
 
     Stage 2 — WATCH→VERIFIED:
-        Positions call + shallow trade fetch (watch_shallow_max_pages pages).
+        Positions call + trade fetch (smart page count from tph × gap_hours).
         Uses the full VERIFIED gate: win_rate, wilson_lb, resolved bets, portfolio/PnL.
 
-    Stage 3 — VERIFIED→ELITE:
-        Full trade backfill + closure fetch + compute_wallet_quality_metrics.
-        Identical to original behavior.
+    Stage 3 — VERIFIED/ELITE: closure fetch + deep quality analysis.
+        Trade rows already loaded in stage 2; gap=0 so no extra API call.
     """
     from dataclasses import replace as _replace
 
@@ -1397,7 +1421,7 @@ def get_compute_and_store_wallet(
     cached        = S.env().wallet_cache.get(wallet)
     cached_origin = cached  # preserved for _log_wallet_change throughout all stages
 
-    if cached is not None and (now_t - cached.ts) < WALLET_TTL:
+    if not force_refresh and cached is not None and (now_t - cached.ts) < WALLET_TTL:
         return cached
 
     existing_name    = cached.name if cached is not None else ""
@@ -1461,41 +1485,45 @@ def get_compute_and_store_wallet(
     cached = stub
 
     # ══════════════════════════════════════════════════════════════════════════
-    # STAGE 2 — positions + shallow trade fetch → VERIFIED gate
+    # STAGE 2 — positions (optional) + shallow trade fetch → VERIFIED gate
     # ══════════════════════════════════════════════════════════════════════════
     if not keep_name:
         keep_name = resolve_wallet_display_name(wallet)
     final_name = existing_name if existing_is_real else (keep_name or wallet[:10] + "…")
 
-    _syn = DB.get_wallet_synthetic_position(wallet)
-    _pos_age   = now_t - _syn[0] if _syn else float("inf")
-    _pos_stale = _pos_age > WALLET_TTL / 2
+    if C.USE_POSITIONS_API:
+        _syn = DB.get_wallet_synthetic_position(wallet)
+        _pos_age   = now_t - _syn[0] if _syn else float("inf")
+        _pos_stale = _pos_age > WALLET_TTL / 2
 
-    if _pos_stale:
-        pos_data = S.safe_get(f"{C.DATA_API}/positions", {
-            "user": wallet, "limit": 500,
-            "sortBy": "CASHPNL", "sortDirection": "DESC",
-        })
-        if pos_data is None or not isinstance(pos_data, list):
-            cached.ts = now_t - WALLET_TTL + 60
-            S.env().wallet_cache[wallet] = cached
-            return cached
-        DB.update_wallet_positions(wallet, pos_data)
-        n_pos    = len(pos_data)
-        init     = sum(float(p.get("initialValue") or 0) for p in pos_data)
-        cur      = sum(float(p.get("currentValue") or 0) for p in pos_data)
+        if _pos_stale:
+            pos_data = S.safe_get(f"{C.DATA_API}/positions", {
+                "user": wallet, "limit": 500,
+                "sortBy": "CASHPNL", "sortDirection": "DESC",
+            })
+            if pos_data is None or not isinstance(pos_data, list):
+                cached.ts = now_t - WALLET_TTL + 60
+                S.env().wallet_cache[wallet] = cached
+                return cached
+            DB.update_wallet_positions(wallet, pos_data)
+            n_pos = len(pos_data)
+            init  = sum(float(p.get("initialValue") or 0) for p in pos_data)
+            cur   = sum(float(p.get("currentValue") or 0) for p in pos_data)
+        else:
+            pos_data = None
+            _, n_pos, init, cur, _ = _syn  # type: ignore[misc]
     else:
         pos_data = None
-        _, n_pos, init, cur, _ = _syn  # type: ignore[misc]
+        n_pos    = 0
+        init     = 0.0
+        cur      = 0.0
 
     total_pnl = lb_pnl if lb_pnl is not None else 0.0
     pct    = total_pnl / init * 100 if init > 0 else 0
     avg_sz = init / n_pos if n_pos > 0 else 0
 
-    from titan_selector import PerformanceSelector as _PS
-    shallow_pages = sel.p.watch_shallow_max_pages if isinstance(sel, _PS) else 1
     _trade_carrier = cached
-    wr_data = load_and_refresh_wallet_trades(_trade_carrier, pos_data, max_pages=shallow_pages)
+    wr_data = load_and_refresh_wallet_trades(_trade_carrier, pos_data)
 
     _draft = Wallet(
         addr=wallet, name=final_name, ts=now_t,
@@ -1544,75 +1572,71 @@ def get_compute_and_store_wallet(
         keep_name = resolve_wallet_display_name(wallet)
     final_name = existing_name if existing_is_real else (keep_name or wallet[:10] + "…")
 
-    _syn = DB.get_wallet_synthetic_position(wallet)
-    _pos_age   = now_t - _syn[0] if _syn else float("inf")
-    _pos_stale = _pos_age > WALLET_TTL / 2
+    if C.USE_POSITIONS_API:
+        _syn = DB.get_wallet_synthetic_position(wallet)
+        _pos_age   = now_t - _syn[0] if _syn else float("inf")
+        _pos_stale = _pos_age > WALLET_TTL / 2
 
-    if _pos_stale:
-        pos_data = S.safe_get(f"{C.DATA_API}/positions", {
-            "user": wallet, "limit": 500,
-            "sortBy": "CASHPNL", "sortDirection": "DESC",
-        })
-        if pos_data is None or not isinstance(pos_data, list):
-            if cached is not None:
-                cached.ts = now_t - WALLET_TTL + 60
-                S.env().wallet_cache[wallet] = cached
-                return cached
-            null = Wallet.make_stub(wallet, "No data", status=WalletTier.ERROR)
-            null.ts   = now_t
-            null.name = final_name
-            null.vip  = is_vip
-            null.fail_reasons = ["no_data"]
-            S.env().wallet_cache[wallet] = null
-            return null
-        DB.update_wallet_positions(wallet, pos_data)
-        n_pos = len(pos_data)
-        init  = sum(float(p.get("initialValue") or 0) for p in pos_data)
-        cur   = sum(float(p.get("currentValue") or 0) for p in pos_data)
+        if _pos_stale:
+            pos_data = S.safe_get(f"{C.DATA_API}/positions", {
+                "user": wallet, "limit": 500,
+                "sortBy": "CASHPNL", "sortDirection": "DESC",
+            })
+            if pos_data is None or not isinstance(pos_data, list):
+                if cached is not None:
+                    cached.ts = now_t - WALLET_TTL + 60
+                    S.env().wallet_cache[wallet] = cached
+                    return cached
+                null = Wallet.make_stub(wallet, "No data", status=WalletTier.ERROR)
+                null.ts   = now_t
+                null.name = final_name
+                null.vip  = is_vip
+                null.fail_reasons = ["no_data"]
+                S.env().wallet_cache[wallet] = null
+                return null
+            DB.update_wallet_positions(wallet, pos_data)
+            n_pos = len(pos_data)
+            init  = sum(float(p.get("initialValue") or 0) for p in pos_data)
+            cur   = sum(float(p.get("currentValue") or 0) for p in pos_data)
+        else:
+            pos_data = None
+            _, n_pos, init, cur, _ = _syn  # type: ignore[misc]
     else:
         pos_data = None
-        _, n_pos, init, cur, _ = _syn  # type: ignore[misc]
+        n_pos    = 0
+        init     = 0.0
+        cur      = 0.0
 
     total_pnl = lb_pnl if lb_pnl is not None else 0.0
     pct    = total_pnl / init * 100 if init > 0 else 0
     avg_sz = init / n_pos if n_pos > 0 else 0
 
     _trade_carrier = cached if cached is not None else Wallet.make_stub(wallet, "")
-    wr_data = load_and_refresh_wallet_trades(_trade_carrier, pos_data)
+    wr_data = load_and_refresh_wallet_trades(_trade_carrier, pos_data, with_closures=True)
 
-    wr                 = wr_data["win_rate"]
-    wb                 = wr_data["wilson_lb"]
-    n_res              = wr_data["total"]
-    wr_src             = wr_data["source"]
-    avg_profit         = wr_data["avg_profit"]
-    avg_bet            = wr_data["avg_bet"]
-    tph                = wr_data["trades_per_hour"]
-    loaded_trade_count = wr_data["loaded_trade_count"]
-    trade_load_limited = wr_data["trade_load_limited"]
-    loaded_trade_pnl   = wr_data["loaded_trade_pnl"]
-    first_loaded_trade_ts  = wr_data["first_loaded_trade_ts"]
-    last_loaded_trade_ts   = wr_data["last_loaded_trade_ts"]
-    recent_pnl_30d         = wr_data["recent_pnl_30d"]
-    recent_pnl_7d          = wr_data["recent_pnl_7d"]
-    winrate_trades_loaded  = wr_data["winrate_trades_loaded"]
-    winrate_redeems_loaded = wr_data["winrate_redeems_loaded"]
-    pnl_series             = wr_data["pnl_series"]
+    trade_rows     = _trade_carrier.trade_rows
+    total_stored   = len(trade_rows)
+    total_resolved = sum(1 for r in trade_rows if r.status in ("REDEEMED", "SOLD"))
 
     _draft = Wallet(
         addr=wallet, name=final_name, ts=now_t,
-        loaded_trade_count=loaded_trade_count, trade_load_limited=trade_load_limited,
-        loaded_trade_pnl=loaded_trade_pnl,
-        first_loaded_trade_ts=float(first_loaded_trade_ts) if first_loaded_trade_ts is not None else None,
-        last_loaded_trade_ts=float(last_loaded_trade_ts) if last_loaded_trade_ts is not None else None,
-        score=0.0, win_rate=wr, wilson_lb=wb, alpha_per_trade=0.0, wr_source=wr_src,
-        winrate_trades_loaded=winrate_trades_loaded, winrate_redeems_loaded=winrate_redeems_loaded,
-        n_resolved=n_res, n_pos=n_pos, total_value=cur, total_pnl=total_pnl, pnl_pct=pct,
-        avg_pos_size=avg_sz, avg_profit=avg_profit, avg_bet=avg_bet, trades_per_hour=round(tph, 2),
+        loaded_trade_count=wr_data["loaded_trade_count"],
+        trade_load_limited=wr_data["trade_load_limited"],
+        loaded_trade_pnl=wr_data["loaded_trade_pnl"],
+        first_loaded_trade_ts=float(wr_data["first_loaded_trade_ts"]) if wr_data["first_loaded_trade_ts"] is not None else None,
+        last_loaded_trade_ts=float(wr_data["last_loaded_trade_ts"]) if wr_data["last_loaded_trade_ts"] is not None else None,
+        score=0.0, win_rate=wr_data["win_rate"], wilson_lb=wr_data["wilson_lb"], alpha_per_trade=0.0,
+        wr_source=wr_data["source"],
+        winrate_trades_loaded=wr_data["winrate_trades_loaded"],
+        winrate_redeems_loaded=wr_data["winrate_redeems_loaded"],
+        n_resolved=wr_data["total"], n_pos=n_pos, total_value=cur, total_pnl=total_pnl, pnl_pct=pct,
+        avg_pos_size=avg_sz, avg_profit=wr_data["avg_profit"], avg_bet=wr_data["avg_bet"],
+        trades_per_hour=round(wr_data["trades_per_hour"], 2),
         status=WalletTier.REJECTED, hft=False, vip=is_vip, sports_bot=False, dead=False,
-        recent_pnl_30d=round(recent_pnl_30d, 2) if recent_pnl_30d is not None else None,
-        recent_pnl_7d=round(recent_pnl_7d, 2) if recent_pnl_7d is not None else None,
+        recent_pnl_30d=round(wr_data["recent_pnl_30d"], 2) if wr_data["recent_pnl_30d"] is not None else None,
+        recent_pnl_7d=round(wr_data["recent_pnl_7d"], 2) if wr_data["recent_pnl_7d"] is not None else None,
         recent_ts=now_t, lb_rank=lb_rank, lb_vol=lb_vol, detail="", fail_reasons=[],
-        pnl_series=pnl_series,
+        pnl_series=wr_data["pnl_series"],
         pos_top5_pnl_share=wr_data["pos_top5_pnl_share"],
         pos_median_roi=wr_data["pos_median_roi"],
     )
@@ -1620,19 +1644,8 @@ def get_compute_and_store_wallet(
 
     if result.is_ranked:
         try:
-            last_activity_ts = DB.get_wallet_last_activity_ts(wallet)
-            closures = fetch_wallet_activity_closures_incremental(wallet, last_activity_ts)
-            if closures:
-                DB.apply_wallet_trade_closures(wallet, closures)
-                _trade_carrier.trade_rows = DB.load_wallet_trade_rows(wallet)
-            if not _trade_carrier.trade_rows:
-                _trade_carrier.trade_rows = DB.load_wallet_trade_rows(wallet)
-
-            trade_rows     = _trade_carrier.trade_rows
-            total_stored   = len(trade_rows)
-            total_resolved = sum(1 for r in trade_rows if r.status in ("REDEEMED", "SOLD"))
-            qm             = compute_wallet_quality_metrics(trade_rows, trade_load_limited=result.trade_load_limited)
-            stored_pnl     = DB.get_wallet_realised_pnl(wallet)
+            qm         = compute_wallet_quality_metrics(trade_rows, trade_load_limited=result.trade_load_limited)
+            stored_pnl = DB.get_wallet_realised_pnl(wallet)
             last_trade_ts_stored = max((r.entry_ts for r in trade_rows if r.entry_ts > 0), default=None)
             result = _replace(
                 result,
@@ -1655,8 +1668,7 @@ def get_compute_and_store_wallet(
             _, refresh_ok_until_ts = DB.get_wallet_fetch_state(wallet)
             bf_tag = f"✓refresh@{time.strftime('%H:%M', time.localtime(refresh_ok_until_ts))}" if refresh_ok_until_ts else "⬇backfill"
             S._log(
-                f"wallet_trades {result.tag()} {result.name} "
-                f"{len(closures)} closures [{bf_tag}] | "
+                f"wallet_trades {result.tag()} {result.name} [{bf_tag}] | "
                 f"wr_input: {result.winrate_trades_loaded} trades + {result.winrate_redeems_loaded} redeems | "
                 f"db: {total_stored} total / {total_resolved} resolved",
                 "DATA",
@@ -1792,6 +1804,7 @@ class WalletsCacheSrv(WalletsCache):
                 profile.recent_pnl_7d  = wr_data["recent_pnl_7d"]
                 profile.recent_ts      = now_t
                 self._data[addr] = profile
+                DB.upsert_wallet_profile(addr, profile)
                 refreshed += 1
                 time.sleep(0.12)
             except Exception as e:

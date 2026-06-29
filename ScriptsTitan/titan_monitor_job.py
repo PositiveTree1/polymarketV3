@@ -81,12 +81,17 @@ def start_monitored_thread(
     daemon: bool = True,
     thread_name: str | None = None,
     log_label: str | None = None,
-) -> threading.Thread:
+) -> threading.Thread | None:
+    name = thread_name or job_name
+    for t in threading.enumerate():
+        if t.name == name and t.is_alive():
+            S._log(f"[{log_label or job_name}] still running, skipping new spawn", "DIAG")
+            return None
     wrapped_target = monitored_job(job_name, warn_after, log_label)(target)
     thread = threading.Thread(
         target=wrapped_target,
         daemon=daemon,
-        name=thread_name or job_name,
+        name=name,
     )
     thread.start()
     return thread

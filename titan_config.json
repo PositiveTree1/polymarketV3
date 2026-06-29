@@ -68,6 +68,10 @@
         "CYCLE_SECONDS": {
             "value": 15,
             "_description": "15s cycles. Fast enough to catch signals, not so fast we spam API."
+        },
+        "USE_POSITIONS_API": {
+            "value": false,
+            "_description": "When false, skip the /positions API call entirely. Only closed trades (REDEEMED/SOLD) count. n_pos=0, total_value=0, pnl_pct=0, avg_pos_size=0. Speeds up wallet evaluation significantly."
         }
     },
     "hft_polling": {
@@ -695,7 +699,7 @@
                 "hft_tph_threshold": 50.0,
                 "sports_bot_tph_threshold": 100.0,
                 "elite_max_top5_pnl_share": 0.8,
-                "elite_min_winning_positions": 20.0
+                "elite_min_winning_positions": 20
             }
         }
     },
